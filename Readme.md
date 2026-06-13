@@ -37,7 +37,7 @@ The project is split into a lightweight, headless background recorder daemon and
 Ensure your Haiku system feature layers include the required development libraries:
 - libcurl_devel nlohmann_json
 
-To buil.
+To build.
 ```
 make release
 ```
