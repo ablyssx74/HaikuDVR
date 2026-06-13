@@ -37,6 +37,7 @@ The project is split into a lightweight, headless background recorder daemon and
 Ensure your Haiku system feature layers include the required development libraries:
 - libcurl_devel nlohmann_json
 
+A reboot is required for the backend service worker to register with the Haiku Launcher Roster.
 To build.
 ```
 make release
