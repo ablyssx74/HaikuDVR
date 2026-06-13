@@ -1,0 +1,12 @@
+service x-vnd.HaikuOS-DVRService {
+    launch /boot/system/bin/HaikuDVRService
+    no_options
+}
+
+job x-vnd.HaikuOS-DVRService-init {
+    name HaikuDVR Background Recording Server
+    requirement env B_USER_CONFIG_DIRECTORY
+    launch /boot/system/bin/HaikuDVRService    
+    on boot    
+    no_options
+}
