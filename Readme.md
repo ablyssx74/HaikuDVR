@@ -1,7 +1,9 @@
 
 # HaikuDVR
 
-HaikuDVR is a native GUI digital video recorder application and background scheduling service designed explicitly for Haiku and optimized for HDHomeRun Network Tuners. 
+HaikuDVR is a native GUI digital video recorder application and background scheduling service designed explicitly for Haiku.
+
+⚠️ **Hardware Requirement:** This software strictly requires an active **SiliconDust HDHomeRun Network Tuner** connected to your local network to scan channels and record video streams.
 
 The project is split into a lightweight, headless background recorder daemon and an intuitive graphical desktop frontend packed with advanced diagnostic instrumentation.
 
@@ -13,6 +15,8 @@ The project is split into a lightweight, headless background recorder daemon and
 * **Proactive Storage Protection** – An automated background disk monitor queries Haiku Storage Kit partition volumes every 5 seconds, flashing high-visibility warnings if storage space drops below 5GB.
 * **Decoupled Lifecycle Architecture** – Cleanly separates process ownership using `setsid()`. Hitting the Restart Backend toggle recycles the background daemon instantly while letting you close or manage the GUI client completely independently without interrupting active streams.
 * **Adaptive Theme Contrast** – Utilizes YIQ brightness calculations and native Haiku system color tokens (`ui_color`) to hot-swap background layers and layout text contrast instantly when switching desktop system appearances.
+
+
 
 ## Licensing & Intellectual Property
 
