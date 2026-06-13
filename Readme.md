@@ -26,6 +26,12 @@ The project is split into a lightweight, headless background recorder daemon and
 *Disclaimer: HaikuDVR is a third-party open-source application and is not officially affiliated with or endorsed by Silicondust.*
 
 
+## System Compatibility
+
+* **Operating System Baseline** – This software was built and verified exclusively on **Haiku Beta x86_64 hrev59783**. Compatibility with older revisions or nightly builds is not guaranteed.
+
+
+
 ## Installation & Build Requirements
 
 Ensure your Haiku system feature layers include the required development libraries:
