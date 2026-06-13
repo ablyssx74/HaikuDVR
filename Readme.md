@@ -14,6 +14,14 @@ The project is split into a lightweight, headless background recorder daemon and
 * **Decoupled Lifecycle Architecture** – Cleanly separates process ownership using `setsid()`. Hitting the Restart Backend toggle recycles the background daemon instantly while letting you close or manage the GUI client completely independently without interrupting active streams.
 * **Adaptive Theme Contrast** – Utilizes YIQ brightness calculations and native Haiku system color tokens (`ui_color`) to hot-swap background layers and layout text contrast instantly when switching desktop system appearances.
 
+## Licensing & Intellectual Property
+
+* **HaikuDVR Application & Service** – Released under the permissive **MIT License**. You are free to modify, distribute, and utilize the source code for personal or commercial application suites.
+* **HDHomeRun Interface Layer (`libhdhomerun`)** – This project dynamically links against SiliconDust's official device interface library, which is governed under the **GNU Lesser General Public License (LGPL v2.1)**. 
+
+*Disclaimer: HaikuDVR is a third-party open-source application and is not officially affiliated with or endorsed by Silicondust.*
+
+
 ## Installation & Build Requirements
 
 Ensure your Haiku system feature layers include the required development libraries:
