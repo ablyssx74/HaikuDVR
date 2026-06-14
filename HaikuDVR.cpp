@@ -846,7 +846,8 @@ public:
         fTunerSelector = new BMenuField(BRect(20, 35, 330, 60), "tuner_field", "Tuner IP:", fTunerMenu);
         fTunerSelector->SetDivider(85.0);
         fChannelInput = new BTextControl(BRect(20, 70, 330, 95), "channel", "Channel:", "5.1", NULL);
-        fChannelInput->SetDivider(85.0); 
+        fChannelInput->SetDivider(85.0);
+         fChannelInput->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
         fDurationSelector = new BMenuField(BRect(20, 105, 330, 130), "duration_field", "Duration:", fDurationMenu);
         fDurationSelector->SetDivider(85.0); 
         BFont digitalFont(be_fixed_font);
@@ -858,13 +859,15 @@ public:
         std::strftime(dateBuffer, sizeof(dateBuffer), "%Y-%m-%d", localTime);
         fDateInput = new BTextControl(BRect(20, 140, 260, 165), "date", "Start Date:", dateBuffer, NULL);
         fDateInput->SetDivider(85.0);
+         fDateInput->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
         fDateInput->TextView()->MakeEditable(false);
         fDateInput->TextView()->SetStylable(false);        
         fDateInput->TextView()->SetFontAndColor(&digitalFont, B_FONT_ALL, &digitalGreen);
         fDateInput->TextView()->SetAlignment(B_ALIGN_CENTER);
         fDateBrowseButton = new BButton(BRect(270, 140, 330, 165), "date_browse", "Date", new BMessage(MSG_POPUP_CALENDAR));
         fTimeInput = new BTextControl(BRect(20, 175, 260, 200), "time", "Start Time:", "12:00", NULL);
-        fTimeInput->SetDivider(85.0);        
+        fTimeInput->SetDivider(85.0);  
+         fTimeInput->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));    
         fTimeInput->TextView()->SetFontAndColor(&digitalFont, B_FONT_ALL, &digitalGreen);
         fTimeInput->TextView()->SetAlignment(B_ALIGN_CENTER);
         BButton* btnTimeUp = new BButton(BRect(270, 175, 295, 198), "time_up", "+", new BMessage(MSG_CLOCK_UP));
@@ -892,7 +895,7 @@ public:
         
         // --- Right Column: Interactive Sidebars & Status Panel ---
         fRestartBackendButton = new BButton(BRect(730, 365, 860, 395), "restart_backend", "Restart Backend", new BMessage(MSG_RESTART_BACKEND));
-        fRestartBackendButton->SetToolTip("Warning: Restarting the backend service will immediately abort any active recording stream currently in progress!\n\nIf that is your intention you may wish to first delete any active recordings in the queue.");
+        fRestartBackendButton->SetToolTip("Warning: Restarting the backend service will immediately abort any active scheduled recording streams currently in progress!");
         BBox* statusBox = new BBox(BRect(730, 405, 860, 435), "bebox_status_wrapper");
         statusBox->SetBorder(B_FANCY_BORDER); 
 
