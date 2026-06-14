@@ -211,71 +211,72 @@ int32 ServiceSchedulerLoop(void* data) {
             }
 
 
-if (gScheduleList[i].processed == 0 && gScheduleList[i].startDate == curDate && normalizedTargetTime == curTime) {    
-    gScheduleList[i].processed = 1; 
-    databaseUpdated = true;
+            if (gScheduleList[i].processed == 0 && gScheduleList[i].startDate == curDate && normalizedTargetTime == curTime) {    
+                databaseUpdated = true;
+            
+                RecordingConfig* rec = new RecordingConfig();
+                rec->channel = gScheduleList[i].channel;
+                
+                // Add 60 seconds of padding to the recording duration
+                int totalDurationSeconds = std::atoi(gScheduleList[i].duration.c_str()) + 60;
+                rec->duration = std::to_string(totalDurationSeconds); 
+            
+                bool tunerFound = false;
+                if (!gScheduleList[i].tunerIp.empty()) {
+                    rec->ip = gScheduleList[i].tunerIp;
+                    tunerFound = true;
+                } else {
+                    std::vector<std::string> discoveredDevices = DiscoverAllTuners();        
+                    if (!discoveredDevices.empty()) {
+                        rec->ip = discoveredDevices[0]; 
+                        tunerFound = true;
+                    } 
+                }
 
-    RecordingConfig* rec = new RecordingConfig();
-    rec->channel = gScheduleList[i].channel;
-    
-    int totalDurationSeconds = std::atoi(gScheduleList[i].duration.c_str()) + 60;
-    rec->duration = std::to_string(totalDurationSeconds); 
+                if (tunerFound) {
+                    std::string baseDir = gGlobalSaveDirectory;
+                    if (!baseDir.empty() && baseDir.back() != '/') {
+                        baseDir += "/";
+                    }
+                    
+                    std::string safeTime = gScheduleList[i].startTime;
+                    std::replace(safeTime.begin(), safeTime.end(), ':', '-');
+            
+                    rec->path = baseDir + "DVR_Record_Ch_" + rec->channel + "_" 
+                              + gScheduleList[i].startDate + "_" + safeTime + "_"
+                              + gScheduleList[i].duration + "s_Padded.ts";
+                              
+                    // Detach index tracking since we erase the vector item immediately
+                    rec->dbIndexPosition = -1; 
+            
+                    thread_id worker = spawn_thread(BackgroundRecordingWorker, "DVRServiceWorker", B_NORMAL_PRIORITY, rec);
+                    if (worker >= B_OK) {
+                        resume_thread(worker);
+                    } else {
+                        delete rec;
+                    }
+                } else {
+                    delete rec; 
+                }
 
-    bool tunerFound = false;
-
-    if (!gScheduleList[i].tunerIp.empty()) {
-        rec->ip = gScheduleList[i].tunerIp;
-        tunerFound = true;
-    } 
-    else {
-        std::vector<std::string> discoveredDevices = DiscoverAllTuners();        
-        if (!discoveredDevices.empty()) {
-            rec->ip = discoveredDevices[0]; 
-            tunerFound = true;
-        } 
-    }
-
-    if (tunerFound) {
-        std::string baseDir = gGlobalSaveDirectory;
-        if (!baseDir.empty() && baseDir.back() != '/') {
-            baseDir += "/";
-        }
-        
-        std::string safeTime = gScheduleList[i].startTime;
-        std::replace(safeTime.begin(), safeTime.end(), ':', '-');
-
-        rec->path = baseDir + "DVR_Record_Ch_" + rec->channel + "_" 
-                  + gScheduleList[i].startDate + "_" + safeTime + "_"
-                  + gScheduleList[i].duration + "s_Padded.ts";
-                  
-        rec->dbIndexPosition = i; 
-
-        thread_id worker = spawn_thread(BackgroundRecordingWorker, "DVRServiceWorker", B_NORMAL_PRIORITY, rec);
-        if (worker >= B_OK) {
-            resume_thread(worker);
-        } else {
-            delete rec;
-        }
-    } else {
-        delete rec; 
-        gScheduleList[i].processed = true; 
-        databaseUpdated = true;
-    }
-}
-
-
-
+                // FIX: Erase item from array immediately so subsequent file reads see it as cleared.
+                gScheduleList.erase(gScheduleList.begin() + i);
+                
+                // FIX: Decrement index counter to avoid skipping the next schedule item in the loop
+                i--; 
+            }
         }
         gScheduleLocker.Unlock();
 
         if (databaseUpdated) {
-            printf("[SERVER DEBUG] Schedule fired. Updating database changes to disk file...\n");
+            printf("[SERVER DEBUG] Schedule fired and purged. Updating database changes to disk file...\n");
             SaveSchedulesToDisk();
         }
     }
     printf("[SERVER DEBUG] Scheduler Loop exiting cleanly.\n");
     return 0;
 }
+
 
 
 
@@ -349,29 +350,12 @@ public:
                 break;
         }
     }
-
     
-    bool QuitRequested() override {        
-        atomic_set(&gStopService, 1);
-        atomic_set(&gCancelRecording, 1);         
-        snooze(1500000); 	        
-        pid_t pid = fork();
-        if (pid == 0) {
-            setsid();             
-            close(0);
-            close(1); 
-            close(2);         
-            snooze(200000);             
-            char* args[] = { (char*)"/boot/system/bin/HaikuDVRService", NULL };
-            execv(args[0], args);            
-            char* localArgs[] = { (char*)"./HaikuDVRService", NULL };
-            execv(localArgs[0], localArgs);    
-            _exit(1);
-        }
-    
-        return true; 
-    }
-
+    bool QuitRequested() override {     
+	    atomic_set(&gStopService, 1);
+	    atomic_set(&gCancelRecording, 1);        
+	    return true; 
+	}
 };
 
 

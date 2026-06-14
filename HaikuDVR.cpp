@@ -36,14 +36,6 @@
 #include <nlohmann/json.hpp>
 #include "hdhomerun.h"
 
-// Storage, Path Finder & System File Kits
-
-
-
-
-
-
-
 
 using json = nlohmann::json;
 
@@ -205,38 +197,31 @@ struct AsyncIconDownloadConfig {
     BMessenger windowMessenger;
     std::string iconPath;
     std::string downloadUrl;
-    int32 listRowIndex; // FIX 1: Track which row this icon belongs to
+    int32 listRowIndex;
 };
 
 // This function executes automatically as fast as media packets stream over the air
 int StreamProgressCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
-    // Abort instantly if the user tapped the Stop or Restart buttons
     if (atomic_get(&gCancelRecording) == 1) {
-        return 1; // Returning non-zero instructs libcurl to drop the network socket immediately
+        return 1; 
     }
 
     RecordingConfig* config = static_cast<RecordingConfig*>(clientp);
     if (!config || !config->windowMessenger.IsValid()) return 0;
-
-    // Use a static tracker to throttle UI message volume to exactly once per second
     static std::time_t lastUpdate = 0;
     std::time_t currentTime = std::time(nullptr);
-
     if (currentTime - lastUpdate >= 1) {
         lastUpdate = currentTime;
-
-        // Calculate total Megabytes downloaded so far
         double megabytesDownloaded = static_cast<double>(dlnow) / (1024.0 * 1024.0);
-
-        // Package the progress snapshot parameters into a thread-safe message envelope
         BMessage progressMsg(MSG_STREAM_PROGRESS_UPDATE);
         progressMsg.AddDouble("bytes_now", megabytesDownloaded);
-        
         config->windowMessenger.SendMessage(&progressMsg);
+        config->windowMessenger.SendMessage(MSG_COUNTDOWN_TICK);
     }
 
     return 0;
 }
+
 
 
 struct DownloadQueueItem {
@@ -287,7 +272,6 @@ int32 SerialIconDownloaderThread(void* data) {
                 iconOut.close();
                 
                 if (res == CURLE_OK && gIconWindowMessenger && gIconWindowMessenger->IsValid()) {
-                    // Send message to notify the UI to refresh this specific row index
                     BMessage completionMsg(MSG_REFRESH_CHANNEL_LIST_ICONS);
                     completionMsg.AddInt32("row_index", job.listRowIndex);
                     gIconWindowMessenger->SendMessage(&completionMsg);
@@ -320,7 +304,6 @@ public:
     }
 
     void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
-        // 1. Paint the selection highlight block state background matrix
         if (IsSelected() || drawEverything) {
             rgb_color bgColor;
             if (IsSelected()) {
@@ -336,22 +319,13 @@ public:
 
         float iconOffset = 5.0;
         if (channelIcon != nullptr) {
-            // FIX 1: Upscaled destRect bounding coordinates from 16x16 frame up to 22x22 pixels (40% increase)
-            BRect destRect(itemRect.left + 5, itemRect.top + 1, itemRect.left + 27, itemRect.top + 23);
-            
+            BRect destRect(itemRect.left + 5, itemRect.top + 1, itemRect.left + 27, itemRect.top + 23);            
             drawing_mode oldMode = owner->DrawingMode();
-            owner->SetDrawingMode(B_OP_ALPHA);
-            
-            // Bilinear rendering guarantees these larger icons stay perfectly sharp and clear
-            owner->DrawBitmap(channelIcon, channelIcon->Bounds(), destRect, B_FILTER_BITMAP_BILINEAR);
-            
-            owner->SetDrawingMode(oldMode);
-            
-            // FIX 2: Increased text padding offset from 26 to 32 to accommodate the wider icons
+            owner->SetDrawingMode(B_OP_ALPHA);            
+            owner->DrawBitmap(channelIcon, channelIcon->Bounds(), destRect, B_FILTER_BITMAP_BILINEAR);            
+            owner->SetDrawingMode(oldMode);            
             iconOffset = 32.0; 
         }
-
-        // Adjust text pen drop-point slightly down to match the new 24-pixel total row depth center
         owner->MovePenTo(itemRect.left + iconOffset, itemRect.top + 16);
         owner->DrawString(textDisplay.c_str());
 
@@ -435,9 +409,7 @@ int32 NetworkRecordingThread(void* data) {
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outputFile);
             
             // Turn on modern 64-bit progress tracking engine definitions
-            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-            
-            // FIX: Point the progress function hook to our new StreamProgressCallback method!
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);            
             curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, StreamProgressCallback);
             curl_easy_setopt(curl, CURLOPT_XFERINFODATA, config);
 
@@ -454,9 +426,8 @@ int32 NetworkRecordingThread(void* data) {
 
 int32 ClockSchedulerThread(void* data) {
     BMessenger* windowMessenger = static_cast<BMessenger*>(data);
-    
     int pulseTickCounter = 0;
-    int diskCheckCounter = 0; // Tracks our storage checking interval cycles
+    int diskCheckCounter = 0;
 
     while (atomic_get(&gStopScheduler) == 0) {
         snooze(1000000); 
@@ -469,70 +440,28 @@ int32 ClockSchedulerThread(void* data) {
             }
         }
 
-        // --- AUTOMATIC DISK VOLUME SAFETY MONITOR ENGINE ---
         diskCheckCounter++;
-        if (diskCheckCounter >= 5) { // Check space metrics exactly once every 5 seconds
+        if (diskCheckCounter >= 5) {
             diskCheckCounter = 0;
-
-            // Resolve what partition partition volume hosts your target recordings folder path string
             BDirectory dir(gGlobalSaveDirectory.c_str());
             BVolume volume;
             
             if (dir.InitCheck() == B_OK && dir.GetVolume(&volume) == B_OK) {
                 off_t freeBytes = volume.FreeBytes();
-                
-                // 5 Gigabytes safety ceiling threshold rule (5 * 1024 * 1024 * 1024)
                 off_t minimumRequiredBytes = 5368709120LL; 
 
                 if (freeBytes < minimumRequiredBytes && windowMessenger && windowMessenger->IsValid()) {
-                    // Extract exact available Megabytes remaining on the raw partition sector block
                     int32 freeMegabytes = static_cast<int32>(freeBytes / (1024 * 1024));
-                    
                     BMessage spaceAlert(MSG_DISK_SPACE_WARNING);
                     spaceAlert.AddInt32("free_mb", freeMegabytes);
                     windowMessenger->SendMessage(&spaceAlert);
                 }
             }
         }
-
-        std::time_t now = std::time(nullptr);
-        std::tm* localTime = std::localtime(&now);
-        
-        char dateBuffer[16];
-        char timeBuffer[16];
-        std::strftime(dateBuffer, sizeof(dateBuffer), "%Y-%m-%d", localTime);
-        std::strftime(timeBuffer, sizeof(timeBuffer), "%H:%M", localTime);
-        
-        std::string currentDateStr(dateBuffer);
-        std::string currentTimeStr(timeBuffer);
-        
-        bool listChanged = false;
-        gScheduleLocker.Lock();
-        for (size_t i = 0; i < gScheduleList.size(); i++) {
-            if (!gScheduleList[i].processed && 
-                gScheduleList[i].startDate == currentDateStr && 
-                gScheduleList[i].startTime == currentTimeStr) {
-                
-                gScheduleList[i].processed = true;
-                listChanged = true;
-                
-                BMessage triggerMsg(MSG_START_RECORDING);
-                triggerMsg.AddString("forced_channel", gScheduleList[i].channel.c_str());
-                triggerMsg.AddString("forced_duration", gScheduleList[i].duration.c_str());
-                windowMessenger->SendMessage(&triggerMsg);
-            }
-        }
-        gScheduleLocker.Unlock();
-
-        if (listChanged) {
-            SaveSchedulesToDisk(); 
-            windowMessenger->SendMessage(MSG_REFRESH_SCHEDULES); 
-        }
     }
     delete windowMessenger;
     return 0;
 }
-
 
 
 
@@ -723,17 +652,14 @@ ChannelFilter fCurrentFilter;
                 for (const auto& channelEntry : jLineup) {
                     std::string chNum = channelEntry.value("GuideNumber", "0.0");
                     
-                    // Filter out rows instantly using the physical hardware HD integer flag!
                     int isRealHD = channelEntry.value("HD", 0);
                     if (fCurrentFilter == FILTER_HD && isRealHD == 0) continue;
                     if (fCurrentFilter == FILTER_SD && isRealHD == 1) continue;
 
-                    // Match it against our downloaded cloud metadata guide map
                     ChannelGuideItem finalItem;
                     if (cloudGuideMap.find(chNum) != cloudGuideMap.end()) {
                         finalItem = cloudGuideMap[chNum];
                     } else {
-                        // Fallback if the station exists locally but isn't on the cloud database yet
                         finalItem.guideNumber = chNum;
                         finalItem.guideName   = channelEntry.value("GuideName", "Unknown");
                         finalItem.nowPlaying  = "Live Stream Available";
@@ -871,7 +797,6 @@ public:
             BWindow::MessageReceived(message);
         }
     }
-
 };
 
 
@@ -880,8 +805,6 @@ public:
     virtual ~DVRWindow(); 
 
     DVRWindow() : BWindow(BRect(150, 150, 1030, 625), "Haiku HDHomeRun DVR Scheduler", B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE) {
-
-
         LoadSchedulesFromDisk();
         fSelectedDirectory = gGlobalSaveDirectory;
         fFolderPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), NULL, B_DIRECTORY_NODE, false, new BMessage(MSG_DIR_CHOSEN));
@@ -1037,10 +960,10 @@ public:
 
             
         case MSG_POLL_BACKEND: {
+            LoadSchedulesFromDisk();
+            RefreshScheduleListView();
             BMessenger serviceTarget("application/x-vnd.haikuhdhomerun-dvr");
-            bool isRunning = serviceTarget.IsValid();
-            
-            // FIX 2: Using a slightly punchier bold digital green for maximum text contrast
+            bool isRunning = serviceTarget.IsValid();            
             rgb_color activeGreen = { 0, 160, 0, 255 };  
             rgb_color alertRed    = { 225, 0, 0, 255 };  
 
@@ -1056,252 +979,281 @@ public:
             break;
         }
 
+
    	
-     case MSG_POPUP_CALENDAR: {
-         BPoint spawnPoint = ConvertToScreen(fDateInput->Frame().LeftBottom());
-         spawnPoint.y += 5; // Add a tiny 5-pixel padding spacing gap
-         
-         CalendarWindow* calWin = new CalendarWindow(spawnPoint, BMessenger(this));
-         calWin->Show();
-         break;
-     }
+	     case MSG_POPUP_CALENDAR: {
+	         BPoint spawnPoint = ConvertToScreen(fDateInput->Frame().LeftBottom());
+	         spawnPoint.y += 5; // Add a tiny 5-pixel padding spacing gap
+	         
+	         CalendarWindow* calWin = new CalendarWindow(spawnPoint, BMessenger(this));
+	         calWin->Show();
+	         break;
+	     }
+	
+	     case MSG_DATE_SELECTED: {
+	         const char* newDateString = nullptr;
+	         if (message->FindString("date_string", &newDateString) == B_OK) {
+	             fDateInput->SetText(newDateString);
+	         }
+	         break;
+	     }
+	
+	
+	
+	     case MSG_DISK_SPACE_WARNING: {
+	         int32 freeMB = 0;
+	         if (message->FindInt32("free_mb", &freeMB) == B_OK) {
+	             char warningMessage[128];
+	             sprintf(warningMessage, "CRITICAL WARNING: Storage space running low! Only %" B_PRId32 " MB remaining in save directory.", freeMB);
+	             
+	             // Push the text to your full-width bottom dashboard row
+	             fStatusLabel->SetText(warningMessage);
+	             
+	             // Update text color to high-visibility alarm red
+	             rgb_color alertRed = { 225, 0, 0, 255 };
+	             fStatusLabel->SetHighColor(alertRed);
+	             fStatusLabel->Invalidate();
+	         }
+	         break;
+	     }
 
-     case MSG_DATE_SELECTED: {
-         const char* newDateString = nullptr;
-         if (message->FindString("date_string", &newDateString) == B_OK) {
-             fDateInput->SetText(newDateString);
-         }
-         break;
-     }
-
-
-
-     case MSG_DISK_SPACE_WARNING: {
-         int32 freeMB = 0;
-         if (message->FindInt32("free_mb", &freeMB) == B_OK) {
-             char warningMessage[128];
-             sprintf(warningMessage, "CRITICAL WARNING: Storage space running low! Only %" B_PRId32 " MB remaining in save directory.", freeMB);
-             
-             // Push the text to your full-width bottom dashboard row
-             fStatusLabel->SetText(warningMessage);
-             
-             // Update text color to high-visibility alarm red
-             rgb_color alertRed = { 225, 0, 0, 255 };
-             fStatusLabel->SetHighColor(alertRed);
-             fStatusLabel->Invalidate();
-         }
-         break;
-     }
-
-            case MSG_STREAM_PROGRESS_UPDATE: {
-                double mbDownloaded = 0.0;
-                if (message->FindDouble("bytes_now", &mbDownloaded) == B_OK) {
-                    char progressString[256];
-                    sprintf(progressString, "Status: Active Capture Stream Operational ... [ Total Data Written: %.2f MB ]", mbDownloaded);
-                    
-                    fStatusLabel->SetText(progressString);
-                    fStatusLabel->SetFont(be_bold_font);
-                    
-                    // FIX: Replaced green with your system default text color token
-                    fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-                    fStatusLabel->Invalidate();
-                }
-                break;
-            }
-
-
-
-     case MSG_CLOCK_UP:
-     case MSG_CLOCK_DOWN: {
-         std::string timeStr = fTimeInput->Text();
-         size_t colonPos = timeStr.find(':');
-         if (colonPos != std::string::npos) {
-             int hours = std::atoi(timeStr.substr(0, colonPos).c_str());
-             int minutes = std::atoi(timeStr.substr(colonPos + 1).c_str());
-             
-             if (message->what == MSG_CLOCK_UP) {
-                 minutes += 15;
-             } else {
-                 minutes -= 15;
+         case MSG_STREAM_PROGRESS_UPDATE: {
+             double mbDownloaded = 0.0;
+             if (message->FindDouble("bytes_now", &mbDownloaded) == B_OK) {
+                 char progressString[256];
+                 sprintf(progressString, "Status: Active Capture Stream Operational ... [ Total Data Written: %.2f MB ]", mbDownloaded);
+                 
+                 fStatusLabel->SetText(progressString);
+                 fStatusLabel->SetFont(be_bold_font);
+                 
+                 // FIX: Replaced green with your system default text color token
+                 fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
+                 fStatusLabel->Invalidate();
              }
-             
-             if (minutes >= 60) { minutes = 0; hours++; }
-             if (minutes < 0) { minutes = 45; hours--; }
-             if (hours >= 24) { hours = 0; }
-             if (hours < 0) { hours = 23; }
-             
-
-             char updatedTimeBuffer[16];
-             sprintf(updatedTimeBuffer, "%02d:%02d", hours, minutes);
-             fTimeInput->SetText(updatedTimeBuffer);
-
+             break;
          }
-         break;
-     }
 
 
-	  case B_COLORS_UPDATED: {
-	      rgb_color panelBg = ui_color(B_PANEL_BACKGROUND_COLOR);	      
-	      int brightness = ((panelBg.red * 299) + (panelBg.green * 587) + (panelBg.blue * 114)) / 1000;
-	      
-	      rgb_color textColor;
-	      if (brightness < 125) {
-	          textColor = (rgb_color){ 255, 255, 255, 255 }; 
-	      } else {
-	          textColor = (rgb_color){ 0, 0, 0, 255 };     
-	      }
+
+	     case MSG_CLOCK_UP:
+	     case MSG_CLOCK_DOWN: {
+	         std::string timeStr = fTimeInput->Text();
+	         size_t colonPos = timeStr.find(':');
+	         if (colonPos != std::string::npos) {
+	             int hours = std::atoi(timeStr.substr(0, colonPos).c_str());
+	             int minutes = std::atoi(timeStr.substr(colonPos + 1).c_str());
+	             
+	             if (message->what == MSG_CLOCK_UP) {
+	                 minutes += 15;
+	             } else {
+	                 minutes -= 15;
+	             }
+	             
+	             if (minutes >= 60) { minutes = 0; hours++; }
+	             if (minutes < 0) { minutes = 45; hours--; }
+	             if (hours >= 24) { hours = 0; }
+	             if (hours < 0) { hours = 23; }
+	             
 	
-	      BView* mainView = FindView("MainView");
-	      if (mainView != nullptr) {
-	          mainView->SetViewColor(panelBg);
-	          mainView->SetLowColor(panelBg);
+	             char updatedTimeBuffer[16];
+	             sprintf(updatedTimeBuffer, "%02d:%02d", hours, minutes);
+	             fTimeInput->SetText(updatedTimeBuffer);
 	
-	          for (int32 i = 0; i < mainView->CountChildren(); i++) {
-	              BView* child = mainView->ChildAt(i);	              
-	              if (dynamic_cast<BStringView*>(child) != nullptr) {
-	                  if (child != fBackendStatusLabel) {
-	                      child->SetHighColor(textColor);
-	                  }
-	              }	              
-	              child->SetLowColor(panelBg);
-	              child->Invalidate();
-	          }
-	      }	
-	      BWindow::MessageReceived(message);
-	      break;
-	  }
+	         }
+	         break;
+	     }
 
-     case MSG_CHOOSE_DIR:
-         if (fFolderPanel) fFolderPanel->Show();
-         break;
-         
-	 case MSG_DIR_CHOSEN: {
-	      entry_ref ref;
-	      if (message->FindRef("refs", &ref) == B_OK) {
-	          BEntry entry(&ref, true);
-	          BPath path;
-	          
-	          if (entry.GetPath(&path) == B_OK) {
-	              fSelectedDirectory = path.Path();
-	              gGlobalSaveDirectory = fSelectedDirectory;	
-	              std::string newButtonLabel = "Save To: " + fSelectedDirectory;
-	              fBrowseButton->SetLabel(newButtonLabel.c_str());	
-	              SaveSchedulesToDisk();
-	          }
-	      }
-	      break;
-	  }
+
+		  case B_COLORS_UPDATED: {
+		      rgb_color panelBg = ui_color(B_PANEL_BACKGROUND_COLOR);	      
+		      int brightness = ((panelBg.red * 299) + (panelBg.green * 587) + (panelBg.blue * 114)) / 1000;
+		      
+		      rgb_color textColor;
+		      if (brightness < 125) {
+		          textColor = (rgb_color){ 255, 255, 255, 255 }; 
+		      } else {
+		          textColor = (rgb_color){ 0, 0, 0, 255 };     
+		      }
+		
+		      BView* mainView = FindView("MainView");
+		      if (mainView != nullptr) {
+		          mainView->SetViewColor(panelBg);
+		          mainView->SetLowColor(panelBg);
+		
+		          for (int32 i = 0; i < mainView->CountChildren(); i++) {
+		              BView* child = mainView->ChildAt(i);	              
+		              if (dynamic_cast<BStringView*>(child) != nullptr) {
+		                  if (child != fBackendStatusLabel) {
+		                      child->SetHighColor(textColor);
+		                  }
+		              }	              
+		              child->SetLowColor(panelBg);
+		              child->Invalidate();
+		          }
+		      }	
+		      BWindow::MessageReceived(message);
+		      break;
+		  }
+	
+	     case MSG_CHOOSE_DIR:
+	         if (fFolderPanel) fFolderPanel->Show();
+	         break;
+	         
+		 case MSG_DIR_CHOSEN: {
+		      entry_ref ref;
+		      if (message->FindRef("refs", &ref) == B_OK) {
+		          BEntry entry(&ref, true);
+		          BPath path;
+		          
+		          if (entry.GetPath(&path) == B_OK) {
+		              fSelectedDirectory = path.Path();
+		              gGlobalSaveDirectory = fSelectedDirectory;	
+		              std::string newButtonLabel = "Save To: " + fSelectedDirectory;
+		              fBrowseButton->SetLabel(newButtonLabel.c_str());	
+		              SaveSchedulesToDisk();
+		          }
+		      }
+		      break;
+		  }
 
  	
-     case MSG_FILTER_ALL:
-     case MSG_FILTER_HD:
-     case MSG_FILTER_SD: {
-         BMenuBar* menuBar = dynamic_cast<BMenuBar*>(FindView("top_menubar"));
-         if (menuBar) {
-             BMenu* filterMenu = menuBar->SubmenuAt(0);
-             if (filterMenu) {
-                 for (int32 i = 0; i < filterMenu->CountItems(); i++) {
-                     filterMenu->ItemAt(i)->SetMarked(false);
-                 }
-             }
-         }
-
-         BMenuItem* clickedItem = nullptr;
-         message->FindPointer("source", (void**)&clickedItem);
-         if (clickedItem) clickedItem->SetMarked(true);
-
-         if (message->what == MSG_FILTER_ALL) fCurrentFilter = FILTER_ALL;
-         else if (message->what == MSG_FILTER_HD) fCurrentFilter = FILTER_HD;
-         else if (message->what == MSG_FILTER_SD) fCurrentFilter = FILTER_SD;
-
-         FetchAndPopulateChannelList();
-         break;
-     }
+	     case MSG_FILTER_ALL:
+	     case MSG_FILTER_HD:
+	     case MSG_FILTER_SD: {
+	         BMenuBar* menuBar = dynamic_cast<BMenuBar*>(FindView("top_menubar"));
+	         if (menuBar) {
+	             BMenu* filterMenu = menuBar->SubmenuAt(0);
+	             if (filterMenu) {
+	                 for (int32 i = 0; i < filterMenu->CountItems(); i++) {
+	                     filterMenu->ItemAt(i)->SetMarked(false);
+	                 }
+	             }
+	         }
+	
+	         BMenuItem* clickedItem = nullptr;
+	         message->FindPointer("source", (void**)&clickedItem);
+	         if (clickedItem) clickedItem->SetMarked(true);
+	
+	         if (message->what == MSG_FILTER_ALL) fCurrentFilter = FILTER_ALL;
+	         else if (message->what == MSG_FILTER_HD) fCurrentFilter = FILTER_HD;
+	         else if (message->what == MSG_FILTER_SD) fCurrentFilter = FILTER_SD;
+	
+	         FetchAndPopulateChannelList();
+	         break;
+	     }
  	
 
-     case MSG_REFRESH_CHANNEL_LIST_ICONS: {
-         int32 targetRow = -1;
-         if (message->FindInt32("row_index", &targetRow) == B_OK) {
-             if (targetRow >= 0 && targetRow < fChannelListView->CountItems()) {
-                 
-                 const auto& item = fLoadedChannels[targetRow];
-                 std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + item.guideName + ".png";
-                 
-                 BBitmap* freshIcon = BTranslationUtils::GetBitmap(iconPath.c_str());
-                 if (freshIcon != nullptr) {
-                     if (freshIcon->IsValid()) {
-                         fIconCache.push_back(freshIcon);
-                         
-                         ChannelListItem* rowWidget = static_cast<ChannelListItem*>(fChannelListView->ItemAt(targetRow));
-                         if (rowWidget != nullptr) {
-                             rowWidget->channelIcon = freshIcon; 
-                             fChannelListView->InvalidateItem(targetRow); 
-                         }
-                     } else {
-                         delete freshIcon;
-                     }
-                 }
-             }
-         }
-         break;
-     }
+	     case MSG_REFRESH_CHANNEL_LIST_ICONS: {
+	         int32 targetRow = -1;
+	         if (message->FindInt32("row_index", &targetRow) == B_OK) {
+	             if (targetRow >= 0 && targetRow < fChannelListView->CountItems()) {
+	                 
+	                 const auto& item = fLoadedChannels[targetRow];
+	                 std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + item.guideName + ".png";
+	                 
+	                 BBitmap* freshIcon = BTranslationUtils::GetBitmap(iconPath.c_str());
+	                 if (freshIcon != nullptr) {
+	                     if (freshIcon->IsValid()) {
+	                         fIconCache.push_back(freshIcon);
+	                         
+	                         ChannelListItem* rowWidget = static_cast<ChannelListItem*>(fChannelListView->ItemAt(targetRow));
+	                         if (rowWidget != nullptr) {
+	                             rowWidget->channelIcon = freshIcon; 
+	                             fChannelListView->InvalidateItem(targetRow); 
+	                         }
+	                     } else {
+	                         delete freshIcon;
+	                     }
+	                 }
+	             }
+	         }
+	         break;
+	     }
+
+	     case MSG_REMOVE_SCHEDULE: {
+	         int32 listIndex = -1;
+	         if (message->FindInt32("list_index", &listIndex) == B_OK && listIndex >= 0) {
+	             gScheduleLocker.Lock();
+	             int32 activeCounter = 0;
+	             for (size_t i = 0; i < gScheduleList.size(); i++) {
+	                 if (!gScheduleList[i].processed) {
+	                     if (activeCounter == listIndex) {
+	                         gScheduleList.erase(gScheduleList.begin() + i);
+	                         break;
+	                     }
+	                     activeCounter++;
+	                 }
+	             }
+	             gScheduleLocker.Unlock();
+	             
+	             SaveSchedulesToDisk();     
+	             RefreshScheduleListView(); 
+	             fStatusLabel->SetText("Status: Schedule deleted.");
+	         }
+	         break;
+	     }
+     
+	     case MSG_REFRESH_SCHEDULES:
+	         RefreshScheduleListView();
+	         break;
 
 
+	     case MSG_CHANNEL_CLICKED: {
+	         int32 selection = fChannelListView->CurrentSelection();
+	         if (selection >= 0 && (size_t)selection < fLoadedChannels.size()) {
+	             const auto& channel = fLoadedChannels[selection];
+	             
+	             fChannelInput->SetText(channel.guideNumber.c_str());
+	             
+	             std::string guidePreview = "Lineup for " + channel.guideName + ": ";
+	             if (!channel.futureLineup.empty()) {
+	                 for (size_t s = 0; s < channel.futureLineup.size(); s++) {
+	                     guidePreview += "[" + channel.futureLineup[s].startTimeStr + "] " 
+	                                  + channel.futureLineup[s].title;
+	                     if (s < channel.futureLineup.size() - 1) guidePreview += "  |  ";
+	                 }
+	             } else {
+	                 guidePreview += "No upcoming schedule data available.";
+	             }
+	             
+	             fStatusLabel->SetText(guidePreview.c_str());
+	             fStatusLabel->SetFont(be_bold_font);
+	             
+	             // Keep the text color synchronized with your system's interface theme settings
+	             fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
+	             fStatusLabel->Invalidate();
+	         }
+	         break;
+	     }
 
-     case MSG_REMOVE_SCHEDULE: {
-         int32 listIndex = -1;
-         if (message->FindInt32("list_index", &listIndex) == B_OK && listIndex >= 0) {
-             gScheduleLocker.Lock();
-             int32 activeCounter = 0;
-             for (size_t i = 0; i < gScheduleList.size(); i++) {
-                 if (!gScheduleList[i].processed) {
-                     if (activeCounter == listIndex) {
-                         gScheduleList.erase(gScheduleList.begin() + i);
-                         break;
-                     }
-                     activeCounter++;
-                 }
-             }
-             gScheduleLocker.Unlock();
-             
-             SaveSchedulesToDisk();     
-             RefreshScheduleListView(); 
-             fStatusLabel->SetText("Status: Schedule deleted.");
-         }
-         break;
-     }
-     case MSG_REFRESH_SCHEDULES:
-         RefreshScheduleListView();
-         break;
+		case MSG_RESTART_BACKEND:
+		{
+		    BRoster roster;
+		    const char* backendSignature = "x-vnd.haikuhdhomerun-dvr";
+		
+		    if (roster.IsRunning(backendSignature)) {
+		        BMessenger backendMessenger(backendSignature);
+		        if (backendMessenger.IsValid()) {
+		            BMessage quitMessage(B_QUIT_REQUESTED);
+		            backendMessenger.SendMessage(&quitMessage);
+		        }
+		    } else {
 
-
-     case MSG_CHANNEL_CLICKED: {
-         int32 selection = fChannelListView->CurrentSelection();
-         if (selection >= 0 && (size_t)selection < fLoadedChannels.size()) {
-             const auto& channel = fLoadedChannels[selection];
-             
-             fChannelInput->SetText(channel.guideNumber.c_str());
-             
-             std::string guidePreview = "Lineup for " + channel.guideName + ": ";
-             if (!channel.futureLineup.empty()) {
-                 for (size_t s = 0; s < channel.futureLineup.size(); s++) {
-                     guidePreview += "[" + channel.futureLineup[s].startTimeStr + "] " 
-                                  + channel.futureLineup[s].title;
-                     if (s < channel.futureLineup.size() - 1) guidePreview += "  |  ";
-                 }
-             } else {
-                 guidePreview += "No upcoming schedule data available.";
-             }
-             
-             fStatusLabel->SetText(guidePreview.c_str());
-             fStatusLabel->SetFont(be_bold_font);
-             
-             // Keep the text color synchronized with your system's interface theme settings
-             fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-             fStatusLabel->Invalidate();
-         }
-         break;
-     }
+		        pid_t pid = fork();
+		        if (pid == 0) {
+		            close(STDIN_FILENO); 
+		            char* const args[] = { 
+		                (char*)"/bin/launch_roster", 
+		                (char*)"restart", 
+		                (char*)backendSignature, 
+		                nullptr 
+		            };
+		            execv(args[0], args);
+		            _exit(1); 
+		        }
+		    }
+		    break;
+		}
 
 
 
@@ -1313,6 +1265,7 @@ public:
          }
          break;
      }
+     
      case MSG_ADD_SCHEDULE: {
      	std::string rawTime = fTimeInput->Text();
          
@@ -1361,6 +1314,7 @@ public:
          break;
      }
      case MSG_START_RECORDING: {
+     	
          const char* targetChannel = fChannelInput->Text();
          std::string targetDuration = fSelectedDurationSeconds;
 
@@ -1423,33 +1377,36 @@ public:
              fStopButton->SetEnabled(false);
          }
          break;
+         
      }
 
-    
-    case MSG_COUNTDOWN_TICK: {
-         if (fCountdownSecondsRemaining > 0) {
+     case MSG_COUNTDOWN_TICK: {
+         if (fActiveThread >= B_OK && fCountdownSecondsRemaining > 0) {
              fCountdownSecondsRemaining--;
+             
+             int32 mins = fCountdownSecondsRemaining / 60;
+             int32 secs = fCountdownSecondsRemaining % 60;
+             
+             char timerBuffer[64];
+             sprintf(timerBuffer, "Time Remaining: %02d:%02d", (int)mins, (int)secs);
+             fCountdownLabel->SetText(timerBuffer);
+         } else if (fCountdownSecondsRemaining <= 0 && fActiveThread >= B_OK) {
+             PostMessage(MSG_STOP_RECORDING);
          }
-
-         int32 mins = fCountdownSecondsRemaining / 60;
-         int32 secs = fCountdownSecondsRemaining % 60;
-         
-         char timerBuffer[64];
-         sprintf(timerBuffer, "Time Remaining: %02d:%02d", (int)mins, (int)secs);
-         fCountdownLabel->SetText(timerBuffer);
          break;
      }
 
-     case MSG_RECORDING_DONE:
+     case MSG_RECORDING_DONE:        
          fStatusLabel->SetText("Status: Recording complete/stopped.");
          fCountdownLabel->SetText("Time Remaining: --:--"); 
-         fCountdownSecondsRemaining = 0;
+         fCountdownSecondsRemaining = 0;         
          fRecordButton->SetEnabled(true);
-         fStopButton->SetEnabled(false);
-         fActiveThread = -1;
-         break;      
+         fStopButton->SetEnabled(false);         
+         fActiveThread = B_BAD_THREAD_ID; 
+         break;        
        
      case MSG_STOP_RECORDING:
+
          fStatusLabel->SetText("Status: Stopping recording...");
          atomic_set(&gCancelRecording, 1);
          fStopButton->SetEnabled(false);
