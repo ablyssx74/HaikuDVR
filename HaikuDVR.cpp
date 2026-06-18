@@ -309,11 +309,11 @@ static int32 BackgroundUpdateChecker(void* data) {
 
             // Native Haiku desktop notification banner toast window dispatch engine
             BNotification updateAlert(B_INFORMATION_NOTIFICATION);
-            updateAlert.SetGroup("Cricket IRC");
+            updateAlert.SetGroup("HaikuDVR IRC");
             updateAlert.SetTitle("Update Available");
             
             BString alertContent;
-            alertContent << "A newer version of Cricket is available! (v" << remoteVersionStr 
+            alertContent << "A newer version of HaikuDVR is available! (v" << remoteVersionStr 
                          << ")";
             updateAlert.SetContent(alertContent.String());
             
