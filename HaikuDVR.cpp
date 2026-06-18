@@ -36,6 +36,9 @@
 #include <nlohmann/json.hpp>
 #include "hdhomerun.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <Notification.h>
 
 using json = nlohmann::json;
 
@@ -63,6 +66,7 @@ const uint32 MSG_CLOCK_DOWN    	   = 'clkD';
 const uint32 MSG_DISK_SPACE_WARNING = 'dSpc';
 const uint32 MSG_REFRESH_CHANNEL_LIST_ICONS = 'rIco';
 const uint32 MSG_STREAM_PROGRESS_UPDATE = 'sPrg';
+const uint32 MSG_TOGGLE_NOTIFICATIONS= 'ntfg';
 
 const char* kSettingsFilePath = "/boot/home/config/settings/HaikuDVR_schedules.json";
 
@@ -74,10 +78,17 @@ void ensure_config_dir() {
     }
 }
 
+// 1. CLEAN APPCONFIG STRUCT
+struct AppConfig {
+    bool showUpdateNotifications = true;
+    bool debugEnable = true; 
+};
 
+AppConfig cfg; 
 
-
+// 2. RUNTIME TRACKING FLAGS (Keep these out of AppConfig)
 int32 gCancelRecording = 0;
+int32 gStopScheduler = 0;
 
 struct RecordingConfig {
     BMessenger windowMessenger;
@@ -87,7 +98,6 @@ struct RecordingConfig {
     std::string path;
     int32 dbIndexPosition;
 };
-
 
 struct ScheduleItem {
     std::string startDate; 
@@ -103,7 +113,6 @@ struct UpcomingShowItem {
     std::string startTimeStr; 
 };
 
-
 struct ChannelGuideItem {
     std::string guideNumber;
     std::string guideName;
@@ -114,7 +123,6 @@ struct ChannelGuideItem {
 std::string gGlobalSaveDirectory = "/boot/home";
 std::vector<ScheduleItem> gScheduleList;
 BLocker gScheduleLocker; 
-int32 gStopScheduler = 0;
 
 void SaveSchedulesToDisk() {
     gScheduleLocker.Lock();
@@ -122,6 +130,10 @@ void SaveSchedulesToDisk() {
     json jRoot = json::object();
     
     jRoot["save_directory"] = gGlobalSaveDirectory; 
+    
+    // --- MAP STRUCT VALUES TO JSON ---
+    jRoot["show_update_notifications"] = cfg.showUpdateNotifications; 
+    jRoot["debug_enable"]              = cfg.debugEnable;
     
     json jSchedules = json::array();
     for (const auto& item : gScheduleList) {
@@ -156,30 +168,37 @@ void LoadSchedulesFromDisk() {
         file >> jIn;
         gScheduleLocker.Lock();
         
-        if (jIn.is_object() && jIn.contains("save_directory")) {
-            gGlobalSaveDirectory = jIn.value("save_directory", "/boot/home");
-
+        if (jIn.is_object()) {
+            // Read directories and configurations from the root object
+            gGlobalSaveDirectory        = jIn.value("save_directory", "/boot/home");
+            cfg.showUpdateNotifications = jIn.value("show_update_notifications", true);
+            cfg.debugEnable             = jIn.value("debug_enable", true);
+            
             if (jIn.contains("schedules") && jIn["schedules"].is_array()) {
                 gScheduleList.clear();
                 for (const auto& entry : jIn["schedules"]) {
                     ScheduleItem item;
                     item.startDate = entry.value("date", "2026-06-13"); 
                     item.startTime = entry.value("time", "12:00");
-                    item.channel = entry.value("channel", "5.1");
-                    item.duration = entry.value("duration", "1800");
+                    item.channel   = entry.value("channel", "5.1");
+                    item.duration  = entry.value("duration", "1800");
                     item.processed = false;
                     gScheduleList.push_back(item);
                 }
             }
         }
         else if (jIn.is_array()) {
+            // Safe legacy fallback if your file only contains a raw array of schedules
+            cfg.showUpdateNotifications = true;
+            cfg.debugEnable             = true;
+            
             gScheduleList.clear();
             for (const auto& entry : jIn) {
                 ScheduleItem item;
                 item.startDate = entry.value("date", "2026-06-13"); 
                 item.startTime = entry.value("time", "12:00");
-                item.channel = entry.value("channel", "5.1");
-                item.duration = entry.value("duration", "1800");
+                item.channel   = entry.value("channel", "5.1");
+                item.duration  = entry.value("duration", "1800");
                 item.processed = false;
                 gScheduleList.push_back(item);
             }
@@ -191,6 +210,130 @@ void LoadSchedulesFromDisk() {
     }
     file.close();
 }
+
+
+namespace AppInfo {
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.2 (Haiku OS)";
+}
+
+// =============================================================================
+// NATIVE ASYNCHRONOUS UPDATE ENGINE IMPLEMENTATION (CURL ENGINE PASS)
+// =============================================================================
+static int32 BackgroundUpdateChecker(void* data) {
+    // Wait a brief 5 seconds after application boot to allow UI rendering to finalize completely
+    snooze(5000000); 
+
+    if (cfg.debugEnable) printf("[DEBUG_UPDATE] Asynchronous curl update checker running...\n");
+
+    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/cricket/refs/heads/main/VERSION";
+
+    BString shellCmdString;
+    shellCmdString.SetToFormat("curl -sL \"%s\"", targetUrl);
+
+    BString remoteVersionStr = "";
+    
+    FILE* pipeStream = popen(shellCmdString.String(), "r");
+    if (pipeStream != nullptr) {
+        char buffer[128] = {0};
+        if (fgets(buffer, sizeof(buffer), pipeStream) != nullptr) {
+            remoteVersionStr = buffer;
+        }
+        pclose(pipeStream);
+    }
+
+    remoteVersionStr.Trim(); 
+    if (cfg.debugEnable) printf("[DEBUG_UPDATE] Raw text received from GitHub: '%s'\n", remoteVersionStr.String());
+
+    // Strip visual prefix formatting blocks out of the remote string if they exist
+    remoteVersionStr.ReplaceAll("v.", ""); 
+    remoteVersionStr.ReplaceAll("v", "");  
+    
+    if (remoteVersionStr.Length() > 0) {
+		BString currentVersionStr = AppInfo::VERSION_STRING;
+		if (cfg.debugEnable) printf("[DEBUG_UPDATE] Local AppInfo text before cleaning: '%s'\n", currentVersionStr.String());
+		
+		// 1. Find where the semantic version sequence starts (v1., v0., etc.)
+		int32 vPos = currentVersionStr.IFindFirst("v");
+		// Safely skip the word "Version" if it exists by checking if the 'v' is part of it
+		if (vPos != B_ERROR && currentVersionStr.IFindFirst("Version") == vPos) {
+		    // Find the NEXT 'v' after the word "Version"
+		    vPos = currentVersionStr.IFindFirst("v", vPos + 7);
+		}
+		
+		if (vPos != B_ERROR) {
+		    // Drop everything before the real version prefix
+		    currentVersionStr.Remove(0, vPos);
+		}
+		
+		// 2. Safely strip the 'v.' or 'v' prefix now that the string starts with it
+		currentVersionStr.ReplaceAll("v.", ""); 
+		currentVersionStr.ReplaceAll("v", "");  
+		
+		// 3. Drop trailing metadata like "(Haiku OS)"
+		int32 spacePos = currentVersionStr.FindFirst(" ");
+		if (spacePos != B_ERROR) {
+		    currentVersionStr.Truncate(spacePos); 
+		}
+		
+		currentVersionStr.Trim();
+		if (cfg.debugEnable) printf("[DEBUG_UPDATE] Cleaned local target string: '%s'\n", currentVersionStr.String());
+
+
+
+        // Parse semantic versions down into flat integers for safe math checks
+        int32 curMajor = 0, curMinor = 0, curRevision = 0;
+        int32 remMajor = 0, remMinor = 0, remRevision = 0;
+
+        sscanf(currentVersionStr.String(), "%d.%d.%d", &curMajor, &curMinor, &curRevision);
+        sscanf(remoteVersionStr.String(), "%d.%d.%d", &remMajor, &remMinor, &remRevision);
+
+        int32 currentFlattened = (curMajor * 10000) + (curMinor * 100) + curRevision;
+        int32 remoteFlattened  = (remMajor * 10000) + (remMinor * 100) + remRevision;
+
+        if (cfg.debugEnable) {
+            printf("[DEBUG_UPDATE] Calculated values for math match -> Local: %d | Remote: %d\n", 
+                   (int)currentFlattened, (int)remoteFlattened);
+        }
+
+        if (remoteFlattened > currentFlattened) {
+            if (cfg.debugEnable) printf("[DEBUG_UPDATE] Update matched! Checking alert preference flags...\n");
+            
+            // =========================================================================
+            // CHANNELS AUTO-HIDE PREFERENCE INTERCEPT
+            // =========================================================================
+            if (!cfg.showUpdateNotifications) {
+                if (cfg.debugEnable) printf("[DEBUG_UPDATE] Suppressing desktop alert toast\n");
+                return B_OK; // Break out cleanly and silently without throwing the alert box!
+            }
+            // =========================================================================
+
+            // Native Haiku desktop notification banner toast window dispatch engine
+            BNotification updateAlert(B_INFORMATION_NOTIFICATION);
+            updateAlert.SetGroup("Cricket IRC");
+            updateAlert.SetTitle("Update Available");
+            
+            BString alertContent;
+            alertContent << "A newer version of Cricket is available! (v" << remoteVersionStr 
+                         << ")";
+            updateAlert.SetContent(alertContent.String());
+            
+            updateAlert.Send();
+            if (cfg.debugEnable) printf("[DEBUG_UPDATE] Toast notification sent successfully.\n");
+        } else {
+            if (cfg.debugEnable) printf("[DEBUG_UPDATE] Math complete: Client binary is already completely up to date.\n");
+        }
+    } else {
+        if (cfg.debugEnable) printf("[DEBUG_UPDATE] CRITICAL ERR: Raw text data read from pipe buffer was empty!\n");
+    }
+    
+    return B_OK;
+}
+
+
+
+
+
+
 
 size_t StorageWriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
 struct AsyncIconDownloadConfig {
@@ -477,6 +620,9 @@ class DVRWindow : public BWindow {
 		BFilePanel* fFolderPanel;      
 		BStringView* fPathDisplayLabel; 
 		BButton* fBrowseButton;       
+		BMenuItem* fNotifyOnItem;
+		BMenuItem* fNotifyOffItem;
+		
 		
 		enum ChannelFilter {
 		    FILTER_ALL,
@@ -806,6 +952,12 @@ public:
 
     DVRWindow() : BWindow(BRect(150, 150, 1030, 625), "Haiku HDHomeRun DVR Scheduler", B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE) {
         LoadSchedulesFromDisk();
+        
+        thread_id updateThread = spawn_thread(BackgroundUpdateChecker, "UpdateCheckerThread", B_NORMAL_PRIORITY, this);
+        if (updateThread >= 0) {
+            resume_thread(updateThread);
+        }
+        
         fSelectedDirectory = gGlobalSaveDirectory;
         fFolderPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), NULL, B_DIRECTORY_NODE, false, new BMessage(MSG_DIR_CHOSEN));
         std::string initialButtonText = "Save To: " + fSelectedDirectory;
@@ -813,8 +965,35 @@ public:
         fCountdownLabel = new BStringView(BRect(20, 345, 330, 365), "countdown_label", "Time Remaining: --:--");
         fCountdownLabel->SetAlignment(B_ALIGN_CENTER); 
           
-        fCurrentFilter = FILTER_ALL;
+        // =========================================================================
+        // TOP APPLICATION MENUBAR INITIALIZATION
+        // =========================================================================
         BMenuBar* menuBar = new BMenuBar(BRect(0, 0, Bounds().Width(), 20), "top_menubar");
+
+        // 1. Create the new Options / Update Notifications Dropdown
+        BMenu* optionsMenu = new BMenu("Options");
+        
+        BMessage* msgNotifyOn = new BMessage(MSG_TOGGLE_NOTIFICATIONS);
+        msgNotifyOn->AddBool("enable", true);
+        fNotifyOnItem = new BMenuItem("Enable Update Alerts", msgNotifyOn);
+
+        BMessage* msgNotifyOff = new BMessage(MSG_TOGGLE_NOTIFICATIONS);
+        msgNotifyOff->AddBool("enable", false);
+        fNotifyOffItem = new BMenuItem("Disable Update Alerts", msgNotifyOff);
+
+        // Synchronize visual checkboxes with your disk configuration variable
+        fNotifyOnItem->SetMarked(cfg.showUpdateNotifications == true);
+        fNotifyOffItem->SetMarked(cfg.showUpdateNotifications == false);
+
+
+        optionsMenu->AddItem(fNotifyOnItem);
+        optionsMenu->AddItem(fNotifyOffItem);
+        
+        // Add Options first so it sits on the far left side
+        menuBar->AddItem(optionsMenu);        
+
+        // 2. Create your original Channel Filter Dropdown
+        fCurrentFilter = FILTER_ALL;
         BMenu* filterMenu = new BMenu("Filter");
         BMenuItem* itemAll = new BMenuItem("All Channels", new BMessage(MSG_FILTER_ALL));
         BMenuItem* itemHd  = new BMenuItem("HD Only",      new BMessage(MSG_FILTER_HD));
@@ -823,8 +1002,13 @@ public:
         filterMenu->AddItem(itemAll);
         filterMenu->AddItem(itemHd);
         filterMenu->AddItem(itemSd);
+        
+        // Add Filter second so it sits directly to the right of Options
         menuBar->AddItem(filterMenu);        
         AddChild(menuBar);
+
+        
+        
 		BView* view = new BView(Bounds(), "MainView", B_FOLLOW_ALL, B_WILL_DRAW);
 		
         view->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));        
@@ -960,6 +1144,28 @@ public:
 	
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
+        	
+        	
+        case MSG_TOGGLE_NOTIFICATIONS: {
+            bool enableAlerts = true;
+            if (message->FindBool("enable", &enableAlerts) == B_OK) {
+                // Update global cfg object field
+                cfg.showUpdateNotifications = enableAlerts;
+                
+                // Toggle the UI checkbox checkmarks
+                fNotifyOnItem->SetMarked(cfg.showUpdateNotifications == true);
+                fNotifyOffItem->SetMarked(cfg.showUpdateNotifications == false);
+                
+                // Instantly commit preference state change directly into disk storage
+                SaveSchedulesToDisk();
+                
+                if (cfg.debugEnable) {
+                    printf("[DEBUG_UPDATE] Notification configuration mutated via UI: %s\n", 
+                           cfg.showUpdateNotifications ? "ENABLED" : "DISABLED");
+                }
+            }
+            break;
+        }
 
             
         case MSG_POLL_BACKEND: {
