@@ -42,31 +42,32 @@
 
 using json = nlohmann::json;
 
-const uint32 MSG_RESTART_BACKEND   = 'rstB';
-const uint32 MSG_POLL_BACKEND      = 'polB';
-const uint32 MSG_POPUP_CALENDAR    = 'popC';
-const uint32 MSG_DATE_SELECTED     = 'dtSl';
-const uint32 MSG_START_RECORDING   = 'recS';
-const uint32 MSG_STOP_RECORDING    = 'recT';
-const uint32 MSG_RECORDING_DONE    = 'recD';
-const uint32 MSG_TUNER_SELECTED    = 'tunS';
-const uint32 MSG_ADD_SCHEDULE      = 'schA';
-const uint32 MSG_DURATION_SELECTED = 'durS';
-const uint32 MSG_CHANNEL_CLICKED   = 'chCl';
-const uint32 MSG_REFRESH_SCHEDULES = 'schR';
-const uint32 MSG_REMOVE_SCHEDULE   = 'scRh';
-const uint32 MSG_FILTER_ALL        = 'fltA';
-const uint32 MSG_FILTER_HD         = 'fltH';
-const uint32 MSG_FILTER_SD         = 'fltS';
-const uint32 MSG_CHOOSE_DIR        = 'chDr';
-const uint32 MSG_DIR_CHOSEN        = 'drCh';
-const uint32 MSG_COUNTDOWN_TICK    = 'cdTk';
-const uint32 MSG_CLOCK_UP          = 'clkU';
-const uint32 MSG_CLOCK_DOWN    	   = 'clkD';
-const uint32 MSG_DISK_SPACE_WARNING = 'dSpc';
+const uint32 MSG_RESTART_BACKEND   			= 'rstB';
+const uint32 MSG_POLL_BACKEND      			= 'polB';
+const uint32 MSG_POPUP_CALENDAR    			= 'popC';
+const uint32 MSG_DATE_SELECTED     			= 'dtSl';
+const uint32 MSG_START_RECORDING   			= 'recS';
+const uint32 MSG_STOP_RECORDING    			= 'recT';
+const uint32 MSG_RECORDING_DONE    			= 'recD';
+const uint32 MSG_TUNER_SELECTED    			= 'tunS';
+const uint32 MSG_ADD_SCHEDULE      			= 'schA';
+const uint32 MSG_DURATION_SELECTED 			= 'durS';
+const uint32 MSG_CHANNEL_CLICKED   			= 'chCl';
+const uint32 MSG_REFRESH_SCHEDULES 			= 'schR';
+const uint32 MSG_REMOVE_SCHEDULE   			= 'scRh';
+const uint32 MSG_FILTER_ALL        			= 'fltA';
+const uint32 MSG_FILTER_HD         			= 'fltH';
+const uint32 MSG_FILTER_SD         			= 'fltS';
+const uint32 MSG_CHOOSE_DIR        			= 'chDr';
+const uint32 MSG_DIR_CHOSEN        			= 'drCh';
+const uint32 MSG_COUNTDOWN_TICK    			= 'cdTk';
+const uint32 MSG_CLOCK_UP          			= 'clkU';
+const uint32 MSG_CLOCK_DOWN    	   			= 'clkD';
+const uint32 MSG_DISK_SPACE_WARNING 	    = 'dSpc';
 const uint32 MSG_REFRESH_CHANNEL_LIST_ICONS = 'rIco';
-const uint32 MSG_STREAM_PROGRESS_UPDATE = 'sPrg';
-const uint32 MSG_TOGGLE_NOTIFICATIONS= 'ntfg';
+const uint32 MSG_STREAM_PROGRESS_UPDATE     = 'sPrg';
+const uint32 MSG_TOGGLE_NOTIFICATIONS       = 'ntfg';
+const uint32 MSG_TOGGLE_DEBUG               = 'dbug';
 
 const char* kSettingsFilePath = "/boot/home/config/settings/HaikuDVR_schedules.json";
 
@@ -213,8 +214,11 @@ void LoadSchedulesFromDisk() {
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.2 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.6 (Haiku OS)";
 }
+
+// Forward declaration signature for update worker thread
+static int32 BackgroundUpdateChecker(void* data);
 
 // =============================================================================
 // NATIVE ASYNCHRONOUS UPDATE ENGINE IMPLEMENTATION (CURL ENGINE PASS)
@@ -225,7 +229,7 @@ static int32 BackgroundUpdateChecker(void* data) {
 
     if (cfg.debugEnable) printf("[DEBUG_UPDATE] Asynchronous curl update checker running...\n");
 
-    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/HaikuDVR/refs/heads/main/VERSION";
+    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/HaikuSuperMusicThingy/refs/heads/main/VERSION";
 
     BString shellCmdString;
     shellCmdString.SetToFormat("curl -sL \"%s\"", targetUrl);
@@ -244,49 +248,34 @@ static int32 BackgroundUpdateChecker(void* data) {
     remoteVersionStr.Trim(); 
     if (cfg.debugEnable) printf("[DEBUG_UPDATE] Raw text received from GitHub: '%s'\n", remoteVersionStr.String());
 
-    // Strip visual prefix formatting blocks out of the remote string if they exist
-    remoteVersionStr.ReplaceAll("v.", ""); 
-    remoteVersionStr.ReplaceAll("v", "");  
+    remoteVersionStr.Trim(); 
+    if (cfg.debugEnable) printf("[DEBUG_UPDATE] Raw text received from GitHub: '%s'\n", remoteVersionStr.String());
     
     if (remoteVersionStr.Length() > 0) {
-		BString currentVersionStr = AppInfo::VERSION_STRING;
-		if (cfg.debugEnable) printf("[DEBUG_UPDATE] Local AppInfo text before cleaning: '%s'\n", currentVersionStr.String());
-		
-		// 1. Find where the semantic version sequence starts (v1., v0., etc.)
-		int32 vPos = currentVersionStr.IFindFirst("v");
-		// Safely skip the word "Version" if it exists by checking if the 'v' is part of it
-		if (vPos != B_ERROR && currentVersionStr.IFindFirst("Version") == vPos) {
-		    // Find the NEXT 'v' after the word "Version"
-		    vPos = currentVersionStr.IFindFirst("v", vPos + 7);
-		}
-		
-		if (vPos != B_ERROR) {
-		    // Drop everything before the real version prefix
-		    currentVersionStr.Remove(0, vPos);
-		}
-		
-		// 2. Safely strip the 'v.' or 'v' prefix now that the string starts with it
-		currentVersionStr.ReplaceAll("v.", ""); 
-		currentVersionStr.ReplaceAll("v", "");  
-		
-		// 3. Drop trailing metadata like "(Haiku OS)"
-		int32 spacePos = currentVersionStr.FindFirst(" ");
-		if (spacePos != B_ERROR) {
-		    currentVersionStr.Truncate(spacePos); 
-		}
-		
-		currentVersionStr.Trim();
-		if (cfg.debugEnable) printf("[DEBUG_UPDATE] Cleaned local target string: '%s'\n", currentVersionStr.String());
+        BString currentVersionStr = AppInfo::VERSION_STRING;
+        if (cfg.debugEnable) printf("[DEBUG_UPDATE] Local AppInfo text before cleaning: '%s'\n", currentVersionStr.String());
 
-
-
-        // Parse semantic versions down into flat integers for safe math checks
         int32 curMajor = 0, curMinor = 0, curRevision = 0;
         int32 remMajor = 0, remMinor = 0, remRevision = 0;
 
-        sscanf(currentVersionStr.String(), "%d.%d.%d", &curMajor, &curMinor, &curRevision);
-        sscanf(remoteVersionStr.String(), "%d.%d.%d", &remMajor, &remMinor, &remRevision);
+        // --- Bulletproof sscanf Pattern Matching ---
+        // Looks for a 'v' immediately followed by a number, bypassing words like "HaikuDVR" or "Version"
+        if (sscanf(currentVersionStr.String(), "%*[^v]v%d.%d.%d", &curMajor, &curMinor, &curRevision) != 3) {
+            // Fallback: search for raw dot-separated numbers anywhere if 'v' isn't found
+            sscanf(currentVersionStr.String(), "%*[^0-9]%d.%d.%d", &curMajor, &curMinor, &curRevision);
+        }
 
+        // Parse the remote string from GitHub using the same pattern rules
+        if (sscanf(remoteVersionStr.String(), "%*[^v]v%d.%d.%d", &remMajor, &remMinor, &remRevision) != 3) {
+            sscanf(remoteVersionStr.String(), "%*[^0-9]%d.%d.%d", &remMajor, &remMinor, &remRevision);
+        }
+
+        // Log the cleaned string results visually just for your debug logs
+        if (cfg.debugEnable) {
+            printf("[DEBUG_UPDATE] Cleaned local target string: '%d.%d.%d'\n", curMajor, curMinor, curRevision);
+        }
+
+        // Flatten values down into integers for math checks
         int32 currentFlattened = (curMajor * 10000) + (curMinor * 100) + curRevision;
         int32 remoteFlattened  = (remMajor * 10000) + (remMinor * 100) + remRevision;
 
@@ -294,6 +283,7 @@ static int32 BackgroundUpdateChecker(void* data) {
             printf("[DEBUG_UPDATE] Calculated values for math match -> Local: %d | Remote: %d\n", 
                    (int)currentFlattened, (int)remoteFlattened);
         }
+
 
         if (remoteFlattened > currentFlattened) {
             if (cfg.debugEnable) printf("[DEBUG_UPDATE] Update matched! Checking alert preference flags...\n");
@@ -309,11 +299,11 @@ static int32 BackgroundUpdateChecker(void* data) {
 
             // Native Haiku desktop notification banner toast window dispatch engine
             BNotification updateAlert(B_INFORMATION_NOTIFICATION);
-            updateAlert.SetGroup("HaikuDVR IRC");
+            updateAlert.SetGroup("HaikuDVR");
             updateAlert.SetTitle("Update Available");
             
             BString alertContent;
-            alertContent << "A newer version of HaikuDVR is available! (v" << remoteVersionStr 
+            alertContent << "A newer version of HaikuDVR is available! (" << remoteVersionStr 
                          << ")";
             updateAlert.SetContent(alertContent.String());
             
@@ -328,7 +318,6 @@ static int32 BackgroundUpdateChecker(void* data) {
     
     return B_OK;
 }
-
 
 
 
@@ -622,8 +611,9 @@ class DVRWindow : public BWindow {
 		BButton* fBrowseButton;       
 		BMenuItem* fNotifyOnItem;
 		BMenuItem* fNotifyOffItem;
-		
-		
+		BMenuItem* fDebugOnItem;
+		BMenuItem* fDebugOffItem;
+				
 		enum ChannelFilter {
 		    FILTER_ALL,
 		    FILTER_HD,
@@ -970,9 +960,10 @@ public:
         // =========================================================================
         BMenuBar* menuBar = new BMenuBar(BRect(0, 0, Bounds().Width(), 20), "top_menubar");
 
-        // 1. Create the new Options / Update Notifications Dropdown
+        // 1. Create the Options Dropdown
         BMenu* optionsMenu = new BMenu("Options");
         
+        // --- Update Alerts Section ---
         BMessage* msgNotifyOn = new BMessage(MSG_TOGGLE_NOTIFICATIONS);
         msgNotifyOn->AddBool("enable", true);
         fNotifyOnItem = new BMenuItem("Enable Update Alerts", msgNotifyOn);
@@ -981,16 +972,33 @@ public:
         msgNotifyOff->AddBool("enable", false);
         fNotifyOffItem = new BMenuItem("Disable Update Alerts", msgNotifyOff);
 
-        // Synchronize visual checkboxes with your disk configuration variable
         fNotifyOnItem->SetMarked(cfg.showUpdateNotifications == true);
         fNotifyOffItem->SetMarked(cfg.showUpdateNotifications == false);
-
 
         optionsMenu->AddItem(fNotifyOnItem);
         optionsMenu->AddItem(fNotifyOffItem);
         
+        // --- ADDED: Debug Mode Section ---
+        optionsMenu->AddSeparatorItem(); // Visual separation line
+
+        // Create class-level fields for these items if you want to track them: BMenuItem *fDebugOnItem, *fDebugOffItem;
+        BMessage* msgDebugOn = new BMessage(MSG_TOGGLE_DEBUG);
+        msgDebugOn->AddBool("enable", true);
+        fDebugOnItem = new BMenuItem("Enable Debug Mode", msgDebugOn);
+
+        BMessage* msgDebugOff = new BMessage(MSG_TOGGLE_DEBUG);
+        msgDebugOff->AddBool("enable", false);
+        fDebugOffItem = new BMenuItem("Disable Debug Mode", msgDebugOff);
+
+        fDebugOnItem->SetMarked(cfg.debugEnable == true);
+        fDebugOffItem->SetMarked(cfg.debugEnable == false);
+
+        optionsMenu->AddItem(fDebugOnItem);
+        optionsMenu->AddItem(fDebugOffItem);
+        
         // Add Options first so it sits on the far left side
         menuBar->AddItem(optionsMenu);        
+      
 
         // 2. Create your original Channel Filter Dropdown
         fCurrentFilter = FILTER_ALL;
@@ -1146,6 +1154,26 @@ public:
         switch (message->what) {
         	
         	
+        case MSG_TOGGLE_DEBUG: {
+            bool enableDebug = true;
+            if (message->FindBool("enable", &enableDebug) == B_OK) {
+                // Update global cfg object field directly
+                cfg.debugEnable = enableDebug;
+                
+                // Toggle radio-style UI checkmarks
+                fDebugOnItem->SetMarked(cfg.debugEnable == true);
+                fDebugOffItem->SetMarked(cfg.debugEnable == false);
+                
+                // Instantly commit preference state change directly into disk storage
+                SaveSchedulesToDisk();
+                
+                // This will always fire regardless of configuration state because we just toggled it
+                printf("[DEBUG_SYS] System logging runtime state mutated via UI: %s\n", 
+                       cfg.debugEnable ? "ENABLED" : "DISABLED");
+            }
+            break;
+        }
+       	
         case MSG_TOGGLE_NOTIFICATIONS: {
             bool enableAlerts = true;
             if (message->FindBool("enable", &enableAlerts) == B_OK) {
@@ -1326,31 +1354,32 @@ public:
 		  }
 
  	
-	     case MSG_FILTER_ALL:
-	     case MSG_FILTER_HD:
-	     case MSG_FILTER_SD: {
-	         BMenuBar* menuBar = dynamic_cast<BMenuBar*>(FindView("top_menubar"));
-	         if (menuBar) {
-	             BMenu* filterMenu = menuBar->SubmenuAt(0);
-	             if (filterMenu) {
-	                 for (int32 i = 0; i < filterMenu->CountItems(); i++) {
-	                     filterMenu->ItemAt(i)->SetMarked(false);
-	                 }
-	             }
-	         }
-	
-	         BMenuItem* clickedItem = nullptr;
-	         message->FindPointer("source", (void**)&clickedItem);
-	         if (clickedItem) clickedItem->SetMarked(true);
-	
-	         if (message->what == MSG_FILTER_ALL) fCurrentFilter = FILTER_ALL;
-	         else if (message->what == MSG_FILTER_HD) fCurrentFilter = FILTER_HD;
-	         else if (message->what == MSG_FILTER_SD) fCurrentFilter = FILTER_SD;
-	
-	         FetchAndPopulateChannelList();
-	         break;
-	     }
- 	
+         case MSG_FILTER_ALL:
+         case MSG_FILTER_HD:
+         case MSG_FILTER_SD: {
+             BMenuBar* menuBar = dynamic_cast<BMenuBar*>(FindView("top_menubar"));
+             if (menuBar) {
+                 // CHANGED FROM 0 TO 1: FilterMenu is now the second item in the bar
+                 BMenu* filterMenu = menuBar->SubmenuAt(1);
+                 if (filterMenu) {
+                     for (int32 i = 0; i < filterMenu->CountItems(); i++) {
+                         filterMenu->ItemAt(i)->SetMarked(false);
+                     }
+                 }
+             }
+
+             BMenuItem* clickedItem = nullptr;
+             message->FindPointer("source", (void**)&clickedItem);
+             if (clickedItem) clickedItem->SetMarked(true);
+
+             if (message->what == MSG_FILTER_ALL) fCurrentFilter = FILTER_ALL;
+             else if (message->what == MSG_FILTER_HD) fCurrentFilter = FILTER_HD;
+             else if (message->what == MSG_FILTER_SD) fCurrentFilter = FILTER_SD;
+
+             FetchAndPopulateChannelList();
+             break;
+         }
+
 
 	     case MSG_REFRESH_CHANNEL_LIST_ICONS: {
 	         int32 targetRow = -1;
