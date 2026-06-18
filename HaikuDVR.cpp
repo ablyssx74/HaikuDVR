@@ -214,7 +214,7 @@ void LoadSchedulesFromDisk() {
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.6 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.7 (Haiku OS)";
 }
 
 // Forward declaration signature for update worker thread
@@ -229,7 +229,7 @@ static int32 BackgroundUpdateChecker(void* data) {
 
     if (cfg.debugEnable) printf("[DEBUG_UPDATE] Asynchronous curl update checker running...\n");
 
-    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/HaikuSuperMusicThingy/refs/heads/main/VERSION";
+    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/HaikuDVR/refs/heads/main/VERSION";
 
     BString shellCmdString;
     shellCmdString.SetToFormat("curl -sL \"%s\"", targetUrl);

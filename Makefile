@@ -5,7 +5,7 @@ CXXFLAGS = -Wall -O2 -I./include -I/boot/system/develop/headers/private/shared
 # Target binary definitions
 GUI_TARGET = HaikuDVR
 SERVER_TARGET = HaikuDVRService
-VERSION = 1.0.6
+VERSION = 1.0.7
 PACKAGE_DIR := build/package
 
 # Shared target architectures
