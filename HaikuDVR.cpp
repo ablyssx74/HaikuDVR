@@ -225,7 +225,7 @@ static int32 BackgroundUpdateChecker(void* data) {
 
     if (cfg.debugEnable) printf("[DEBUG_UPDATE] Asynchronous curl update checker running...\n");
 
-    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/cricket/refs/heads/main/VERSION";
+    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/HaikuDVR/refs/heads/main/VERSION";
 
     BString shellCmdString;
     shellCmdString.SetToFormat("curl -sL \"%s\"", targetUrl);
