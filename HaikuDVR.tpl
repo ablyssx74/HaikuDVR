@@ -19,6 +19,7 @@ requires {
 	haiku
 	nlohmann_json
 	curl
+	mpv
 }	
 urls {
 	"https://github.com/ablyssx74/HaikuDVR"
