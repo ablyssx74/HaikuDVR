@@ -1,11 +1,11 @@
 # Compiler definitions
 CXX = g++
-CXXFLAGS = -Wall -O2 -I./include -I/boot/system/develop/headers/private/shared
+CXXFLAGS = -Wall -O2 -I./include -I/boot/system/develop/headers/private/shared 
 
 # Target binary definitions
 GUI_TARGET = HaikuDVR
 SERVER_TARGET = HaikuDVRService
-VERSION = 1.0.7
+VERSION = 1.0.8
 PACKAGE_DIR := build/package
 
 # Shared target architectures
