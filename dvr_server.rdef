@@ -3,11 +3,11 @@ resource app_signature "application/x-vnd.haikuhdhomerun-dvr";
 resource app_version {
     major  = 1,   
     minor  = 0,   
-    middle = 2,   
+    middle = 3,   
     variety = B_APPV_DEVELOPMENT, 
     internal = 0,
-    short_info = "HaikuDVRService v1.0.2",
-    long_info = "HaikuDVRService- Native Haiku DVR Service Worker for HaikuDVR"
+    short_info = "dvr_server v1.0.3",
+    long_info = "dvr_server- Native Haiku DVR Service Worker for HaikuDVR"
 };
 
 resource app_flags B_SINGLE_LAUNCH | B_BACKGROUND_APP;

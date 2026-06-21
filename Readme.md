@@ -44,5 +44,4 @@ make release
 ```
 
 ### Screenshots
-<img align="left" width="894" height="509" alt="Image" src="https://github.com/user-attachments/assets/58ad9b64-2997-4b07-9693-07e6c5b06862" />
-<img align="left" width="1000" height="600" alt="Image" src="https://github.com/user-attachments/assets/409514ae-9169-4b43-8345-b764a33ef9fe" />
+<img align="left" width="889" height="508" alt="Image" src="https://github.com/user-attachments/assets/c8a3d465-3bcc-4562-ab09-6fdddf7f2254" />

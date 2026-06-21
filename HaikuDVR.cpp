@@ -46,11 +46,29 @@
 #include <stdlib.h>
 #include <Notification.h>
 #include <Alert.h>
+#include <app/MessageRunner.h>
+#include <StorageKit.h>
+#include <StringList.h>
+#include <Screen.h>
 
+namespace AppInfo {
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.9 (Haiku OS)";
+}
 
-
-
-
+const uint32 MSG_SET_PLAYER_MPV          	= 'pmpv';
+const uint32 MSG_SET_PLAYER_MEDIAPLAYER 	= 'pmed';
+const uint32 MSG_SET_PLAYER_VLC         	= 'pvlc';
+const uint32 MSG_ABORT_SPECIFIC_RECORDING 	= 'absp';
+const uint32 MSG_REFRESH_LIBRARY 			= 'rflb';
+const uint32 MSG_QUIT_ENTIRE_APP 			= 'qapp';
+const uint32 MSG_SHOW_MAIN_SCHEDULER 		= 'shms';
+const uint32 MSG_CLOSE_GUIDE_WINDOW 		= 'clgw';
+const uint32 MSG_PLAY_RECORDING   			= 'play';
+const uint32 MSG_DELETE_RECORDING 			= 'delt';
+const uint32 MSG_RECORDINGS_CLOSED 			= 'rcls';
+const uint32 MSG_VIEW_RECORDINGS  			= 'vrec';
+const uint32 MSG_GUIDE_CLOSED 				= 'gcls';
+const uint32 MSG_PERIODIC_GUIDE_REFRESH 	= 'pgrf';
 const uint32 MSG_CHECK_FIRMWARE 			= 'chfw';
 const uint32 MSG_FIRMWARE_CHECK_DONE 		= 'fwdn';
 const uint32 MSG_PREFILL_RECORD_SCHEDULE 	= 'pfrs';
@@ -66,7 +84,7 @@ const uint32 MSG_ADD_SCHEDULE      			= 'schA';
 const uint32 MSG_DURATION_SELECTED 			= 'durS';
 const uint32 MSG_CHANNEL_CLICKED   			= 'chCl';
 const uint32 MSG_REFRESH_SCHEDULES 			= 'schR';
-const uint32 MSG_PLAY_IN_MEDIAPLAYER 		= 'pimp';
+const uint32 MSG_PLAY_IN_MPV		 		= 'pimv';
 const uint32 MSG_REMOVE_SCHEDULE   			= 'scRh';
 const uint32 MSG_FILTER_ALL        			= 'fltA';
 const uint32 MSG_FILTER_HD         			= 'fltH';
@@ -100,6 +118,7 @@ void ensure_config_dir() {
 struct AppConfig {
     bool showUpdateNotifications = true;
     bool debugEnable = true; 
+    std::string defaultPlayer; 
 };
 
 AppConfig cfg; 
@@ -119,6 +138,7 @@ struct RecordingConfig {
     std::string duration;
     std::string path;
     int32 dbIndexPosition;
+    
 };
 
 struct ScheduleItem {
@@ -126,6 +146,7 @@ struct ScheduleItem {
     std::string startTime; 
     std::string channel;
     std::string duration; 
+    std::string showTitle; 
     bool processed;
     std::string tunerIp; 
 };
@@ -168,10 +189,10 @@ void SaveSchedulesToDisk() {
     json jRoot = json::object();
     
     jRoot["save_directory"] = gGlobalSaveDirectory; 
-    
-    // --- MAP STRUCT VALUES TO JSON ---
+
     jRoot["show_update_notifications"] = cfg.showUpdateNotifications; 
     jRoot["debug_enable"]              = cfg.debugEnable;
+    jRoot["default_player"]            = cfg.defaultPlayer; // <-- NEW: Serialize selection
     
     json jSchedules = json::array();
     for (const auto& item : gScheduleList) {
@@ -181,7 +202,8 @@ void SaveSchedulesToDisk() {
                 {"time", item.startTime},
                 {"channel", item.channel},
                 {"duration", item.duration},
-                {"tuner_ip", item.tunerIp} 
+                {"tuner_ip", item.tunerIp},
+                {"show_title", item.showTitle}
             });
         }
     }
@@ -196,7 +218,6 @@ void SaveSchedulesToDisk() {
 }
 
 
-
 void LoadSchedulesFromDisk() {
     std::ifstream file(kSettingsFilePath);
     if (!file.is_open()) return;
@@ -207,10 +228,10 @@ void LoadSchedulesFromDisk() {
         gScheduleLocker.Lock();
         
         if (jIn.is_object()) {
-            // Read directories and configurations from the root object
             gGlobalSaveDirectory        = jIn.value("save_directory", "/boot/home");
             cfg.showUpdateNotifications = jIn.value("show_update_notifications", true);
             cfg.debugEnable             = jIn.value("debug_enable", true);
+            cfg.defaultPlayer           = jIn.value("default_player", "MPV"); // <-- NEW: Read selection with fallback
             
             if (jIn.contains("schedules") && jIn["schedules"].is_array()) {
                 gScheduleList.clear();
@@ -220,15 +241,17 @@ void LoadSchedulesFromDisk() {
                     item.startTime = entry.value("time", "12:00");
                     item.channel   = entry.value("channel", "5.1");
                     item.duration  = entry.value("duration", "1800");
+                    item.tunerIp   = entry.value("tuner_ip", ""); 
+                    item.showTitle = entry.value("show_title", "Unknown_Show");
                     item.processed = false;
                     gScheduleList.push_back(item);
                 }
             }
         }
         else if (jIn.is_array()) {
-            // Safe legacy fallback if your file only contains a raw array of schedules
             cfg.showUpdateNotifications = true;
             cfg.debugEnable             = true;
+            cfg.defaultPlayer           = "MPV"; // <-- NEW: Legacy baseline assignment
             
             gScheduleList.clear();
             for (const auto& entry : jIn) {
@@ -237,6 +260,8 @@ void LoadSchedulesFromDisk() {
                 item.startTime = entry.value("time", "12:00");
                 item.channel   = entry.value("channel", "5.1");
                 item.duration  = entry.value("duration", "1800");
+                item.tunerIp   = entry.value("tuner_ip", "");
+                item.showTitle = entry.value("show_title", "Unknown_Show"); 
                 item.processed = false;
                 gScheduleList.push_back(item);
             }
@@ -250,16 +275,9 @@ void LoadSchedulesFromDisk() {
 }
 
 
-namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.8 (Haiku OS)";
-}
 
 
-// =============================================================================
-// NATIVE ASYNCHRONOUS UPDATE ENGINE IMPLEMENTATION (CURL ENGINE PASS)
-// =============================================================================
 static int32 BackgroundUpdateChecker(void* data) {
-    // Wait a brief 5 seconds after application boot to allow UI rendering to finalize completely
     snooze(5000000); 
 
     if (cfg.debugEnable) printf("[DEBUG_UPDATE] Asynchronous curl update checker running...\n");
@@ -345,13 +363,8 @@ static int32 BackgroundUpdateChecker(void* data) {
 }
 
 
-// =========================================================================
-// FORWARD DECLARATIONS (Fixes compiler scanning scopes)
-// =========================================================================
-class DVRWindow; // Tells the compiler DVRWindow exists lower down
 extern size_t NetworkStringCallback(void* contents, size_t size, size_t nmemb, void* userp);
-// 1. Add the forward declaration near the top of the file (around line 1056)
-class RealTVGuideWindow; 
+
 
 // =========================================================================
 // PACKET PACKER FOR FIRMWARE WORKER
@@ -373,13 +386,10 @@ static int32 FirmwareCheckerWorker(void* data) {
     BWindow* window = param->targetWindow;
     BString targetIp = param->tunerIp;
     
-    // Clean up the parameter allocation right away since we have copies of its values
     delete param;
 
     if (window == nullptr) return B_ERROR;
 
-    // 1. FIXED: Pass the exact target IP string instead of "AUTO"!
-    // If your app hasn't selected an IP yet, fall back to "AUTO" mode.
     const char* discoveryTarget = targetIp.IsEmpty() ? "AUTO" : targetIp.String();
 
     struct hdhomerun_device_t* hdDevice = hdhomerun_device_create_from_str(discoveryTarget, NULL);
@@ -432,12 +442,328 @@ static int32 FirmwareCheckerWorker(void* data) {
     BMessage finishMessage(MSG_FIRMWARE_CHECK_DONE);
     finishMessage.AddString("current_version", currentFirmware.String());
     finishMessage.AddString("latest_version", latestFirmware.String());
-    
+       
     window->PostMessage(&finishMessage);
     hdhomerun_device_destroy(hdDevice);
     return B_OK;
 }
 
+
+// Simple object representation to hold the neatly parsed file info
+struct LocalRecordingItem {
+    BString fileName;
+    BString channel;
+    BString date;
+    BString time;
+    BString showTitle;
+};
+
+
+
+// 1. Custom list item subclass to store the disk file path hidden from view
+class RecordingListItem : public BStringItem {
+public:
+    BString fFullFilePath;
+    BString fFileNameOnly;
+
+    RecordingListItem(const char* label, const char* fullPath, const char* fileName) 
+        : BStringItem(label) {
+        fFullFilePath = fullPath;
+        fFileNameOnly = fileName;
+    }
+};
+
+
+
+class RecordingsBrowserWindow : public BWindow {
+public:
+    RecordingsBrowserWindow(BRect frame, const char* recordingDirectory, BWindow* mainAppWindow) 
+        : BWindow(frame, "Recorded Media Library", B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS) {
+        
+        ResizeTo(650, 450);
+        fMainAppWindow = mainAppWindow;
+        fRecordingDir = recordingDirectory;
+        
+        fRecordingsList = new BListView("recordingsListView", B_SINGLE_SELECTION_LIST);
+        fRecordingsList->SetInvocationMessage(new BMessage(MSG_PLAY_RECORDING));
+        
+        BScrollView* scrollWrapper = new BScrollView("scrollRecs", fRecordingsList, 0, false, true);
+        
+        fTotalUsageLabel = new BStringView("totalUsageLabel", "Calculating library storage footprint...");
+        fTotalUsageLabel->SetExplicitMinSize(BSize(200, 20));
+        fTotalUsageLabel->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 20));
+
+        fRefreshButton = new BButton("refreshBtn", "Refresh Library", new BMessage(MSG_REFRESH_LIBRARY));
+        fRefreshButton->SetExplicitMaxSize(BSize(120, 24)); 
+
+        BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
+            .SetInsets(12, 12, 12, 12)
+            .Add(scrollWrapper)
+            .AddGroup(B_HORIZONTAL, 10) 
+                .Add(fTotalUsageLabel, 1.0) 
+                .Add(fRefreshButton, 0.0)  
+            .End()
+            .SetExplicitMaxSize(BSize(800, B_SIZE_UNLIMITED))
+        .End();
+
+        _ScanAndParseDirectory();
+    }
+
+
+
+
+    bool QuitRequested() override {
+        if (fMainAppWindow != nullptr) {
+            fMainAppWindow->PostMessage(MSG_RECORDINGS_CLOSED);
+        }
+        return true;
+    }
+
+    void DispatchMessage(BMessage* message, BHandler* handler) override {
+        if (message->what == B_MOUSE_DOWN) {
+            int32 buttons = 0;
+            BPoint point;
+            message->FindInt32("buttons", &buttons);
+            message->FindPoint("where", &point); 
+
+            if (buttons == B_SECONDARY_MOUSE_BUTTON) {
+                BPoint listPoint = fRecordingsList->ConvertFromParent(point);
+                
+                int32 index = fRecordingsList->IndexOf(listPoint);
+                if (index >= 0) {
+                    fRecordingsList->Select(index); 
+                    
+                    BPopUpMenu* menu = new BPopUpMenu("Context", false, false);
+                    menu->AddItem(new BMenuItem("Watch Recording", new BMessage(MSG_PLAY_RECORDING)));
+                    menu->AddItem(new BMenuItem("Delete Recording", new BMessage(MSG_DELETE_RECORDING)));
+                    
+                    BPoint screenPoint = fRecordingsList->ConvertToScreen(listPoint) + BPoint(2, 2);
+                    BMenuItem* chosen = menu->Go(screenPoint, false, true, false);
+                    if (chosen != nullptr && chosen->Message() != nullptr) {
+                        PostMessage(chosen->Message()); 
+                    }
+                    delete menu;
+                    return; 
+                }
+            }
+        }
+        BWindow::DispatchMessage(message, handler);
+    }
+
+    void MessageReceived(BMessage* message) override {
+        switch (message->what) {
+        	
+            case MSG_REFRESH_LIBRARY: {
+                _ScanAndParseDirectory();
+                break;
+            }
+	
+        	
+            case MSG_PLAY_RECORDING: {
+                int32 selection = fRecordingsList->CurrentSelection();
+                if (selection >= 0) {
+                    RecordingListItem* item = (RecordingListItem*)fRecordingsList->ItemAt(selection);
+                    if (item != nullptr) {                       
+
+                        if (cfg.defaultPlayer == "MediaPlayer") {
+                            entry_ref fileRef;
+                            BEntry entry(item->fFullFilePath.String());
+                            if (entry.GetRef(&fileRef) == B_OK) {
+                    
+                                be_roster->Launch(&fileRef);
+                            }
+                        } 
+
+                        else {
+                            const char* binaryPath = "/boot/system/bin/mpv";
+                            if (cfg.defaultPlayer == "VLC") {
+                                binaryPath = "/boot/system/bin/vlc";
+                            }
+
+                            pid_t processId = fork();
+                            if (processId == 0) {
+
+                                char* playerArgs[3];
+                                playerArgs[0] = (char*)binaryPath;
+                                playerArgs[1] = (char*)item->fFullFilePath.String();
+                                playerArgs[2] = nullptr; 
+                                
+                                execv(playerArgs[0], playerArgs);
+                                _exit(1); 
+                            }
+                        }
+                        
+                    }
+                }
+                break;
+            }
+
+
+
+            case MSG_DELETE_RECORDING: {
+                int32 selection = fRecordingsList->CurrentSelection();
+                if (selection >= 0) {
+                    RecordingListItem* item = (RecordingListItem*)fRecordingsList->ItemAt(selection);
+                    if (item != nullptr) {
+                        BString alertText;
+                        alertText << "Are you sure you want to permanently delete:\n\n" 
+                                  << item->Text() << "?";
+                        
+                        BAlert* confirm = new BAlert("Delete Recording", alertText.String(), 
+                            "Cancel", "Delete", NULL, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+                        confirm->SetShortcut(0, B_ESCAPE);
+                        
+                        if (confirm->Go() == 1) {
+
+                            BMessage abortActiveStream(MSG_ABORT_SPECIFIC_RECORDING);
+                            abortActiveStream.AddString("file_path", item->fFullFilePath.String());
+                            
+                            if (fMainAppWindow != nullptr) {
+                                fMainAppWindow->PostMessage(&abortActiveStream);
+                            }
+
+                            snooze(50000); 
+
+                            BEntry fileEntry(item->fFullFilePath.String());
+                            if (fileEntry.Remove() == B_OK) {
+                                delete fRecordingsList->RemoveItem(selection);
+                                _ScanAndParseDirectory(); 
+                            } else {
+                                BAlert* error = new BAlert("Error", "Could not delete file from disk storage. File may be locked.", "OK");
+                                error->Go();
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+
+
+            
+            
+            default:
+                BWindow::MessageReceived(message);
+                break;
+        }
+    }
+
+private:
+    BString _FormatFileSize(off_t bytes) {
+        double size = (double)bytes;
+        int unit = 0;
+        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+        
+        while (size >= 1024.0 && unit < 4) {
+            size /= 1024.0;
+            unit++;
+        }
+        
+        BString result;
+        result.SetToFormat("%.2f %s", size, units[unit]);
+        return result;
+    }
+	BStringView* fTotalUsageLabel;
+    BListView* fRecordingsList;
+    BWindow*   fMainAppWindow;
+    BString    fRecordingDir;
+	BButton*   fRefreshButton;
+	
+    void _ScanAndParseDirectory() {
+        off_t totalAccumulatedBytes = 0;
+
+        int32 itemCount = fRecordingsList->CountItems();
+        for (int32 i = itemCount - 1; i >= 0; i--) {
+            delete fRecordingsList->RemoveItem(i);
+        }
+
+        BDirectory directory(fRecordingDir.String());
+        if (directory.InitCheck() != B_OK) return;
+
+        BEntry entry;
+        directory.Rewind();
+
+        while (directory.GetNextEntry(&entry) == B_OK) {
+            char name[B_FILE_NAME_LENGTH];
+            if (entry.GetName(name) != B_OK) continue;
+
+            BString origFilename(name);
+            
+            if (origFilename.StartsWith("DVR_Record_Ch_") && origFilename.EndsWith(".ts")) {
+                BPath fullPath;
+                entry.GetPath(&fullPath);
+                
+                off_t fileSizeRaw = 0;
+                entry.GetSize(&fileSizeRaw);
+                totalAccumulatedBytes += fileSizeRaw;
+
+                BString humanReadableSize = _FormatFileSize(fileSizeRaw);
+
+                BString workString = origFilename;
+                
+                BStringList initialTokens;
+                workString.Split("_", true, initialTokens);
+                BString channel = (initialTokens.CountStrings() >= 4) ? initialTokens.StringAt(3) : "?.?";
+                BString date    = (initialTokens.CountStrings() >= 5) ? initialTokens.StringAt(4) : "2026-00-00";
+                BString time    = (initialTokens.CountStrings() >= 6) ? initialTokens.StringAt(5) : "00-00";
+
+                BString prefixToStrip = "DVR_Record_Ch_";
+                prefixToStrip << channel << "_" << date << "_" << time << "_";
+                workString.RemoveFirst(prefixToStrip);
+
+                int32 suffixIndex = B_ERROR;
+                int32 searchPos = workString.Length() - 1;
+                
+                int32 underscoreCount = 0;
+                while (searchPos > 0) {
+                    if (workString.ByteAt(searchPos) == '_') {
+                        underscoreCount++;
+
+                        if (origFilename.IFindFirst("_Padded") != B_ERROR) {
+                            if (underscoreCount == 2) {
+                                suffixIndex = searchPos;
+                                break;
+                            }
+                        } else {
+                            if (underscoreCount == 1) {
+                                suffixIndex = searchPos;
+                                break;
+                            }
+                        }
+                    }
+                    searchPos--;
+                }
+
+                BString fullTitle = "Unknown_Show";
+                if (suffixIndex != B_ERROR && suffixIndex > 0) {
+                    workString.Truncate(suffixIndex);
+                    fullTitle = workString;
+                } else {
+
+                    int32 extIndex = workString.IFindFirst(".ts");
+                    if (extIndex != B_ERROR) workString.Truncate(extIndex);
+                    fullTitle = workString;
+                }
+                
+                fullTitle.ReplaceAll("_", " ");
+
+                BString displayRowLabel;
+                displayRowLabel << "• " << fullTitle 
+                                << "  (" << humanReadableSize << ")" 
+                                << "  [Ch " << channel << "]  "
+                                << date << " @ " << time.ReplaceAll("-", ":");
+
+                fRecordingsList->AddItem(new RecordingListItem(displayRowLabel.String(), fullPath.Path(), name));
+            }
+        }
+
+        BString totalFooterText;
+        totalFooterText << "Total Library Allocation Content: " << _FormatFileSize(totalAccumulatedBytes);
+        if (fTotalUsageLabel != nullptr) {
+            fTotalUsageLabel->SetText(totalFooterText.String());
+        }
+    }
+
+};
 
 
 
@@ -451,7 +777,6 @@ struct AsyncIconDownloadConfig {
     int32 listRowIndex;
 };
 
-// This function executes automatically as fast as media packets stream over the air
 int StreamProgressCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
     if (atomic_get(&gCancelRecording) == 1) {
         return 1; 
@@ -481,7 +806,6 @@ struct DownloadQueueItem {
     int32 listRowIndex;
 };
 
-// Global queue parameters
 std::vector<DownloadQueueItem> gIconDownloadQueue;
 BLocker gIconQueueLocker;
 int32 gIconThreadRunning = 0;
@@ -489,7 +813,6 @@ BMessenger* gIconWindowMessenger = nullptr;
 
 
 int32 SerialIconDownloaderThread(void* data) {
-    // Forward declaration to link cURL callbacks cleanly
     size_t StorageWriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
 
     atomic_set(&gIconThreadRunning, 1);
@@ -498,7 +821,6 @@ int32 SerialIconDownloaderThread(void* data) {
         DownloadQueueItem job;
         bool hasJob = false;
 
-        // Extract the next item from the queue safely
         gIconQueueLocker.Lock();
         if (!gIconDownloadQueue.empty()) {
             job = gIconDownloadQueue.front();
@@ -507,7 +829,6 @@ int32 SerialIconDownloaderThread(void* data) {
         }
         gIconQueueLocker.Unlock();
 
-        // If the queue is empty, exit the thread cleanly
         if (!hasJob) break;
 
         CURL* downloadCurl = curl_easy_init();
@@ -532,7 +853,7 @@ int32 SerialIconDownloaderThread(void* data) {
             }
             curl_easy_cleanup(downloadCurl);
         }
-        snooze(50000); // 50ms brief pause prevents hammering network hardware channels
+        snooze(50000);
     }
 
     atomic_set(&gIconThreadRunning, 0);
@@ -614,7 +935,6 @@ int32 NetworkRecordingThread(void* data) {
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StorageWriteCallback);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outputFile);
             
-            // Turn on modern 64-bit progress tracking engine definitions
             curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);            
             curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, StreamProgressCallback);
             curl_easy_setopt(curl, CURLOPT_XFERINFODATA, config);
@@ -690,11 +1010,9 @@ public:
         const float kHeaderWidth = 300.0;
         const float kCellWidth = 350.0;
 
-        // Draw background accent
         SetHighColor(ui_color(B_PANEL_BACKGROUND_COLOR));
         FillRect(bounds);
 
-        // Print "CHANNELS" header label over the logo column slot
         SetHighColor(textColor);
         BFont labelFont;
         GetFont(&labelFont);
@@ -704,11 +1022,9 @@ public:
         MovePenTo(16.0, bounds.top + 24);
         DrawString("CHANNELS");
 
-        // Vertical dividing track line separation rule
         SetHighColor(gridLineColor);
         StrokeLine(BPoint(kHeaderWidth, bounds.top), BPoint(kHeaderWidth, bounds.bottom));
 
-        // Generate Time Indicator Column Offsets
         float currentLeft = kHeaderWidth + 1.0;
         const char* timeIntervals[] = { "CURRENT TIME", "+ 30 MINS", "+ 1.0 HOUR", "+ 1.5 HOURS" };
 
@@ -717,7 +1033,6 @@ public:
             MovePenTo(currentLeft + 20, bounds.top + 24);
             DrawString(timeIntervals[i]);
 
-            // Visual tracking grid column ticks
             SetHighColor(gridLineColor);
             StrokeLine(BPoint(currentLeft + kCellWidth - 12, bounds.top + 8), 
                        BPoint(currentLeft + kCellWidth - 12, bounds.bottom));
@@ -725,7 +1040,6 @@ public:
             currentLeft += kCellWidth;
         }
 
-        // Draw bottom structural bounding line
         SetHighColor(gridLineColor);
         StrokeLine(BPoint(bounds.left, bounds.bottom), BPoint(bounds.right, bounds.bottom));
     }
@@ -782,13 +1096,13 @@ public:
 
 
 // =========================================================================
-// UPDATED LIST ITEM WITH HOVER TRACKING AND CELL CLICK INTERFACE
+//  LIST ITEM WITH HOVER TRACKING AND CELL CLICK INTERFACE
 // =========================================================================
 class GuideListRowItem : public BListItem {
 public:
     GuideRowModel fData;
     int32 fRowIndex;
-    int32 fHoveredCellIndex; // Tracks which show block is currently hovered
+    int32 fHoveredCellIndex; 
 
     GuideListRowItem(GuideRowModel data, int32 index) 
         : BListItem(), fData(data), fRowIndex(index), fHoveredCellIndex(-1) {
@@ -800,7 +1114,6 @@ public:
         SetHeight(140); 
     }
 
-    // Call this custom method from the parent window's MouseMoved engine
     void TrackMouseHover(BView* owner, BPoint point, BRect itemRect) {
         const float kHeaderWidth = 300.0;
         const float kCellWidth = 350.0;
@@ -823,7 +1136,7 @@ public:
 
         if (fHoveredCellIndex != cellIndex) {
             fHoveredCellIndex = cellIndex;
-            owner->Invalidate(itemRect); // Instantly redraw to show highlight shift
+            owner->Invalidate(itemRect); 
         }
     }
 
@@ -837,14 +1150,12 @@ public:
             if (cellIndex >= 0 && cellIndex < (int32)fData.programs.size()) {
                 const auto& selectedProg = fData.programs[cellIndex];
 
-                // Create a clean background message packet
                 BMessage selectionBroadcast(MSG_PREFILL_RECORD_SCHEDULE);
                 selectionBroadcast.AddString("show_title", selectedProg.title.String());
                 selectionBroadcast.AddString("start_time", selectedProg.timeDisplay.String());
                 selectionBroadcast.AddString("channel_label", fData.channelLabel.String());
                 selectionBroadcast.AddInt32("duration_minutes", selectedProg.durationMinutes);
                 
-                // Package the numeric subchannel prefix safely
                 BString targetSubchannel = fData.channelLabel;
                 int32 spaceIndex = targetSubchannel.FindFirst(" ");
                 if (spaceIndex != B_ERROR) {
@@ -853,7 +1164,6 @@ public:
                 targetSubchannel.Trim();
                 selectionBroadcast.AddString("numeric_subchannel", targetSubchannel.String());
 
-                // Post the message up to your main view controller loop seamlessly!
                 if (parentWindow != nullptr) {
                     parentWindow->PostMessage(&selectionBroadcast);
                 }
@@ -863,7 +1173,7 @@ public:
 
 
 
-      void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
+       void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
         rgb_color panelBg = ui_color(B_PANEL_BACKGROUND_COLOR);
         rgb_color textColor = ui_color(B_PANEL_TEXT_COLOR);
         rgb_color gridLineColor = ui_color(B_CONTROL_BORDER_COLOR);
@@ -875,12 +1185,10 @@ public:
         const float kHeaderWidth = 300.0; 
         const float kCellWidth = 350.0;
 
-        // Draw Channel Column Backdrop
         BRect headerRect(itemRect.left, itemRect.top, itemRect.left + kHeaderWidth, itemRect.bottom - 1);
         owner->SetHighColor(panelBg);
         owner->FillRect(headerRect);
         
-        // Render 98x98 Channel Icon
         float iconOffset = 16.0;
         if (fData.channelIcon != nullptr) {
             float topOffset = itemRect.top + 21.0; 
@@ -959,53 +1267,61 @@ public:
             const auto& prog = fData.programs[idx];
             BRect cellRect(currentLeft, itemRect.top + 12, currentLeft + kCellWidth - 12, itemRect.bottom - 13);
 
-            int cellHour = -1, cellMin = -1;
             std::string cellTimeStr = prog.timeDisplay.String();
+            std::string normalizedCellTime = "";
+
+            time_t now = real_time_clock();
+            struct tm* timeInfo = localtime(&now);
 
             if (cellTimeStr == "LIVE NOW") {
-                time_t now = real_time_clock();
-                struct tm* timeInfo = localtime(&now);
-                cellHour = timeInfo->tm_hour;
-                cellMin = timeInfo->tm_min; 
-            } else {
+                char rawBuffer[32];
+                snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", timeInfo->tm_hour, timeInfo->tm_min);
+                normalizedCellTime = rawBuffer;
+            } 
+            else if (cellTimeStr == "NEXT") {
+                time_t nextBlock = now + (30 * 60);
+                struct tm* nextInfo = localtime(&nextBlock);
+                char rawBuffer[32];
+                snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", nextInfo->tm_hour, nextInfo->tm_min);
+                normalizedCellTime = rawBuffer;
+            }
+            else if (cellTimeStr == "LATER") {
+                time_t laterBlock = now + (60 * 60);
+                struct tm* laterInfo = localtime(&laterBlock);
+                char rawBuffer[32];
+                snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", laterInfo->tm_hour, laterInfo->tm_min);
+                normalizedCellTime = rawBuffer;
+            }
+            else {
+                int hours = 0, minutes = 0;
                 char ampm[16] = {0};
-                int h = 0, m = 0;
-                if (sscanf(cellTimeStr.c_str(), "%d:%d %15s", &h, &m, ampm) >= 2) {
-                    std::string aStr(ampm);
-                    if (aStr.find("PM") != std::string::npos || aStr.find("pm") != std::string::npos) {
-                        if (h < 12) h += 12;
-                    } else if (aStr.find("AM") != std::string::npos || aStr.find("am") != std::string::npos) {
-                        if (h == 12) h = 0;
+                if (sscanf(cellTimeStr.c_str(), "%d:%d %15s", &hours, &minutes, ampm) >= 2) {
+                    std::string ampmStr(ampm);
+                    if (ampmStr.find("PM") != std::string::npos || ampmStr.find("pm") != std::string::npos) {
+                        if (hours < 12) hours += 12;
+                    } else if (ampmStr.find("AM") != std::string::npos || ampmStr.find("am") != std::string::npos) {
+                        if (hours == 12) hours = 0;
                     }
-                    cellHour = h;
-                    cellMin = m;
+                    char normBuffer[32];
+                    snprintf(normBuffer, sizeof(normBuffer), "%02d:%02d", hours, minutes);
+                    normalizedCellTime = normBuffer;
+                } else {
+                    normalizedCellTime = cellTimeStr; // Fallback
                 }
             }
 
-            int cellAbsoluteMinutes = (cellHour * 60) + cellMin;
             bool isScheduled = false;
 
+
             for (size_t i = 0; i < gScheduleList.size(); i++) {
-                if (!gScheduleList[i].processed && gScheduleList[i].channel.find(targetChannel) != std::string::npos) {
-                    int schedHour = -1, schedMin = -1;
-                    if (sscanf(gScheduleList[i].startTime.c_str(), "%d:%d", &schedHour, &schedMin) == 2) {
-                        int schedStartAbsolute = (schedHour * 60) + schedMin;
-                        
-                        int durationSeconds = 0;
-                        try {
-                            durationSeconds = std::stoi(gScheduleList[i].duration);
-                        } catch (...) {
-                            durationSeconds = 1800; 
-                        }
-                        int schedDurationMinutes = durationSeconds / 60;
-                        int schedEndAbsolute = schedStartAbsolute + schedDurationMinutes;
+                if (!gScheduleList[i].processed) {
+                    bool channelMatch = (gScheduleList[i].channel.find(targetChannel) != std::string::npos);
+                    
+                    bool timeMatch = (gScheduleList[i].startTime == normalizedCellTime);
 
-                        int searchTime = cellAbsoluteMinutes + 5;
-
-                        if (searchTime >= schedStartAbsolute && cellAbsoluteMinutes < (schedEndAbsolute - 1)) {
-                            isScheduled = true;
-                            break;
-                        }
+                    if (channelMatch && timeMatch) {
+                        isScheduled = true;
+                        break;
                     }
                 }
             }
@@ -1013,12 +1329,10 @@ public:
             if (isScheduled) {
                 owner->PushState(); 
                 
-                // 1. Fill background with a clean burgundy tint
                 rgb_color scheduledBgColor = { 75, 20, 20, 255 }; 
                 owner->SetHighColor(scheduledBgColor);
                 owner->FillRect(cellRect.InsetByCopy(1.0, 1.0));
 
-                // 2. Trace bold crimson border outline frame (skip if currently hovered to preserve accent colors)
                 if ((int32)idx != fHoveredCellIndex) {
                     rgb_color borderRed = { 220, 40, 40, 255 };
                     owner->SetHighColor(borderRed);
@@ -1026,7 +1340,6 @@ public:
                     owner->StrokeRect(cellRect.InsetByCopy(1.0, 1.0));
                 }
 
-                // 3. Redraw program strings over the newly painted backdrop area
                 owner->SetLowColor(scheduledBgColor);
                 
                 BFont textFont;
@@ -1034,19 +1347,16 @@ public:
                 textFont.SetSize(11.0);
                 owner->SetFont(&textFont);
 
-                // High-contrast pinkish-red for time string boundary text
                 owner->SetHighColor(255, 140, 140, 255);
                 owner->MovePenTo(cellRect.left + 20, cellRect.top + 36);
                 owner->DrawString(prog.timeDisplay.String());
 
-                // Bright white for title text readability
                 owner->SetHighColor(255, 255, 255, 255);
                 owner->MovePenTo(cellRect.left + 20, cellRect.top + 70);
                 BString truncatedTitle = prog.title;
                 owner->TruncateString(&truncatedTitle, B_TRUNCATE_END, cellRect.Width() - 32);
                 owner->DrawString(truncatedTitle.String());
 
-                // 4. Draw the bold [REC] badge
                 owner->SetHighColor(255, 60, 60, 255);
                 BFont badgeFont;
                 owner->GetFont(&badgeFont);
@@ -1070,8 +1380,7 @@ public:
         owner->StrokeLine(BPoint(itemRect.left, itemRect.bottom), BPoint(itemRect.right, itemRect.bottom));
     }
 
-
-
+    
 };
 
 // =========================================================================
@@ -1083,14 +1392,12 @@ private:
 public:
     InteractiveGuideListView(const char* name, BWindow* mainAppWindow) 
         : BListView(name, B_SINGLE_SELECTION_LIST), fParentShortcutTarget(mainAppWindow) {
-        // Enforce mouse movement reporting flags
         SetFlags(Flags() | B_POINTER_EVENTS);
     }
 
     void MouseMoved(BPoint point, uint32 transit, const BMessage* message) override {
         BListView::MouseMoved(point, transit, message);
         
-        // Cycle down items and push coordinate tracking maps
         int32 total = CountItems();
         for (int32 i = 0; i < total; i++) {
             GuideListRowItem* item = (GuideListRowItem*)ItemAt(i);
@@ -1102,7 +1409,6 @@ public:
     }
 
     void MouseDown(BPoint point) override {
-        // Handle selection state mapping defaults
         BListView::MouseDown(point);
 
         BMessage* currentMsg = Window()->CurrentMessage();
@@ -1124,7 +1430,7 @@ public:
                     }
                     cleanNumberOnly.Trim();
 
-                    BMessage playMsg(MSG_PLAY_IN_MEDIAPLAYER);
+                    BMessage playMsg(MSG_PLAY_IN_MPV);
                     playMsg.AddString("numeric_channel", cleanNumberOnly.String());
                     fParentShortcutTarget->PostMessage(&playMsg);
                 }
@@ -1146,7 +1452,6 @@ public:
 
                     BRect itemFrame = ItemFrame(index);
                     
-                    // Duplicate your cell placement math to locate the right-clicked program
                     const float kHeaderWidth = 300.0;
                     const float kCellWidth = 350.0;
                     float localX = point.x - itemFrame.left;
@@ -1176,54 +1481,56 @@ public:
                         std::string targetTitle = item->fData.programs[cellIndex].title.String();
 
                         // =========================================================================
-                        // FIXED: PRE-CALCULATE AND CONVERT TO 24-HOUR MILITARY TIME STRINGS
+                        // 24-HOUR NORMALIZATION (MATCHES DRAW LOGIC & AUTO-COMMIT SCHEDULER)
                         // =========================================================================
+                        std::string normalizedCellTime = "";
+                        time_t now = real_time_clock();
+                        struct tm* timeInfo = localtime(&now);
+
                         if (targetTime == "LIVE NOW") {
-                            time_t now = real_time_clock();
-                            struct tm* timeInfo = localtime(&now);
-                            int currentHour = timeInfo->tm_hour;
-                            int currentMin = timeInfo->tm_min + 1; // Match the +1 min offset
-                            
-                            if (currentMin >= 60) {
-                                currentMin = 0;
-                                currentHour = (currentHour + 1) % 24;
-                            }
-                            
-                            char adjustedBuffer[32];
-                            sprintf(adjustedBuffer, "%02d:%02d", currentHour, currentMin);
-                            targetTime = adjustedBuffer;
-                        } else {
+                            char rawBuffer[32];
+                            snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", timeInfo->tm_hour, timeInfo->tm_min);
+                            normalizedCellTime = rawBuffer;
+                        } 
+                        else if (targetTime == "NEXT") {
+                            time_t nextBlock = now + (30 * 60);
+                            struct tm* nextInfo = localtime(&nextBlock);
+                            char rawBuffer[32];
+                            snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", nextInfo->tm_hour, nextInfo->tm_min);
+                            normalizedCellTime = rawBuffer;
+                        } 
+                        else if (targetTime == "LATER") {
+                            time_t laterBlock = now + (60 * 60);
+                            struct tm* laterInfo = localtime(&laterBlock);
+                            char rawBuffer[32];
+                            snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", laterInfo->tm_hour, laterInfo->tm_min);
+                            normalizedCellTime = rawBuffer;
+                        } 
+                        else {
                             int hours = 0, minutes = 0;
                             char ampm[16] = {0};
-                            
                             if (sscanf(targetTime.c_str(), "%d:%d %15s", &hours, &minutes, ampm) >= 2) {
-                                minutes += 1; // Match the +1 min offset
-                                if (minutes >= 60) {
-                                    minutes = 0;
-                                    hours += 1;
-                                }
-
-                                // Mimic your window's exact MSG_PREFILL_RECORD_SCHEDULE logicpass
                                 std::string ampmStr(ampm);
                                 if (ampmStr.find("PM") != std::string::npos || ampmStr.find("pm") != std::string::npos) {
                                     if (hours < 12) hours += 12;
                                 } else if (ampmStr.find("AM") != std::string::npos || ampmStr.find("am") != std::string::npos) {
                                     if (hours == 12) hours = 0;
                                 }
-
-                                char adjustedBuffer[32];
-                                sprintf(adjustedBuffer, "%02d:%02d", hours, minutes);
-                                targetTime = adjustedBuffer;
+                                char normBuffer[32];
+                                snprintf(normBuffer, sizeof(normBuffer), "%02d:%02d", hours, minutes);
+                                normalizedCellTime = normBuffer;
+                            } else {
+                                normalizedCellTime = targetTime; // Fallback
                             }
                         }
 
-                        // Scan active background vector list to check if already queued
                         gScheduleLocker.Lock();
                         int32 activeCounter = 0;
                         for (size_t i = 0; i < gScheduleList.size(); i++) {
                             if (!gScheduleList[i].processed) {
                                 bool channelMatch = (gScheduleList[i].channel.find(targetChannel) != std::string::npos);
-                                bool timeMatch = (gScheduleList[i].startTime.find(targetTime) != std::string::npos);
+                                
+                                bool timeMatch = (gScheduleList[i].startTime == normalizedCellTime);
 
                                 if (channelMatch && timeMatch) { 
                                     matchingActiveIndex = activeCounter;
@@ -1234,7 +1541,6 @@ public:
                         }
                         gScheduleLocker.Unlock();
 
-                        // Mutually exclusive toggle: Only show one queue management state action
                         if (matchingActiveIndex != -1) {
                             removeItem = new BMenuItem("Remove Queue", NULL);
                             contextMenu->AddItem(removeItem);
@@ -1242,21 +1548,34 @@ public:
                             queueItem = new BMenuItem("Add to Queue", NULL);
                             contextMenu->AddItem(queueItem);
                         }
+
+                        contextMenu->AddSeparatorItem();
+                        BMenuItem* viewRecsItem = new BMenuItem("View Recordings", new BMessage(MSG_VIEW_RECORDINGS));
+                        contextMenu->AddItem(viewRecsItem);
+
+                        BMenuItem* showSchedItem = new BMenuItem("Open DVR Scheduler", new BMessage(MSG_SHOW_MAIN_SCHEDULER));
+                        contextMenu->AddItem(showSchedItem);
+
+                        BMenuItem* exitFsItem = new BMenuItem("Exit Fullscreen", new BMessage(MSG_CLOSE_GUIDE_WINDOW));
+                        contextMenu->AddItem(exitFsItem);
+
+                        BMenuItem* quitAppItem = new BMenuItem("Quit HaikuDVR", new BMessage(MSG_QUIT_ENTIRE_APP));
+                        contextMenu->AddItem(quitAppItem);
                     }
 
-
-                    
                     BPoint screenPoint = ConvertToScreen(point) + BPoint(2, 2);
                     BMenuItem* selectedItem = contextMenu->Go(screenPoint, false, true, false);
+
+
+
                     
                     if (selectedItem != nullptr && fParentShortcutTarget != nullptr) {
                         if (selectedItem == playItem) {
-                            BMessage playMsg(MSG_PLAY_IN_MEDIAPLAYER);
+                            BMessage playMsg(MSG_PLAY_IN_MPV);
                             playMsg.AddString("numeric_channel", cleanNumberOnly.String());
                             fParentShortcutTarget->PostMessage(&playMsg);
                         } 
                         else if (queueItem != nullptr && selectedItem == queueItem) {
-                            // 1. Manually prepare the selection package matching your original HandleDoubleClick logic
                             BMessage selectionBroadcast(MSG_PREFILL_RECORD_SCHEDULE);
                             selectionBroadcast.AddString("show_title", item->fData.programs[cellIndex].title.String());
                             selectionBroadcast.AddString("channel_label", item->fData.channelLabel.String());
@@ -1270,66 +1589,65 @@ public:
                             targetSubchannel.Trim();
                             selectionBroadcast.AddString("numeric_subchannel", targetSubchannel.String());
 
-                            // 2. Perform the time shift buffer adjustment pass safely
+                            // =========================================================================
+                            // INTERCEPT FALLBACK STRINGS AND GENERATE REAL TIMESTAMPS
+                            // =========================================================================
                             std::string targetTime = item->fData.programs[cellIndex].timeDisplay.String();
+                            
+                            time_t now = real_time_clock();
+                            struct tm* timeInfo = localtime(&now);
+                            
                             if (targetTime == "LIVE NOW") {
-                                time_t now = real_time_clock();
-                                struct tm* timeInfo = localtime(&now);
-                                int currentHour = timeInfo->tm_hour;
-                                int currentMin = timeInfo->tm_min;
-                                
-                                currentMin += 1;
-                                if (currentMin >= 60) {
-                                    currentMin = 0;
-                                    currentHour = (currentHour + 1) % 24;
-                                }
-                                
                                 char adjustedBuffer[32];
-                                sprintf(adjustedBuffer, "%02d:%02d", currentHour, currentMin);
+                                snprintf(adjustedBuffer, sizeof(adjustedBuffer), "%02d:%02d", timeInfo->tm_hour, timeInfo->tm_min);
                                 targetTime = adjustedBuffer;
-                            } else {
-                                int hours = 0, minutes = 0;
-                                char ampm[16] = {0};
-                                
-                                if (sscanf(targetTime.c_str(), "%d:%d %15s", &hours, &minutes, ampm) >= 2) {
-                                    minutes += 1;
-                                    if (minutes >= 60) {
-                                        minutes = 0;
-                                        hours += 1;
-                                        if (ampm[0] != '\0' && hours > 12) {
-                                            hours = 1;
-                                        } else if (ampm[0] == '\0' && hours >= 24) {
-                                            hours = 0;
-                                        }
-                                    }
-                                    
-                                    char adjustedBuffer[32];
-                                    if (ampm[0] != '\0') {
-                                        sprintf(adjustedBuffer, "%02d:%02d %s", hours, minutes, ampm);
-                                    } else {
-                                        sprintf(adjustedBuffer, "%02d:%02d", hours, minutes);
-                                    }
-                                    targetTime = adjustedBuffer;
-                                }
+                            } 
+                            else if (targetTime == "NEXT") {
+                                time_t nextBlock = now + (30 * 60);
+                                struct tm* nextInfo = localtime(&nextBlock);
+                                char adjustedBuffer[32];
+                                snprintf(adjustedBuffer, sizeof(adjustedBuffer), "%02d:%02d", nextInfo->tm_hour, nextInfo->tm_min);
+                                targetTime = adjustedBuffer;
+                            } 
+                            else if (targetTime == "LATER") {
+                                time_t laterBlock = now + (60 * 60);
+                                struct tm* laterInfo = localtime(&laterBlock);
+                                char adjustedBuffer[32];
+                                snprintf(adjustedBuffer, sizeof(adjustedBuffer), "%02d:%02d", laterInfo->tm_hour, laterInfo->tm_min);
+                                targetTime = adjustedBuffer;
                             }
 
-                            // 3. Complete the combined packet payload and send it
                             selectionBroadcast.AddString("start_time", targetTime.c_str());
-                            
-                            // Flag this specific message package so your handler knows to save it immediately
                             selectionBroadcast.AddBool("auto_commit_queue", true);
                             
                             fParentShortcutTarget->PostMessage(&selectionBroadcast);
                         }
-
                         else if (removeItem != nullptr && selectedItem == removeItem) {
-                            // Dispatch target remove index down to scheduler case
                             BMessage removeMsg(MSG_REMOVE_SCHEDULE);
                             removeMsg.AddInt32("list_index", matchingActiveIndex);
                             fParentShortcutTarget->PostMessage(&removeMsg);
                         }
+                        else if (selectedItem->Message() != nullptr && selectedItem->Message()->what == MSG_VIEW_RECORDINGS) {
+                            fParentShortcutTarget->PostMessage(MSG_VIEW_RECORDINGS);
+                        }
+                        else if (selectedItem->Message() != nullptr && selectedItem->Message()->what == MSG_SHOW_MAIN_SCHEDULER) {
+                            fParentShortcutTarget->PostMessage(MSG_SHOW_MAIN_SCHEDULER);
+                        }
+                        // =========================================================================
+                        //  TARGET THE LOCAL GUIDE WINDOW OBJECT INSTEAD OF THE PARENT
+                        // =========================================================================
+                        else if (selectedItem->Message() != nullptr && selectedItem->Message()->what == MSG_CLOSE_GUIDE_WINDOW) {
+                            Window()->PostMessage(B_QUIT_REQUESTED);
+                        }
+                        else if (selectedItem->Message() != nullptr && selectedItem->Message()->what == MSG_QUIT_ENTIRE_APP) {
+                            fParentShortcutTarget->PostMessage(MSG_QUIT_ENTIRE_APP);
+                        }
+
                     }
                     delete contextMenu;
+
+
+
                 }
             }
         }
@@ -1338,28 +1656,40 @@ public:
 
 
 // =========================================================================
-// 3. INTERACTIVE TV GUIDE MATRIX WINDOW
+// 3. INTERACTIVE TV GUIDE MATRIX WINDOW (FULLSCREEN BY DEFAULT)
 // =========================================================================
 class RealTVGuideWindow : public BWindow {
 public:
-    // Added primary parent window pointer mapping link
     RealTVGuideWindow(BRect frame, const std::vector<ChannelGuideItem>& loadedChannels, BListView* mainChannelListView, BWindow* mainAppWindow) 
         : BWindow(frame, "Interactive TV Guide Matrix", B_DOCUMENT_WINDOW, B_ASYNCHRONOUS_CONTROLS) {
         
-        ResizeTo(1050, 650);
+        BScreen screen(this);
+        if (screen.IsValid()) {
+            BRect screenFrame = screen.Frame();
+            
+            MoveTo(screenFrame.left, screenFrame.top);
+            ResizeTo(screenFrame.Width(), screenFrame.Height());
+
+            SetLook(B_NO_BORDER_WINDOW_LOOK);
+            SetFlags(Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
+        } else {
+            ResizeTo(1050, 650);
+        }
         
-        // Instantiate the top sticky timeline component track
+        fMainAppWindow = mainAppWindow;
+        fMainChannelListView = mainChannelListView;
+        
         TimelineHeaderView* headerTimelineBar = new TimelineHeaderView(BRect(0, 0, Bounds().Width(), 40));
         headerTimelineBar->SetExplicitMinSize(BSize(B_SIZE_UNLIMITED, 40));
         headerTimelineBar->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 40));
 
-        // Use our customized interactive list engine
         fContainerList = new InteractiveGuideListView("guideListContainer", mainAppWindow);
         _BuildGuideRowsFromLiveChannels(loadedChannels, mainChannelListView);
         
-        BScrollView* scrollWrapper = new BScrollView("guideScroll", fContainerList, 0, true, true);
+        BScrollView* scrollWrapper = new BScrollView("guideScroll", fContainerList, 0, true, true);        
+        AddShortcut(B_ESCAPE, 0, new BMessage(B_QUIT_REQUESTED));  
+
         
-        // Layer components vertically using the Layout API: Header remains locked on top
         BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
             .SetInsets(0, 0, 0, 0)
             .Add(headerTimelineBar) 
@@ -1367,41 +1697,48 @@ public:
         .End();
     }
 
+    
+	bool QuitRequested() override {
+	    if (fMainAppWindow != nullptr) {
+	        fMainAppWindow->PostMessage(MSG_GUIDE_CLOSED);
+	    }
+	    return true; 
+	}
+	
+
+	void MessageReceived(BMessage* message) override;
+
+
 private:
     BListView* fContainerList;
+    BWindow* fMainAppWindow;
+    BListView* fMainChannelListView;
 
     void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loadedChannels, BListView* mainListView) {
         if (mainListView == nullptr) return;
         
-        // Loop through the precise live array records matching your main UI order
         for (size_t i = 0; i < loadedChannels.size(); i++) {
             const auto& liveChan = loadedChannels[i];
             
-            // Fetch the corresponding icon directly from your UI cache list
             ChannelListItem* channelItem = (ChannelListItem*)mainListView->ItemAt(i);
             const BBitmap* associatedIcon = (channelItem != nullptr) ? channelItem->channelIcon : nullptr;
             
             GuideRowModel rowData;
             
-            // Generate standard label formatting: "5.1 - FOX"
             rowData.channelLabel << liveChan.guideNumber.c_str() << " - " << liveChan.guideName.c_str();
             rowData.channelIcon = associatedIcon;
             
-            // Block 1: Ingest Live Show Name Details
             rowData.programs.push_back({liveChan.nowPlaying.c_str(), "LIVE NOW", 350.0f});
             
-            // Blocks 2+: Ingest look-ahead items from the futureLineup vector
-            // Blocks 2+: Ingest look-ahead items from the futureLineup vector
             for (const auto& nextShow : liveChan.futureLineup) {
                 rowData.programs.push_back({
                     nextShow.title.c_str(), 
                     nextShow.startTimeStr.c_str(), 
                     350.0f, 
-                    nextShow.durationMinutes // <-- NEW: Passes tracking info to your view components
+                    nextShow.durationMinutes 
                 });
             }
 
-            // Fallback generation helper if HDHomeRun doesn't return future items for a channel
             if (liveChan.futureLineup.empty()) {
                 rowData.programs.push_back({"No Look-Ahead Data Available", "NEXT", 350.0f});
                 rowData.programs.push_back({"No Look-Ahead Data Available", "LATER", 350.0f});
@@ -1410,12 +1747,18 @@ private:
             fContainerList->AddItem(new GuideListRowItem(rowData, i));
         }
     }
-    
 };
 
 
+
+
+
 class DVRWindow : public BWindow {
+
 	private:
+		BMenuItem *fPlayerMpvItem, *fPlayerMediaItem, *fPlayerVlcItem;
+    	BWindow* fRecordingsBrowser = nullptr;
+		BWindow* fGuideWindow = nullptr; 
 	    std::vector<BBitmap*> fIconCache;
 		BStringView* fBackendStatusLabel;
 		BButton*     fRestartBackendButton;
@@ -1430,7 +1773,9 @@ class DVRWindow : public BWindow {
 		BMenuItem* fNotifyOffItem;
 		BMenuItem* fDebugOnItem;
 		BMenuItem* fDebugOffItem;
-				
+		BMessageRunner* fRefreshRunner;
+		time_t   fLastNetworkSyncTime; 
+						
 		enum ChannelFilter {
 		    FILTER_ALL,
 		    FILTER_HD,
@@ -1497,9 +1842,6 @@ ChannelFilter fCurrentFilter;
         }
         std::string targetIp = fSelectedIp.empty() ? tuners[0] : fSelectedIp;
 
-        // ==========================================
-        // PARSER 1: THE CLOUD GUIDE DATA FETCH
-        // ==========================================
         std::string discoveryUrl = "http://" + targetIp + "/discover.json";
         std::string discoverPayload;
         CURL* curl = curl_easy_init();
@@ -1537,7 +1879,6 @@ ChannelFilter fCurrentFilter;
             curl_easy_cleanup(curl);
         }
 
-        // Temporary map to hold our cloud show guide data keyed by Channel Number (e.g., "5.1")
         std::map<std::string, ChannelGuideItem> cloudGuideMap;
         std::map<std::string, std::string> cloudIconMap;
 
@@ -1603,9 +1944,6 @@ ChannelFilter fCurrentFilter;
             fStatusLabel->SetText("Status: Cloud guide parse failed.");
         }
 
-        // ==========================================
-        // PARSER 2: THE LOCAL TUNER LINEUP FILTER
-        // ==========================================
         std::string lineupUrl = "http://" + targetIp + "/lineup.json";
         std::string lineupPayload;
         curl = curl_easy_init();
@@ -1639,7 +1977,6 @@ ChannelFilter fCurrentFilter;
 
                     fLoadedChannels.push_back(finalItem);
 
-                    // Handle background asset queue management using the cloud image url
                     std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + finalItem.guideName + ".png";
                     std::ifstream checkFile(iconPath.c_str());
                     bool fileExistsOnDisk = checkFile.good();
@@ -1658,9 +1995,6 @@ ChannelFilter fCurrentFilter;
             fStatusLabel->SetText("Status: Local lineup filter failed.");
         }
 
-        // ==========================================
-        // RENDER STEP: POPULATE INTERFACE WIDGETS
-        // ==========================================
         for (size_t i = 0; i < fLoadedChannels.size(); i++) {
             const auto& item = fLoadedChannels[i];
 
@@ -1772,26 +2106,27 @@ public:
 };
 
 
-
-
-
-
-
-
-
-
-
-// @con
 public:
     virtual ~DVRWindow(); 
+    bool QuitRequested() override;
 
-    DVRWindow() : BWindow(BRect(150, 150, 1030, 625), "Haiku HDHomeRun DVR Scheduler", B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE) {
+    const std::vector<ChannelGuideItem>& GetLoadedChannels() const { 
+        return fLoadedChannels; 
+    }
+
+    DVRWindow() : BWindow(BRect(150, 150, 1030, 625), "Haiku HDHomeRun DVR Scheduler", B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS) {
         LoadSchedulesFromDisk();
         
         thread_id updateThread = spawn_thread(BackgroundUpdateChecker, "UpdateCheckerThread", B_NORMAL_PRIORITY, this);
         if (updateThread >= 0) {
             resume_thread(updateThread);
         }
+        
+        // Refresh every 1 minute       
+        fLastNetworkSyncTime = 0; 
+        fRefreshRunner = new BMessageRunner(BMessenger(this), 
+            new BMessage(MSG_PERIODIC_GUIDE_REFRESH), 
+            60000000, -1);
         
         fSelectedDirectory = gGlobalSaveDirectory;
         fFolderPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), NULL, B_DIRECTORY_NODE, false, new BMessage(MSG_DIR_CHOSEN));
@@ -1800,7 +2135,7 @@ public:
         fCountdownLabel = new BStringView(BRect(20, 345, 330, 365), "countdown_label", "Time Remaining: --:--");
         fCountdownLabel->SetAlignment(B_ALIGN_CENTER); 
           
-     // =========================================================================
+        // =========================================================================
         // TOP APPLICATION MENUBAR INITIALIZATION
         // =========================================================================
         BMenuBar* menuBar = new BMenuBar(BRect(0, 0, Bounds().Width(), 20), "top_menubar");
@@ -1823,10 +2158,9 @@ public:
         optionsMenu->AddItem(fNotifyOnItem);
         optionsMenu->AddItem(fNotifyOffItem);
         
-        // --- ADDED: Debug Mode Section ---
-        optionsMenu->AddSeparatorItem(); // Visual separation line
 
-        // Create class-level fields for these items if you want to track them: BMenuItem *fDebugOnItem, *fDebugOffItem;
+        optionsMenu->AddSeparatorItem(); 
+
         BMessage* msgDebugOn = new BMessage(MSG_TOGGLE_DEBUG);
         msgDebugOn->AddBool("enable", true);
         fDebugOnItem = new BMenuItem("Enable Debug Mode", msgDebugOn);
@@ -1841,23 +2175,39 @@ public:
         optionsMenu->AddItem(fDebugOnItem);
         optionsMenu->AddItem(fDebugOffItem);
         
-        // --- NEW CONTENT: Guide look-Ahead Window Trigger ---
         optionsMenu->AddSeparatorItem(); 
         
-        // Adds the menu option with 'G' mapped as the Alt+G keyboard shortcut
         BMessage* msgOpenGuide = new BMessage(MSG_OPEN_GUIDE);
-        BMenuItem* guideItem = new BMenuItem("Open Look-Ahead Guide...", msgOpenGuide, 'G');
+        BMenuItem* guideItem = new BMenuItem("Open Guide...", msgOpenGuide);
         optionsMenu->AddItem(guideItem);
         
         optionsMenu->AddSeparatorItem();
 		BMenuItem* firmwareItem = new BMenuItem("Check Tuner Firmware...", new BMessage(MSG_CHECK_FIRMWARE));
 		optionsMenu->AddItem(firmwareItem);
         
-        // Add Options first so it sits on the far left side
-        menuBar->AddItem(optionsMenu);        
-      
+        // =========================================================================
+        // DEFAULT PLAYER RADIO SELECTION SECTION
+        // =========================================================================
+        optionsMenu->AddSeparatorItem();
+        
+        BMenuItem* playerHeader = new BMenuItem("--- Default Player ---", NULL);
+        playerHeader->SetEnabled(false); // Keeps the text grayed out and unclickable as a label header
+        optionsMenu->AddItem(playerHeader);
 
-        // 2. Create your original Channel Filter Dropdown
+        fPlayerMpvItem   = new BMenuItem("MPV", new BMessage(MSG_SET_PLAYER_MPV));
+        fPlayerMediaItem = new BMenuItem("MediaPlayer", new BMessage(MSG_SET_PLAYER_MEDIAPLAYER));
+        fPlayerVlcItem   = new BMenuItem("VLC", new BMessage(MSG_SET_PLAYER_VLC));
+
+        fPlayerMpvItem->SetMarked(cfg.defaultPlayer == "MPV" || cfg.defaultPlayer.empty());
+        fPlayerMediaItem->SetMarked(cfg.defaultPlayer == "MediaPlayer");
+        fPlayerVlcItem->SetMarked(cfg.defaultPlayer == "VLC");
+
+        optionsMenu->AddItem(fPlayerMpvItem);
+        optionsMenu->AddItem(fPlayerMediaItem);
+        optionsMenu->AddItem(fPlayerVlcItem);
+        
+        menuBar->AddItem(optionsMenu);        
+
         fCurrentFilter = FILTER_ALL;
         BMenu* filterMenu = new BMenu("Filter");
         BMenuItem* itemAll = new BMenuItem("All Channels", new BMessage(MSG_FILTER_ALL));
@@ -1867,13 +2217,11 @@ public:
         filterMenu->AddItem(itemAll);
         filterMenu->AddItem(itemHd);
         filterMenu->AddItem(itemSd);
-        
-        // Add Filter second so it sits directly to the right of Options
-        menuBar->AddItem(filterMenu);        
+
+        menuBar->AddItem(filterMenu);    
+
         AddChild(menuBar);
 
-        
-        
 		BView* view = new BView(Bounds(), "MainView", B_FOLLOW_ALL, B_WILL_DRAW);
 		
         view->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));        
@@ -1914,16 +2262,12 @@ public:
         fDateInput->TextView()->SetFontAndColor(&digitalFont, B_FONT_ALL, &digitalGreen);
         fDateInput->TextView()->SetAlignment(B_ALIGN_CENTER);
         fDateBrowseButton = new BButton(BRect(270, 140, 330, 165), "date_browse", "Date", new BMessage(MSG_POPUP_CALENDAR));
-        // 1. Query the live system clock profile
         std::time_t rawCurrentTime = std::time(nullptr);
         std::tm* localTimeStruct = std::localtime(&rawCurrentTime);
 
-        // 2. Format the time components cleanly into a standard "HH:MM" text string
         char timeTextBuffer[16];
-        // Note: %H maps 24-hour style (00-23), use %I for 12-hour formatting if your schedule matches AM/PM
         std::strftime(timeTextBuffer, sizeof(timeTextBuffer), "%H:%M", localTimeStruct);
 
-        // 3. Inject the processed runtime buffer straight into the initial input string value field
         fTimeInput = new BTextControl(BRect(20, 175, 260, 200), "time", "Start Time:", timeTextBuffer, NULL);
         fTimeInput->SetDivider(85.0);
 
@@ -1953,9 +2297,8 @@ public:
         fBackendStatusLabel = new BStringView(BRect(5, 5, 125, 25), "backend_status", "Backend: Checking...");
         fBackendStatusLabel->SetFont(be_bold_font);
         
-        // --- Right Column: Interactive Sidebars & Status Panel ---
-        fRestartBackendButton = new BButton(BRect(730, 365, 860, 395), "restart_backend", "Abort!", new BMessage(MSG_RESTART_BACKEND));
-        fRestartBackendButton->SetToolTip("Warning: Abort! will immediately abort any active scheduled recording streams currently in progress!");
+        fRestartBackendButton = new BButton(BRect(730, 365, 860, 395), "restart_backend", "ABORT!", new BMessage(MSG_RESTART_BACKEND));
+        fRestartBackendButton->SetToolTip("Warning: ABORT! will immediately abort any active scheduled recording streams currently in progress!");
         BBox* statusBox = new BBox(BRect(730, 405, 860, 435), "bebox_status_wrapper");
         statusBox->SetBorder(B_FANCY_BORDER); 
 
@@ -1966,7 +2309,6 @@ public:
         fBackendStatusLabel->SetFont(&monoFont);
         fBackendStatusLabel->SetAlignment(B_ALIGN_CENTER);
 
-        // Mount the text label inside the bounding container frame box
         statusBox->AddChild(fBackendStatusLabel);
 
         // --- Left Column: Configuration Forms ---
@@ -2007,11 +2349,6 @@ public:
         RefreshScheduleListView();   
     }
 
-    bool QuitRequested() override {
-        atomic_set(&gStopScheduler, 1);
-        atomic_set(&gCancelRecording, 1);
-        return true;
-    }
 
 	void WindowActivated(bool active) {
 	    BWindow::WindowActivated(active);
@@ -2024,20 +2361,16 @@ public:
         switch (message->what) {
         	
         	
-        case MSG_TOGGLE_DEBUG: {
+       case MSG_TOGGLE_DEBUG: {
             bool enableDebug = true;
             if (message->FindBool("enable", &enableDebug) == B_OK) {
-                // Update global cfg object field directly
                 cfg.debugEnable = enableDebug;
                 
-                // Toggle radio-style UI checkmarks
                 fDebugOnItem->SetMarked(cfg.debugEnable == true);
                 fDebugOffItem->SetMarked(cfg.debugEnable == false);
                 
-                // Instantly commit preference state change directly into disk storage
                 SaveSchedulesToDisk();
                 
-                // This will always fire regardless of configuration state because we just toggled it
                 printf("[DEBUG_SYS] System logging runtime state mutated via UI: %s\n", 
                        cfg.debugEnable ? "ENABLED" : "DISABLED");
             }
@@ -2047,14 +2380,11 @@ public:
         case MSG_TOGGLE_NOTIFICATIONS: {
             bool enableAlerts = true;
             if (message->FindBool("enable", &enableAlerts) == B_OK) {
-                // Update global cfg object field
                 cfg.showUpdateNotifications = enableAlerts;
                 
-                // Toggle the UI checkbox checkmarks
                 fNotifyOnItem->SetMarked(cfg.showUpdateNotifications == true);
                 fNotifyOffItem->SetMarked(cfg.showUpdateNotifications == false);
                 
-                // Instantly commit preference state change directly into disk storage
                 SaveSchedulesToDisk();
                 
                 if (cfg.debugEnable) {
@@ -2069,17 +2399,27 @@ public:
         case MSG_POLL_BACKEND: {
             LoadSchedulesFromDisk();
             RefreshScheduleListView();
+            
             BMessenger serviceTarget("application/x-vnd.haikuhdhomerun-dvr");
             bool isRunning = serviceTarget.IsValid();            
-            rgb_color activeGreen = { 0, 160, 0, 255 };  
-            rgb_color alertRed    = { 225, 0, 0, 255 };  
+            
+            rgb_color activeGreen  = { 0, 160, 0, 255 };  
+            rgb_color alertRed     = { 225, 0, 0, 255 };  
+            rgb_color orangeNotice = { 230, 115, 0, 255 };
 
             if (isRunning) {
                 fBackendStatusLabel->SetText("CONNECTED");
                 fBackendStatusLabel->SetHighColor(activeGreen); 
             } else {
-                fBackendStatusLabel->SetText("OFFLINE");
-                fBackendStatusLabel->SetHighColor(alertRed); 
+
+                BEntry serverBinary("/boot/system/servers/dvr_server");                
+                if (serverBinary.Exists()) {
+                    fBackendStatusLabel->SetText("REBOOT REQUIRED");
+                    fBackendStatusLabel->SetHighColor(orangeNotice);
+                } else {
+                    fBackendStatusLabel->SetText("OFFLINE");
+                    fBackendStatusLabel->SetHighColor(alertRed); 
+                }
             }
             
             fBackendStatusLabel->Invalidate();
@@ -2113,10 +2453,8 @@ public:
 	             char warningMessage[128];
 	             sprintf(warningMessage, "CRITICAL WARNING: Storage space running low! Only %" B_PRId32 " MB remaining in save directory.", freeMB);
 	             
-	             // Push the text to your full-width bottom dashboard row
 	             fStatusLabel->SetText(warningMessage);
 	             
-	             // Update text color to high-visibility alarm red
 	             rgb_color alertRed = { 225, 0, 0, 255 };
 	             fStatusLabel->SetHighColor(alertRed);
 	             fStatusLabel->Invalidate();
@@ -2133,7 +2471,6 @@ public:
                  fStatusLabel->SetText(progressString);
                  fStatusLabel->SetFont(be_bold_font);
                  
-                 // FIX: Replaced green with your system default text color token
                  fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
                  fStatusLabel->Invalidate();
              }
@@ -2229,7 +2566,6 @@ public:
          case MSG_FILTER_SD: {
              BMenuBar* menuBar = dynamic_cast<BMenuBar*>(FindView("top_menubar"));
              if (menuBar) {
-                 // CHANGED FROM 0 TO 1: FilterMenu is now the second item in the bar
                  BMenu* filterMenu = menuBar->SubmenuAt(1);
                  if (filterMenu) {
                      for (int32 i = 0; i < filterMenu->CountItems(); i++) {
@@ -2332,7 +2668,6 @@ public:
 	             fStatusLabel->SetText(guidePreview.c_str());
 	             fStatusLabel->SetFont(be_bold_font);
 	             
-	             // Keep the text color synchronized with your system's interface theme settings
 	             fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
 	             fStatusLabel->Invalidate();
 	         }
@@ -2369,59 +2704,38 @@ public:
 		}
 
         case MSG_OPEN_GUIDE: {
-            BRect guideFrame(100, 100, 1050, 700);
-			RealTVGuideWindow* guideWin = new RealTVGuideWindow(guideFrame, fLoadedChannels, fChannelListView, this);
-            guideWin->Show();
-            break;
-        }
-/*
-         case MSG_PLAY_IN_MEDIAPLAYER: {
-            BString numericChannel;
-            if (message->FindString("numeric_channel", &numericChannel) == B_OK) {
-                
-                BString currentIp(fSelectedIp.c_str());
-                if (currentIp.IsEmpty()) {
-                    currentIp = "127.0.0.1";
-                }
-                
-                // Formulate the exact functional media port stream address URL
-                BString streamUrl;
-                streamUrl.SetToFormat("http://%s:5004/auto/v%s", currentIp.String(), numericChannel.String());
-                
-                if (cfg.debugEnable) {
-                    printf("[DEBUG PLAYER] Passing command-line args to Media Player: %s\n", streamUrl.String());
-                }
 
-                // =========================================================================
-                // FIXED: Construct a standard system command-line argument vector packet
-                // =========================================================================
-                BMessage launchMessage(B_ARGV_RECEIVED); // <-- Forces Haiku to interpret this as a terminal execution line!
-                
-                // Index 0 must contain the application path, Index 1 is our video stream url
-                launchMessage.AddString("argv", "/boot/system/apps/MediaPlayer");
-
-                launchMessage.AddString("argv", streamUrl.String());
-                
-                // Pack the absolute item count (argc = 2 elements total)
-                launchMessage.AddInt32("argc", 2);
-
-                // Fire the system roster to launch the app thread asynchronously
-                status_t launchResult = be_roster->Launch("application/x-vnd.Haiku-MediaPlayer", &launchMessage);
-                
-                if (launchResult != B_OK) {
-                    BString errorStatus = "Playback Error: Could not launch MediaPlayer. Status: ";
-                    errorStatus << launchResult;
-                    fStatusLabel->SetText(errorStatus.String());
-                } else {
-                    BString playingNotification = "Streaming Live Channel: ";
-                    playingNotification << numericChannel;
-                    fStatusLabel->SetText(playingNotification.String());
+            BWindow* existingGuide = be_app->WindowAt(0);
+            int32 winIdx = 0;
+            bool foundMinimized = false;
+            
+            while (existingGuide != nullptr) {
+                if (strcmp(existingGuide->Title(), "Interactive TV Guide Matrix") == 0) {
+                    if (existingGuide->Lock()) {
+                        existingGuide->Minimize(false); 
+                        existingGuide->Activate(true);  
+                        existingGuide->Unlock();
+                    }
+                    fGuideWindow = existingGuide;
+                    foundMinimized = true;
+                    break;
                 }
+                winIdx++;
+                existingGuide = be_app->WindowAt(winIdx);
+            }
+
+            if (!foundMinimized) {
+                BRect guideFrame(100, 100, 1050, 700);
+                fGuideWindow = new RealTVGuideWindow(guideFrame, fLoadedChannels, fChannelListView, this);
+                fGuideWindow->Show();
             }
             break;
         }
-*/
-        case MSG_PLAY_IN_MEDIAPLAYER: {
+
+       
+
+
+        case MSG_PLAY_IN_MPV: {
             BString numericChannel;
             if (message->FindString("numeric_channel", &numericChannel) == B_OK) {
                 
@@ -2429,43 +2743,66 @@ public:
                 if (currentIp.IsEmpty()) {
                     currentIp = "127.0.0.1";
                 }
+
                 
                 BString streamUrl;
                 streamUrl.SetToFormat("http://%s:5004/auto/v%s", currentIp.String(), numericChannel.String());
                 
-                if (cfg.debugEnable) {
-                    printf("[DEBUG PLAYER] Forking independent system terminal process for mpv: %s\n", streamUrl.String());
-                }
 
-                // =========================================================================
-                // FIXED: FORK AN INDEPENDENT SYSTEM THREAD PROCESS DIRECTLY
-                // =========================================================================
-                pid_t processId = fork();
-                
-                if (processId < 0) {
-                    // Fork engine allocation failed entirely
-                    fStatusLabel->SetText("Playback Error: Failed to fork execution thread.");
+                if (cfg.defaultPlayer == "MediaPlayer") {
+                    if (cfg.debugEnable) {
+                        printf("[DEBUG PLAYER] Dispatching stream via B_ARGV_RECEIVED Roster to MediaPlayer: %s\n", streamUrl.String());
+                    }
+
+                    BMessage launchMessage(B_ARGV_RECEIVED);
+                    launchMessage.AddString("argv", "/boot/system/apps/MediaPlayer");
+                    launchMessage.AddString("argv", streamUrl.String());
+                    launchMessage.AddInt32("argc", 2);
+
+                    status_t launchResult = be_roster->Launch("application/x-vnd.Haiku-MediaPlayer", &launchMessage);
+                    if (launchResult != B_OK) {
+                        BString errorStatus = "Playback Error: Could not launch MediaPlayer. Status: ";
+                        errorStatus << launchResult;
+                        fStatusLabel->SetText(errorStatus.String());
+                    } else {
+                        BString playingNotification = "Streaming Live via MediaPlayer: Channel ";
+                        playingNotification << numericChannel;
+                        fStatusLabel->SetText(playingNotification.String());
+                    }
                 } 
-                else if (processId == 0) {
-                    // --- CHILD PROCESS THREAD INTERFACE ---
-                    // Explicitly define a real character pointer vector block array
-                    char* mpvArgs[3];
-                    mpvArgs[0] = (char*)"/boot/system/bin/mpv";
-                    mpvArgs[1] = (char*)streamUrl.String();
-                    mpvArgs[2] = nullptr; // Array must be strictly null-terminated
-                    
-                    // Directly swap the active child process context directly onto mpv binary code lines
-                    execv(mpvArgs[0], mpvArgs);
-                    
-                    // If execv fails or errors out, force the rogue background loop to exit instantly
-                    _exit(1);
-                } 
+
                 else {
-                    // --- PARENT APPLICATION CONTROL INTERFACE ---
-                    // The main application continues running smoothly at 100% speed
-                    BString playingNotification = "Streaming Live via mpv: Channel ";
-                    playingNotification << numericChannel;
-                    fStatusLabel->SetText(playingNotification.String());
+                    const char* binaryPath = "/boot/system/bin/mpv";
+                    const char* playerName = "mpv";
+                    
+                    if (cfg.defaultPlayer == "VLC") {
+                        binaryPath = "/boot/system/bin/vlc"; 
+                        playerName = "VLC";
+                    }
+
+                    if (cfg.debugEnable) {
+                        printf("[DEBUG PLAYER] Forking independent process for %s: %s\n", playerName, streamUrl.String());
+                    }
+
+                    pid_t processId = fork();
+                    if (processId < 0) {
+                        fStatusLabel->SetText("Playback Error: Failed to fork execution thread.");
+                    } 
+                    else if (processId == 0) {
+            
+                        char* playerArgs[3];
+                        playerArgs[0] = (char*)binaryPath;
+                        playerArgs[1] = (char*)streamUrl.String();
+                        playerArgs[2] = nullptr; 
+                        
+                        execv(playerArgs[0], playerArgs);
+                        _exit(1); 
+                    } 
+                    else {
+                        BString playingNotification = "Streaming Live via ";
+                        playingNotification << playerName << ": Channel " << numericChannel;
+                        fStatusLabel->SetText(playingNotification.String());
+                    }
                 }
             }
             break;
@@ -2482,13 +2819,11 @@ public:
                 message->FindString("numeric_subchannel", &numericSubchannel) == B_OK &&
                 message->FindInt32("duration_minutes", &durationMinutes) == B_OK) {
                 
-                // 1. Time string pre-fill conversion parser block
                 if (fTimeInput != nullptr) {
                     BString processedTime = startTime;
                     if (startTime.IFindFirst("PM") != B_ERROR) {
                         int32 hour = 0;
                         int32 minute = 0;
-                        // FIXED: Parse out both hour AND minutes to prevent rounding down to the top of the hour!
                         if (sscanf(startTime.String(), "%d:%d", &hour, &minute) >= 1) {
                             if (hour < 12) hour += 12;
                             processedTime.SetToFormat("%02d:%02d", hour, minute);
@@ -2496,7 +2831,6 @@ public:
                     } else if (startTime.IFindFirst("AM") != B_ERROR) {
                         int32 hour = 0;
                         int32 minute = 0;
-                        // FIXED: Parse out both hour AND minutes
                         if (sscanf(startTime.String(), "%d:%d", &hour, &minute) >= 1) {
                             if (hour == 12) hour = 0;
                             processedTime.SetToFormat("%02d:%02d", hour, minute);
@@ -2511,31 +2845,43 @@ public:
                     fTimeInput->SetText(processedTime.String());
                 }
 
-                // 2. PopUpMenu duration selection logic
+
                 if (fDurationMenu != nullptr && durationMinutes > 0) {
                     BString targetDurationLabel;
                     targetDurationLabel << durationMinutes << " Mins";
                     BMenuItem* matchingItem = fDurationMenu->FindItem(targetDurationLabel.String());
                     
+                    BString secondsStr;
+                    secondsStr << (durationMinutes * 60);
+
                     if (matchingItem != nullptr) {
                         matchingItem->SetMarked(true);
+                        
+                        BMessage* itemMsg = matchingItem->Message();
+                        if (itemMsg != nullptr) {
+                            itemMsg->RemoveName("seconds"); 
+                            itemMsg->AddString("seconds", secondsStr.String());
+                        }
                     } else {
                         BMessage* customDurationMsg = new BMessage(MSG_DURATION_SELECTED); 
                         customDurationMsg->AddInt32("minutes", durationMinutes);
+                        customDurationMsg->AddString("seconds", secondsStr.String());
+                        
                         BMenuItem* dynamicItem = new BMenuItem(targetDurationLabel.String(), customDurationMsg);
                         fDurationMenu->AddItem(dynamicItem);
                         dynamicItem->SetMarked(true);
                     }
+                    
+                    fSelectedDurationSeconds = secondsStr.String();
                     
                     BMenuField* parentField = dynamic_cast<BMenuField*>(fDurationMenu->Supermenu());
                     if (parentField != nullptr && parentField->MenuItem() != nullptr) {
                         parentField->MenuItem()->SetLabel(targetDurationLabel.String());
                     }
                 }
+
                 
-                // =========================================================================
-                // 3. FIXED: AUTO-CLEAN AND PRE-FILL TEXT BOX CHANNELS
-                // =========================================================================
+
                 if (!numericSubchannel.IsEmpty()) {
                     BString cleanNumberOnly = numericSubchannel;
                     int32 sliceIndex = cleanNumberOnly.FindFirst(" ");
@@ -2568,32 +2914,49 @@ public:
                     }
                 }
                 
-                // Maintain your status banner notice updates
                 BString trackingNotice = "Selected Lineup: ";
                 trackingNotice << showTitle;
                 fStatusLabel->SetText(trackingNotice.String());
 
-                // =========================================================================
-                // 4. INTEGRATED AUTO-COMMIT QUEUE INJECTION
-                // =========================================================================
                 bool autoCommit = false;
                 if (message->FindBool("auto_commit_queue", &autoCommit) == B_OK && autoCommit) {
                     std::string rawTime = fTimeInput->Text();
                     
-                    // Run a final check on formatting layout rules
                     if (rawTime.length() == 4 && rawTime.find(':') == std::string::npos) {
                         rawTime.insert(2, ":");
                         fTimeInput->SetText(rawTime.c_str());
                     }
                     
+                    if (fSelectedDurationSeconds.empty() || fSelectedDurationSeconds == "0ss" || fSelectedDurationSeconds == "0s") {
+                        if (fDurationMenu != nullptr && fDurationMenu->FindMarked() != nullptr) {
+                            BMenuItem* markedDuration = fDurationMenu->FindMarked();
+                            BMessage* durMsg = markedDuration->Message();
+                            const char* menuSecs = nullptr;
+                            
+                            if (durMsg != nullptr && durMsg->FindString("seconds", &menuSecs) == B_OK) {
+                                fSelectedDurationSeconds = menuSecs;
+                            } else {
+                                int32 parsedMins = 30;
+                                if (sscanf(markedDuration->Label(), "%d", &parsedMins) == 1) {
+                                    BString fallbackSecs;
+                                    fallbackSecs << (parsedMins * 60);
+                                    fSelectedDurationSeconds = fallbackSecs.String();
+                                }
+                            }
+                        }
+                    }
+
+                    size_t sPos = fSelectedDurationSeconds.find('s');
+                    if (sPos != std::string::npos) {
+                        fSelectedDurationSeconds = fSelectedDurationSeconds.substr(0, sPos); 
+                    }
+
                     ScheduleItem item;
                     item.startDate = fDateInput->Text(); 
                     item.startTime = rawTime; 
                     item.channel = fChannelInput->Text();
-                    
-                    // FIXED: Convert the integer duration minutes directly to seconds 
-                    // to avoid doing math on the fSelectedDurationSeconds std::string object.
-                    item.duration = (uint32)durationMinutes * 60;
+                    item.duration = fSelectedDurationSeconds; 
+                    item.showTitle = showTitle.String(); 
                     item.processed = false;
                     
                     BMenuItem* markedTuner = fTunerMenu->FindMarked();
@@ -2609,16 +2972,18 @@ public:
                     
                     SaveSchedulesToDisk(); 
                     RefreshScheduleListView(); 
-			        if (fChannelListView != nullptr) {
-			             fChannelListView->Invalidate(); 
-			        }
+                    if (fChannelListView != nullptr) {
+                         fChannelListView->Invalidate(); 
+                    }
                     std::string confMsg = "Queued for " + item.startTime + " (Ch " + item.channel + ")";
                     fStatusLabel->SetText(confMsg.c_str());
                 }
 
+
             }
             break;
         }
+
 
 
 
@@ -2634,9 +2999,7 @@ public:
      case MSG_ADD_SCHEDULE: {
      	std::string rawTime = fTimeInput->Text();
          
-         // Quick validation: Ensure it's in HH:MM format
          if (rawTime.length() == 4 && rawTime.find(':') == std::string::npos) {
-             // If they typed '0548', turn it into '05:48'
              rawTime.insert(2, ":");
              fTimeInput->SetText(rawTime.c_str());
          }
@@ -2678,6 +3041,7 @@ public:
          }
          break;
      }
+     
      case MSG_START_RECORDING: {
      	
          const char* targetChannel = fChannelInput->Text();
@@ -2745,31 +3109,25 @@ public:
          
      }
 
-        // =========================================================================
-        // HANDLER A: TRIGGER THREAD SPINNING ACTION
-        // =========================================================================
+
         case MSG_CHECK_FIRMWARE: {
             fStatusLabel->SetText("Status: Querying tuner hardware profile...");
             
-            // Allocate our tracking parameter structure 
             FirmwareParam* threadArgs = new FirmwareParam();
             threadArgs->targetWindow = this;
-            threadArgs->tunerIp = fSelectedIp.c_str(); // Feeds your live active IP selection straight down the pipe!
+            threadArgs->tunerIp = fSelectedIp.c_str(); 
             
-            // Spawn the thread, passing our parameter packet pointer as the data argument
             thread_id checkerThread = spawn_thread(FirmwareCheckerWorker, "TunerFirmwareTask", B_NORMAL_PRIORITY, threadArgs);
             if (checkerThread >= 0) {
                 resume_thread(checkerThread);
             } else {
                 fStatusLabel->SetText("Status: Error spawning firmware worker thread.");
-                delete threadArgs; // Safety memory clean up if thread creation fails
+                delete threadArgs; 
             }
             break;
         }
 
-        // =========================================================================
-        // HANDLER B: PROCESS FINISHED THREAD CALCULATIONS AND DISPLAY NATIVE DIALOG
-        // =========================================================================
+
         case MSG_FIRMWARE_CHECK_DONE: {
             BString statusError, currentVer, latestVer;
             
@@ -2796,18 +3154,14 @@ public:
                     
                     int32 userChoice = updateAlert->Go();
                     if (userChoice == 0) {
-                        // =========================================================================
-                        //  Route update workflow right into the tuner's local hardware page
-                        // =========================================================================
+   
                         BString localUpgradeUrl;
                         
-                        // Use your active fSelectedIp variable to target your exact device
                         BString currentIp(fSelectedIp.c_str());
                         if (currentIp.IsEmpty()) {
                             currentIp = "127.0.0.1";
                         }
                         
-                        // Formulate the path to the tuner's local administration/system panel
                         localUpgradeUrl.SetToFormat("http://%s/", currentIp.String());
                         
                         if (cfg.debugEnable) {
@@ -2815,11 +3169,9 @@ public:
                                    localUpgradeUrl.String());
                         }
 
-                        // Bundle the local URL string as an argument payload
                         BMessage browserMsg(B_ARGV_RECEIVED);
                         browserMsg.AddString("argv", localUpgradeUrl.String());
                         
-                        // Launch WebPositive (or default browser) directly onto the local hardware interface
                         be_roster->Launch("text/html", &browserMsg);
                     }
                     fStatusLabel->SetText("Status: Opening local tuner upgrade dashboard...");
@@ -2828,6 +3180,90 @@ public:
             }
             break;
         }
+
+        case MSG_PERIODIC_GUIDE_REFRESH: {
+            time_t currentTime = real_time_clock();
+            
+            if (fLastNetworkSyncTime == 0 || (currentTime - fLastNetworkSyncTime) >= 86400) {
+                FetchAndPopulateChannelList();
+                fLastNetworkSyncTime = currentTime;
+                if (cfg.debugEnable) printf("[EPG SYNC] Master EPG reloaded from network.\n");
+            } 
+            
+
+            struct tm* localTimeInfo = localtime(&currentTime);
+            int systemAbsoluteMinutes = (localTimeInfo->tm_hour * 60) + localTimeInfo->tm_min;
+
+            for (size_t i = 0; i < fLoadedChannels.size(); i++) {
+                auto& channel = fLoadedChannels[i];
+                
+                while (!channel.futureLineup.empty()) {
+                    const auto& nextShow = channel.futureLineup.front();
+                    
+                    int showHour = 0, showMin = 0;
+                    char ampm[16] = {0};
+                    if (sscanf(nextShow.startTimeStr.c_str(), "%d:%d %15s", &showHour, &showMin, ampm) >= 2) {
+                        std::string aStr(ampm);
+                        if (aStr.find("PM") != std::string::npos || aStr.find("pm") != std::string::npos) {
+                            if (showHour < 12) showHour += 12;
+                        } else if (aStr.find("AM") != std::string::npos || aStr.find("am") != std::string::npos) {
+                            if (showHour == 12) showHour = 0;
+                        }
+                        
+                        int showStartAbsoluteMinutes = (showHour * 60) + showMin;
+                        
+                        if (systemAbsoluteMinutes >= showStartAbsoluteMinutes) {
+                            channel.nowPlaying = nextShow.title; // The future show is now playing LIVE
+                            channel.futureLineup.erase(channel.futureLineup.begin()); // Pop it out of the queue
+                            continue;
+                        }
+                    }
+                    break; 
+                }
+            }
+
+
+            RefreshScheduleListView();
+        
+            if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+                fGuideWindow->PostMessage(MSG_PERIODIC_GUIDE_REFRESH);
+                fGuideWindow->Unlock();
+            }
+            break;
+        }
+
+
+		case MSG_VIEW_RECORDINGS: {
+		    if (fRecordingsBrowser == nullptr) {
+		        BRect browserFrame(150, 150, 800, 600);
+		        fRecordingsBrowser = new RecordingsBrowserWindow(browserFrame, gGlobalSaveDirectory.c_str(), this);
+		        fRecordingsBrowser->Show();
+		    } else {
+		        if (fRecordingsBrowser->Lock()) {
+		            fRecordingsBrowser->Activate(true);
+		            fRecordingsBrowser->Unlock();
+		        }
+		    }
+		    break;
+		}
+
+		
+		
+		case MSG_RECORDINGS_CLOSED: {
+		    fRecordingsBrowser = nullptr; 
+		    break;
+		}
+
+
+        case MSG_SHOW_MAIN_SCHEDULER: {
+            if (this->IsHidden()) {
+                this->Show();
+            }
+            
+            this->Activate(true);
+            break;
+        }
+
 
 
 
@@ -2857,12 +3293,105 @@ public:
          break;        
        
      case MSG_STOP_RECORDING:
-
          fStatusLabel->SetText("Status: Stopping recording...");
          atomic_set(&gCancelRecording, 1);
          fStopButton->SetEnabled(false);
          break;
+  
+  
+     case MSG_CLOSE_GUIDE_WINDOW: {
+      
+            if (fGuideWindow != nullptr) {
+                if (fGuideWindow->Lock()) {
+                    fGuideWindow->Minimize(true);
+                    fGuideWindow->Unlock();
+                }
+            }
+ 
+            break;
+        }
          
+        case MSG_GUIDE_CLOSED: {
+            fGuideWindow = nullptr;
+            
+
+            if (this->IsHidden()) {
+                this->Show();
+                this->Activate(true); 
+                printf("[FRONTEND] Guide closed while Scheduler was hidden. Restoring Scheduler window view.\n");
+            }
+            break;
+        }
+
+	 
+     case MSG_QUIT_ENTIRE_APP: {
+           atomic_set(&gStopScheduler, 1);
+           atomic_set(&gCancelRecording, 1);
+
+           if (fRecordingsBrowser != nullptr) {
+               if (fRecordingsBrowser->Lock()) {
+                   fRecordingsBrowser->Quit();
+                   fRecordingsBrowser = nullptr;
+                }
+           }
+
+           if (fGuideWindow != nullptr) {
+               if (fGuideWindow->Lock()) {
+                   fGuideWindow->Quit();
+                   fGuideWindow = nullptr; 
+               }
+           }
+
+           be_app->PostMessage(B_QUIT_REQUESTED);
+
+           this->Quit(); 
+           break;
+       }
+
+        case MSG_ABORT_SPECIFIC_RECORDING: {
+
+            const char* targetPath = nullptr;
+            if (message->FindString("file_path", &targetPath) == B_OK) {
+                BMessage serviceForwarder(MSG_ABORT_SPECIFIC_RECORDING);
+                serviceForwarder.AddString("file_path", targetPath);
+                
+                BMessenger serviceApp("application/x-vnd.haikuhdhomerun-dvr");
+                if (serviceApp.IsValid()) {
+                    serviceApp.SendMessage(&serviceForwarder);
+                  if (cfg.debugEnable) printf("[FRONTEND] Forwarded active recording abort request to backend service.\n");
+                } else {
+                  if (cfg.debugEnable) printf("[FRONTEND ERROR] Backend Service daemon signature not found!\n");
+                }
+            }
+            break;
+        }
+
+        case MSG_SET_PLAYER_MPV: {
+            cfg.defaultPlayer = "MPV";
+            fPlayerMpvItem->SetMarked(true);
+            fPlayerMediaItem->SetMarked(false);
+            fPlayerVlcItem->SetMarked(false);
+            SaveSchedulesToDisk();
+            break;
+        }
+        case MSG_SET_PLAYER_MEDIAPLAYER: {
+            cfg.defaultPlayer = "MediaPlayer";
+            fPlayerMpvItem->SetMarked(false);
+            fPlayerMediaItem->SetMarked(true);
+            fPlayerVlcItem->SetMarked(false);
+            SaveSchedulesToDisk();
+            break;
+        }
+        case MSG_SET_PLAYER_VLC: {
+            cfg.defaultPlayer = "VLC";
+            fPlayerMpvItem->SetMarked(false);
+            fPlayerMediaItem->SetMarked(false);
+            fPlayerVlcItem->SetMarked(true);
+            SaveSchedulesToDisk();
+            break;
+        }
+
+
 
          
      default:
@@ -2872,13 +3401,117 @@ public:
     }
 };
 
-DVRWindow::~DVRWindow() {
-    delete fFolderPanel;
-    for (BBitmap* bitmap : fIconCache) {
-            delete bitmap;
+
+// =========================================================================
+// RealTVGuideWindow Method Definitions 
+// =========================================================================
+void RealTVGuideWindow::MessageReceived(BMessage* message) {
+    switch (message->what) {
+    	
+       case B_KEY_DOWN: {
+                const char* bytes = nullptr;
+                if (message->FindString("bytes", &bytes) == B_OK && bytes[0] == B_ESCAPE) {
+                    PostMessage(B_QUIT_REQUESTED);
+                }
+                break;
+            }
+    	
+        case MSG_PERIODIC_GUIDE_REFRESH: {
+            DVRWindow* mainWindow = dynamic_cast<DVRWindow*>(fMainAppWindow);
+            
+            if (mainWindow != nullptr) {
+                float currentXScroll = 0.0f;
+                float currentYScroll = 0.0f;
+                
+                if (fContainerList != nullptr) {
+                    currentXScroll = fContainerList->Bounds().left;
+                    currentYScroll = fContainerList->Bounds().top;
+                }
+
+                int32 itemCount = fContainerList->CountItems();
+                for (int32 i = itemCount - 1; i >= 0; i--) {
+                    BListItem* item = fContainerList->RemoveItem(i);
+                    delete item;
+                }
+
+                const std::vector<ChannelGuideItem>& freshChannels = mainWindow->GetLoadedChannels();
+
+                _BuildGuideRowsFromLiveChannels(freshChannels, fMainChannelListView);
+
+                if (fContainerList != nullptr) {
+                    fContainerList->ScrollTo(currentXScroll, currentYScroll);
+                }
+
+                fContainerList->Invalidate();
+            }
+            break;
         }
+        default:
+            BWindow::MessageReceived(message);
+            break;
+    }
+}
+
+
+
+
+DVRWindow::~DVRWindow() {
+    if (fGuideWindow != nullptr) {
+        if (fGuideWindow->Lock()) {
+            fGuideWindow->Quit();
+        }
+    }
+
+    if (fRecordingsBrowser != nullptr) {
+        if (fRecordingsBrowser->Lock()) {
+            fRecordingsBrowser->Quit();
+        }
+    }
+
+    delete fFolderPanel;
+    delete fRefreshRunner;
+    
+    for (BBitmap* bitmap : fIconCache) {
+        delete bitmap;
+    }
     fIconCache.clear();
 }
+
+bool DVRWindow::QuitRequested() {
+    BWindow* activeWin = nullptr;
+    int32 windowIndex = 0;
+    bool guideIsOpenOnScreen = false;
+    
+    while ((activeWin = be_app->WindowAt(windowIndex)) != nullptr) {
+        if (strcmp(activeWin->Title(), "Interactive TV Guide Matrix") == 0) {
+            guideIsOpenOnScreen = true;
+            break; 
+        }
+        windowIndex++;
+    }
+
+    if (guideIsOpenOnScreen) {
+        this->Hide(); 
+        return false; 
+    }
+
+    atomic_set(&gStopScheduler, 1);
+    atomic_set(&gCancelRecording, 1);
+
+    if (fRecordingsBrowser != nullptr) {
+        if (fRecordingsBrowser->Lock()) {
+            fRecordingsBrowser->Quit();
+            fRecordingsBrowser = nullptr;
+        }
+    }
+
+    be_app->PostMessage(B_QUIT_REQUESTED);
+    return true; 
+}
+
+
+
+
 
 class DVRApplication : public BApplication {
 public:
@@ -2886,10 +3519,7 @@ public:
     
     void ReadyToRun() override {
         DVRWindow* window = new DVRWindow();
-        window->Show();
-        
-        // AUTOMATION: Immediately post the command to the main window thread loop
-        // so it pops the look-ahead guide open right at startup!
+        window->Show();        
         window->PostMessage(MSG_OPEN_GUIDE);
     }
 

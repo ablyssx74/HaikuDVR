@@ -14,8 +14,23 @@
 #include <ctime>
 #include <signal.h>
 #include <unistd.h> 
+#include <map>
 #include <nlohmann/json.hpp>
 #include "hdhomerun.h"
+
+const uint32 MSG_ABORT_SPECIFIC_RECORDING = 'absp';
+
+
+
+struct ActiveWorkerInfo {
+    thread_id threadId;
+    int32*    cancellationFlag; // Pointer to a flag we can toggle from anywhere
+};
+
+// Master map linking file paths directly to their active worker info packages
+std::map<std::string, ActiveWorkerInfo> gRunningWorkersMap;
+BLocker                                 gRunningWorkersLocker("RunningWorkersLock");
+
 
 using json = nlohmann::json;
 
@@ -29,6 +44,7 @@ struct ScheduleItem {
     std::string startTime;
     std::string channel;
     std::string duration;
+    std::string showTitle; 
     std::string tunerIp; 
     bool processed;
 };
@@ -40,6 +56,7 @@ struct RecordingConfig {
     std::string duration;
     std::string path;
     int dbIndexPosition;
+    thread_id workerThread;
 };
 
 std::vector<ScheduleItem> gScheduleList;
@@ -94,6 +111,7 @@ void LoadSchedulesFromDisk() {
                     item.channel = entry.value("channel", "5.1");
                     item.duration = entry.value("duration", "1800");                    
                     item.tunerIp = entry.value("tuner_ip", ""); 
+                    item.showTitle = entry.value("show_title", "Unknown_Show"); // <-- NEW: Safe Title Read
                     
                     item.processed = entry.value("processed", false);
                     gScheduleList.push_back(item);
@@ -123,7 +141,8 @@ void SaveSchedulesToDisk() {
             {"channel", item.channel},
             {"duration", item.duration},
             {"processed", item.processed},
-            {"tuner_ip", item.tunerIp}    
+            {"tuner_ip", item.tunerIp},
+            {"show_title", item.showTitle} // <-- NEW: Serialize the program name
         });
     }
     jRoot["schedules"] = jSchedules;
@@ -144,8 +163,29 @@ size_t StorageWriteCallback(void* contents, size_t size, size_t nmemb, void* use
     return totalSize;
 }
 
+// 1. Add this progress callback routine directly above BackgroundRecordingWorker
+int CurlProgressCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    int32* cancelRequested = static_cast<int32*>(clientp);
+    if (cancelRequested != nullptr && atomic_get(cancelRequested) == 1) {
+        return 1; // Returning a non-zero integer forces libcurl to abort the connection instantly!
+    }
+    return 0; // Carry on downloading bytes normally
+}
+
 int32 BackgroundRecordingWorker(void* data) {
     RecordingConfig* config = static_cast<RecordingConfig*>(data);
+    
+    // Allocate a thread-local atomic cancellation register
+    int32 cancelFlag = 0;
+    
+    // Push this active registration info package into the global tracker map
+    gRunningWorkersLocker.Lock();
+    ActiveWorkerInfo info;
+    info.threadId = find_thread(nullptr); // Get current thread ID
+    info.cancellationFlag = &cancelFlag;
+    gRunningWorkersMap[config->path] = info;
+    gRunningWorkersLocker.Unlock();
+
     CURL* curl = curl_easy_init();
     if (curl) {
         std::string cleanDuration = config->duration;
@@ -158,10 +198,17 @@ int32 BackgroundRecordingWorker(void* data) {
             curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
             curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
 
+            // =========================================================================
+            // NEW: HOOK THE ATOMIC INTERCEPT CANCEL CALLBACK STRAIGHT INTO LIBCURL
+            // =========================================================================
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L); // Enable progress tracking hooks
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlProgressCallback);
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &cancelFlag);
+
             curl_easy_perform(curl);
             outputFile.close();
         } else {
-            printf("[WORKER ERROR] Failed to open target file for writing! Check directory permissions.\n");
+            printf("[WORKER ERROR] Failed to open target file for writing!\n");
         }
         curl_easy_cleanup(curl);
         
@@ -172,36 +219,45 @@ int32 BackgroundRecordingWorker(void* data) {
         gScheduleLocker.Unlock();
         SaveSchedulesToDisk();
     }
+
+    gRunningWorkersLocker.Lock();
+    gRunningWorkersMap.erase(config->path); 
+    gRunningWorkersLocker.Unlock();
+
     delete config;
     return 0;
 }
 
+
 int32 ServiceSchedulerLoop(void* data) {    
     while (atomic_get(&gStopService) == 0) {
-        snooze(5000000);
+        snooze(5000000); // 5 seconds
         LoadSchedulesFromDisk();
+        
         std::time_t now = std::time(nullptr);
-        std::time_t lookAheadTime = now + 60; 
-        std::tm* localTime = std::localtime(&lookAheadTime);
+        std::time_t nextMinTime = now + 60; // 1-minute pre-roll calculation
+        
+        std::tm* localTime = std::localtime(&now);
+        std::tm* localNextTime = std::localtime(&nextMinTime);
         
         char dateBuf[32];
         char timeBuf[32];
+        char nextTimeBuf[32];
+        char nextDateBuf[32];
+        
         std::strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", localTime);
         std::strftime(timeBuf, sizeof(timeBuf), "%H:%M", localTime);
+        std::strftime(nextDateBuf, sizeof(nextDateBuf), "%Y-%m-%d", localNextTime);
+        std::strftime(nextTimeBuf, sizeof(nextTimeBuf), "%H:%M", localNextTime);
         
         std::string curDate(dateBuf);
         std::string curTime(timeBuf);
+        std::string nextDate(nextDateBuf);
+        std::string nextTime(nextTimeBuf);
         bool databaseUpdated = false;
 
         gScheduleLocker.Lock();
-         /*
-        size_t totalItems = gScheduleList.size();
-       
-        if (totalItems > 0) {
-            printf("[SERVER DEBUG] System Evaluation Time (Look-Ahead): %s @ %s. Queue size: %zu items.\n", 
-                   curDate.c_str(), curTime.c_str(), totalItems);
-        }
-		*/
+        
         for (size_t i = 0; i < gScheduleList.size(); i++) {
             if (gScheduleList[i].processed) continue;
 
@@ -210,8 +266,21 @@ int32 ServiceSchedulerLoop(void* data) {
                 normalizedTargetTime = "0" + normalizedTargetTime;
             }
 
+            bool shouldFire = false;
 
-            if (gScheduleList[i].processed == 0 && gScheduleList[i].startDate == curDate && normalizedTargetTime == curTime) {    
+            // Condition A: It is already past due or currently happening right now
+            if (gScheduleList[i].startDate < curDate) {
+                shouldFire = true; 
+            } else if (gScheduleList[i].startDate == curDate && normalizedTargetTime <= curTime) {
+                shouldFire = true;
+            }
+            
+            // Condition B: Pre-roll window! It starts exactly in the next minute
+            else if (gScheduleList[i].startDate == nextDate && normalizedTargetTime == nextTime) {
+                shouldFire = true;
+            }
+
+            if (gScheduleList[i].processed == 0 && shouldFire) {    
                 databaseUpdated = true;
             
                 RecordingConfig* rec = new RecordingConfig();
@@ -242,13 +311,34 @@ int32 ServiceSchedulerLoop(void* data) {
                     std::string safeTime = gScheduleList[i].startTime;
                     std::replace(safeTime.begin(), safeTime.end(), ':', '-');
             
+                    // 1. SANITIZE TITLE: Clean the program name of whitespace and illegal filesystem tokens
+                    std::string safeTitle = gScheduleList[i].showTitle;
+                    if (safeTitle.empty()) {
+                        safeTitle = "Unknown_Show";
+                    } else {
+                        // Replace spaces with underscores for flat tokenizing layouts later
+                        std::replace(safeTitle.begin(), safeTitle.end(), ' ', '_');
+                        // Replace common illegal characters or path delimiters with clean hyphens
+                        std::replace(safeTitle.begin(), safeTitle.end(), '/', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '\\', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), ':', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '*', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '?', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '"', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '<', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '>', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '|', '-');
+                    }
+
+                    // 2. BUILD PATH: Stitch the safe title into the standardized token format
                     rec->path = baseDir + "DVR_Record_Ch_" + rec->channel + "_" 
                               + gScheduleList[i].startDate + "_" + safeTime + "_"
+                              + safeTitle + "_" // Distinct token bounds
                               + gScheduleList[i].duration + "s_Padded.ts";
                               
-                    // Detach index tracking since we erase the vector item immediately
                     rec->dbIndexPosition = -1; 
             
+                    // Spawn the isolated backend worker thread cleanly
                     thread_id worker = spawn_thread(BackgroundRecordingWorker, "DVRServiceWorker", B_NORMAL_PRIORITY, rec);
                     if (worker >= B_OK) {
                         resume_thread(worker);
@@ -259,23 +349,21 @@ int32 ServiceSchedulerLoop(void* data) {
                     delete rec; 
                 }
 
-                // FIX: Erase item from array immediately so subsequent file reads see it as cleared.
+                // Erase item from array immediately so subsequent file reads see it as cleared.
                 gScheduleList.erase(gScheduleList.begin() + i);
-                
-                // FIX: Decrement index counter to avoid skipping the next schedule item in the loop
                 i--; 
             }
         }
         gScheduleLocker.Unlock();
 
         if (databaseUpdated) {
-            printf("[SERVER DEBUG] Schedule fired and purged. Updating database changes to disk file...\n");
             SaveSchedulesToDisk();
         }
     }
-    printf("[SERVER DEBUG] Scheduler Loop exiting cleanly.\n");
+    
     return 0;
 }
+
 
 
 
@@ -296,13 +384,51 @@ public:
     
         void MessageReceived(BMessage* message) override {
         switch (message->what) {
+        	
+        	
+				// Inside DVRServiceApp::MessageReceived -> case MSG_ABORT_SPECIFIC_RECORDING:
+	        case MSG_ABORT_SPECIFIC_RECORDING: {
+	            // =========================================================================
+	            // BACKEND SERVICE: SEARCH THE MAP AND TOGGLE THE CANCELLATION FLAG
+	            // =========================================================================
+	            const char* targetPath = nullptr;
+	            if (message->FindString("file_path", &targetPath) == B_OK && targetPath != nullptr) {
+	                std::string pathKey(targetPath);
+	                
+	                gRunningWorkersLocker.Lock();
+	                auto iterator = gRunningWorkersMap.find(pathKey);
+	                
+	                if (iterator != gRunningWorkersMap.end()) {
+	                    if (iterator->second.cancellationFlag != nullptr) {
+	                        atomic_set(iterator->second.cancellationFlag, 1);
+	                    }
+	                    
+	                    snooze(100000); // 100ms snooze to let libcurl drop the network socket
+	                    gRunningWorkersMap.erase(iterator);
+	                } else {
+	                    printf("[DVR SERVICE ERROR] Path key was NOT found in active worker map!\n");
+	                }
+	                gRunningWorkersLocker.Unlock();
+	            }
+	            break;
+	        }
+
+
+
 
                case 'bFrc': {
                 const char* targetChannel = nullptr;
                 const char* targetDuration = nullptr;
+                const char* targetTitle = nullptr; // Track optional incoming title string
                 
                 if (message->FindString("channel", &targetChannel) == B_OK &&
                     message->FindString("duration", &targetDuration) == B_OK) {
+                    
+                    // Look for an optional show title payload, fallback to "Manual_Record" if missing
+                    std::string safeTitle = "Manual_Record";
+                    if (message->FindString("show_title", &targetTitle) == B_OK && targetTitle != nullptr) {
+                        safeTitle = targetTitle;
+                    }
                     
                     RecordingConfig* rec = new RecordingConfig();
                     rec->channel = targetChannel;
@@ -316,22 +442,35 @@ public:
                         tunerFound = true;
                     }
 
-                    if (tunerFound) {
-                        std::string baseDir = gGlobalSaveDirectory;
-                        if (!baseDir.empty() && baseDir.back() != '/') {
-                            baseDir += "/";
-                        }
-                        
-                        std::time_t rawTime = std::time(nullptr);
-                        std::tm* timeInfo = std::localtime(&rawTime);
-                        char timestampBuffer[64];
-                        std::strftime(timestampBuffer, sizeof(timestampBuffer), "%Y-%m-%d_%H-%M-%S", timeInfo);
+	                if (tunerFound) {
+	                    std::string baseDir = gGlobalSaveDirectory;
+	                    if (!baseDir.empty() && baseDir.back() != '/') {
+	                        baseDir += "/";
+	                    }
 
+                        // Fetch the immediate wall clock timestamp to prevent missing variable tokens
+                        time_t now = std::time(nullptr);
+                        struct tm* localTimeInfo = std::localtime(&now);
+                        
+                        char dateBuf[32];
+                        char timeBuf[32];
+                        std::strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", localTimeInfo);
+                        std::strftime(timeBuf, sizeof(timeBuf), "%H-%M", localTimeInfo); // Standard clean separator
+
+                        // Sanitize the title of spaces/illegal filesystem tokens 
+                        std::replace(safeTitle.begin(), safeTitle.end(), ' ', '_');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '/', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), '\\', '-');
+                        std::replace(safeTitle.begin(), safeTitle.end(), ':', '-');
+
+                        // Stitches the file formatting path using uniform tokens
                         rec->path = baseDir + "DVR_Record_Ch_" + rec->channel + "_" 
-                                  + timestampBuffer + "_" + rec->duration + "s.ts";
+                                  + dateBuf + "_" + timeBuf + "_"
+                                  + safeTitle + "_"
+                                  + rec->duration + "s_Padded.ts";
+                                  
+                        rec->dbIndexPosition = -1;
                         
-                        rec->dbIndexPosition = -1; 
-
                         thread_id worker = spawn_thread(BackgroundRecordingWorker, "DVRServiceWorker", B_NORMAL_PRIORITY, rec);
                         if (worker >= B_OK) {
                             resume_thread(worker);
@@ -343,7 +482,8 @@ public:
                     }
                 }
                 break;
-            }            
+            }
+          
             
             default:
                 BApplication::MessageReceived(message);

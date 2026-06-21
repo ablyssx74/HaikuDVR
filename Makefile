@@ -4,8 +4,8 @@ CXXFLAGS = -Wall -O2 -I./include -I/boot/system/develop/headers/private/shared
 
 # Target binary definitions
 GUI_TARGET = HaikuDVR
-SERVER_TARGET = HaikuDVRService
-VERSION = 1.0.8
+SERVER_TARGET = dvr_server
+VERSION = 1.0.9
 PACKAGE_DIR := build/package
 
 # Shared target architectures
@@ -25,9 +25,9 @@ GUI_SRCS = HaikuDVR.cpp
 GUI_OBJS = $(GUI_SRCS:.cpp=.o)
 GUI_RSRCS = HaikuDVR.rsrc
 
-SERVER_SRCS = HaikuDVRService.cpp
+SERVER_SRCS = dvr_server.cpp
 SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
-SERVER_RSRCS = HaikuDVRService.rsrc 
+SERVER_RSRCS = dvr_server.rsrc 
 
 # Shared linking assets (FIX: Added -ltranslation to resolve look-ahead guide icons)
 LIBS = -L./lib -lhdhomerun -lbe -ltranslation -lcurl -lnetwork -ltracker -lshared
@@ -75,13 +75,14 @@ release: all
 	sed -e 's/$$(GUI_TARGET)/$(GUI_TARGET)/g' -e 's/$$(VERSION)/$(VERSION)/g' -e 's/$$(ARCH)/$(ARCH)/' -e 's/$$(YEAR)/$(shell date +%Y)/' $(GUI_TARGET).tpl > $(PACKAGE_DIR)/.PackageInfo
 	mkdir -p $(PACKAGE_DIR)/apps
 	mkdir -p $(PACKAGE_DIR)/bin
+	mkdir -p $(PACKAGE_DIR)/servers
 	mkdir -p $(PACKAGE_DIR)/lib
 	mkdir -p $(PACKAGE_DIR)/data/launch
 	mkdir -p $(PACKAGE_DIR)/data/deskbar/menu/Applications
 	cp $(GUI_TARGET) $(PACKAGE_DIR)/apps/$(GUI_TARGET)
-	cp $(SERVER_TARGET) $(PACKAGE_DIR)/bin/$(SERVER_TARGET)
+	cp $(SERVER_TARGET) $(PACKAGE_DIR)/servers/$(SERVER_TARGET)
 	cp lib/libhdhomerun.so $(PACKAGE_DIR)/lib/libhdhomerun.so
-	cp HaikuDVRService.launch $(PACKAGE_DIR)/data/launch/HaikuDVRService
+	cp dvr_server.launch $(PACKAGE_DIR)/data/launch/dvr_server
 	ln -s ../apps/$(GUI_TARGET) $(PACKAGE_DIR)/bin/$(GUI_TARGET)
 	ln -s ../../../../apps/$(GUI_TARGET) $(PACKAGE_DIR)/data/deskbar/menu/Applications/$(GUI_TARGET)
 	package create -C $(PACKAGE_DIR) $(GUI_TARGET)-$(VERSION)-1-$(ARCH).hpkg	
