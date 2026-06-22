@@ -24,10 +24,9 @@ const uint32 MSG_ABORT_SPECIFIC_RECORDING = 'absp';
 
 struct ActiveWorkerInfo {
     thread_id threadId;
-    int32*    cancellationFlag; // Pointer to a flag we can toggle from anywhere
+    int32*    cancellationFlag; 
 };
 
-// Master map linking file paths directly to their active worker info packages
 std::map<std::string, ActiveWorkerInfo> gRunningWorkersMap;
 BLocker                                 gRunningWorkersLocker("RunningWorkersLock");
 
@@ -72,24 +71,37 @@ void SignalExitInterceptor(int signalType) {
 std::vector<std::string> DiscoverAllTuners() {
     std::vector<std::string> tuners;
     struct hdhomerun_discover_device_t result_list[64];
+    
     hdhomerun_discover_t* ds = hdhomerun_discover_create(NULL);
     if (ds == NULL) {
-        tuners.push_back("192.168.0.100");
-        return tuners;
+        // Log locally or handle allocation failure out to standard error
+        fprintf(stderr, "Error: Failed to create hdhomerun discovery instance\n");
+        return tuners; // Returns clean empty vector
     }
-    int count = hdhomerun_discover_find_devices_v2(ds, 0, HDHOMERUN_DEVICE_TYPE_TUNER, HDHOMERUN_DEVICE_ID_WILDCARD, result_list, 64);
+    
+    int count = hdhomerun_discover_find_devices_v2(ds, 0, 
+                    HDHOMERUN_DEVICE_TYPE_TUNER, HDHOMERUN_DEVICE_ID_WILDCARD, 
+                    result_list, 64);
+                    
     for (int i = 0; i < count; i++) {
         uint32_t ip = result_list[i].ip_addr;
         char ip_str[32];
-        sprintf(ip_str, "%u.%u.%u.%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+        
+        // Convert to standard dot-decimal network notation string
+        sprintf(ip_str, "%u.%u.%u.%u", 
+            (ip >> 24) & 0xFF, 
+            (ip >> 16) & 0xFF, 
+            (ip >> 8)  & 0xFF, 
+            ip & 0xFF);
+            
         tuners.push_back(std::string(ip_str));
     }
+    
     hdhomerun_discover_destroy(ds);
-    if (tuners.empty()) tuners.push_back("192.168.0.100");
-    return tuners;
+    return tuners; // Returns discovered tuners, or empty vector if none found
 }
 
-// Storage configuration loader
+
 void LoadSchedulesFromDisk() {
     std::ifstream file(kSettingsFilePath);
     if (!file.is_open()) return;
@@ -129,7 +141,6 @@ void LoadSchedulesFromDisk() {
 void SaveSchedulesToDisk() {
     gScheduleLocker.Lock();
     
-    // Structure the root container as an object instead of a flat array
     json jRoot = json::object();
     jRoot["save_directory"] = gGlobalSaveDirectory;
     
@@ -142,7 +153,7 @@ void SaveSchedulesToDisk() {
             {"duration", item.duration},
             {"processed", item.processed},
             {"tuner_ip", item.tunerIp},
-            {"show_title", item.showTitle} // <-- NEW: Serialize the program name
+            {"show_title", item.showTitle} 
         });
     }
     jRoot["schedules"] = jSchedules;
@@ -163,25 +174,22 @@ size_t StorageWriteCallback(void* contents, size_t size, size_t nmemb, void* use
     return totalSize;
 }
 
-// 1. Add this progress callback routine directly above BackgroundRecordingWorker
 int CurlProgressCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
     int32* cancelRequested = static_cast<int32*>(clientp);
     if (cancelRequested != nullptr && atomic_get(cancelRequested) == 1) {
-        return 1; // Returning a non-zero integer forces libcurl to abort the connection instantly!
+        return 1; 
     }
-    return 0; // Carry on downloading bytes normally
+    return 0; 
 }
 
 int32 BackgroundRecordingWorker(void* data) {
     RecordingConfig* config = static_cast<RecordingConfig*>(data);
     
-    // Allocate a thread-local atomic cancellation register
     int32 cancelFlag = 0;
     
-    // Push this active registration info package into the global tracker map
     gRunningWorkersLocker.Lock();
     ActiveWorkerInfo info;
-    info.threadId = find_thread(nullptr); // Get current thread ID
+    info.threadId = find_thread(nullptr); 
     info.cancellationFlag = &cancelFlag;
     gRunningWorkersMap[config->path] = info;
     gRunningWorkersLocker.Unlock();
@@ -198,10 +206,7 @@ int32 BackgroundRecordingWorker(void* data) {
             curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
             curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
 
-            // =========================================================================
-            // NEW: HOOK THE ATOMIC INTERCEPT CANCEL CALLBACK STRAIGHT INTO LIBCURL
-            // =========================================================================
-            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L); // Enable progress tracking hooks
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L); 
             curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlProgressCallback);
             curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &cancelFlag);
 
@@ -231,11 +236,11 @@ int32 BackgroundRecordingWorker(void* data) {
 
 int32 ServiceSchedulerLoop(void* data) {    
     while (atomic_get(&gStopService) == 0) {
-        snooze(5000000); // 5 seconds
+        snooze(5000000); 
         LoadSchedulesFromDisk();
         
         std::time_t now = std::time(nullptr);
-        std::time_t nextMinTime = now + 60; // 1-minute pre-roll calculation
+        std::time_t nextMinTime = now + 60; 
         
         std::tm* localTime = std::localtime(&now);
         std::tm* localNextTime = std::localtime(&nextMinTime);
@@ -268,14 +273,12 @@ int32 ServiceSchedulerLoop(void* data) {
 
             bool shouldFire = false;
 
-            // Condition A: It is already past due or currently happening right now
             if (gScheduleList[i].startDate < curDate) {
                 shouldFire = true; 
             } else if (gScheduleList[i].startDate == curDate && normalizedTargetTime <= curTime) {
                 shouldFire = true;
             }
             
-            // Condition B: Pre-roll window! It starts exactly in the next minute
             else if (gScheduleList[i].startDate == nextDate && normalizedTargetTime == nextTime) {
                 shouldFire = true;
             }
@@ -286,7 +289,6 @@ int32 ServiceSchedulerLoop(void* data) {
                 RecordingConfig* rec = new RecordingConfig();
                 rec->channel = gScheduleList[i].channel;
                 
-                // Add 60 seconds of padding to the recording duration
                 int totalDurationSeconds = std::atoi(gScheduleList[i].duration.c_str()) + 60;
                 rec->duration = std::to_string(totalDurationSeconds); 
             
@@ -311,14 +313,11 @@ int32 ServiceSchedulerLoop(void* data) {
                     std::string safeTime = gScheduleList[i].startTime;
                     std::replace(safeTime.begin(), safeTime.end(), ':', '-');
             
-                    // 1. SANITIZE TITLE: Clean the program name of whitespace and illegal filesystem tokens
                     std::string safeTitle = gScheduleList[i].showTitle;
                     if (safeTitle.empty()) {
                         safeTitle = "Unknown_Show";
                     } else {
-                        // Replace spaces with underscores for flat tokenizing layouts later
                         std::replace(safeTitle.begin(), safeTitle.end(), ' ', '_');
-                        // Replace common illegal characters or path delimiters with clean hyphens
                         std::replace(safeTitle.begin(), safeTitle.end(), '/', '-');
                         std::replace(safeTitle.begin(), safeTitle.end(), '\\', '-');
                         std::replace(safeTitle.begin(), safeTitle.end(), ':', '-');
@@ -330,15 +329,13 @@ int32 ServiceSchedulerLoop(void* data) {
                         std::replace(safeTitle.begin(), safeTitle.end(), '|', '-');
                     }
 
-                    // 2. BUILD PATH: Stitch the safe title into the standardized token format
                     rec->path = baseDir + "DVR_Record_Ch_" + rec->channel + "_" 
                               + gScheduleList[i].startDate + "_" + safeTime + "_"
-                              + safeTitle + "_" // Distinct token bounds
+                              + safeTitle + "_" 
                               + gScheduleList[i].duration + "s_Padded.ts";
                               
                     rec->dbIndexPosition = -1; 
             
-                    // Spawn the isolated backend worker thread cleanly
                     thread_id worker = spawn_thread(BackgroundRecordingWorker, "DVRServiceWorker", B_NORMAL_PRIORITY, rec);
                     if (worker >= B_OK) {
                         resume_thread(worker);
@@ -349,7 +346,6 @@ int32 ServiceSchedulerLoop(void* data) {
                     delete rec; 
                 }
 
-                // Erase item from array immediately so subsequent file reads see it as cleared.
                 gScheduleList.erase(gScheduleList.begin() + i);
                 i--; 
             }
@@ -386,7 +382,7 @@ public:
         switch (message->what) {
         	
         	
-				// Inside DVRServiceApp::MessageReceived -> case MSG_ABORT_SPECIFIC_RECORDING:
+				
 	        case MSG_ABORT_SPECIFIC_RECORDING: {
 	            // =========================================================================
 	            // BACKEND SERVICE: SEARCH THE MAP AND TOGGLE THE CANCELLATION FLAG
@@ -403,7 +399,7 @@ public:
 	                        atomic_set(iterator->second.cancellationFlag, 1);
 	                    }
 	                    
-	                    snooze(100000); // 100ms snooze to let libcurl drop the network socket
+	                    snooze(100000); 
 	                    gRunningWorkersMap.erase(iterator);
 	                } else {
 	                    printf("[DVR SERVICE ERROR] Path key was NOT found in active worker map!\n");
@@ -414,17 +410,14 @@ public:
 	        }
 
 
-
-
                case 'bFrc': {
                 const char* targetChannel = nullptr;
                 const char* targetDuration = nullptr;
-                const char* targetTitle = nullptr; // Track optional incoming title string
+                const char* targetTitle = nullptr; 
                 
                 if (message->FindString("channel", &targetChannel) == B_OK &&
                     message->FindString("duration", &targetDuration) == B_OK) {
                     
-                    // Look for an optional show title payload, fallback to "Manual_Record" if missing
                     std::string safeTitle = "Manual_Record";
                     if (message->FindString("show_title", &targetTitle) == B_OK && targetTitle != nullptr) {
                         safeTitle = targetTitle;
@@ -448,22 +441,19 @@ public:
 	                        baseDir += "/";
 	                    }
 
-                        // Fetch the immediate wall clock timestamp to prevent missing variable tokens
                         time_t now = std::time(nullptr);
                         struct tm* localTimeInfo = std::localtime(&now);
                         
                         char dateBuf[32];
                         char timeBuf[32];
                         std::strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", localTimeInfo);
-                        std::strftime(timeBuf, sizeof(timeBuf), "%H-%M", localTimeInfo); // Standard clean separator
+                        std::strftime(timeBuf, sizeof(timeBuf), "%H-%M", localTimeInfo); 
 
-                        // Sanitize the title of spaces/illegal filesystem tokens 
                         std::replace(safeTitle.begin(), safeTitle.end(), ' ', '_');
                         std::replace(safeTitle.begin(), safeTitle.end(), '/', '-');
                         std::replace(safeTitle.begin(), safeTitle.end(), '\\', '-');
                         std::replace(safeTitle.begin(), safeTitle.end(), ':', '-');
 
-                        // Stitches the file formatting path using uniform tokens
                         rec->path = baseDir + "DVR_Record_Ch_" + rec->channel + "_" 
                                   + dateBuf + "_" + timeBuf + "_"
                                   + safeTitle + "_"
