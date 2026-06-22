@@ -1,11 +1,12 @@
 # Compiler definitions
 CXX = g++
-CXXFLAGS = -Wall -O2 -I./include -I/boot/system/develop/headers/private/shared 
+CXXFLAGS = -Wall -O3 -fdata-sections -ffunction-sections -I./include -I/boot/system/develop/headers/private/shared
+
 
 # Target binary definitions
 GUI_TARGET = HaikuDVR
 SERVER_TARGET = dvr_server
-VERSION = 1.0.10
+VERSION = 1.0.11
 PACKAGE_DIR := build/package
 
 # Shared target architectures
@@ -29,22 +30,25 @@ SERVER_SRCS = dvr_server.cpp
 SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
 SERVER_RSRCS = dvr_server.rsrc 
 
-# Shared linking assets (FIX: Added -ltranslation to resolve look-ahead guide icons)
+# Shared linking assets
 LIBS = -L./lib -lhdhomerun -lbe -ltranslation -lcurl -lnetwork -ltracker -lshared
 RPATH = -Wl,-rpath=$$ORIGIN/lib
+
+# OPTIMIZED: Added garbage collection linking flags and symbol stripping (-s)
+LDFLAGS = $(INCLUDE) -Wl,--gc-sections -s
 
 # Master target execution rule
 all: $(GUI_TARGET) $(SERVER_TARGET)
 
 # Link the graphical desktop client binary
 $(GUI_TARGET): $(GUI_OBJS) $(GUI_RSRCS)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) -o $(GUI_TARGET) $(GUI_OBJS) $(LIBS) $(RPATH)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $(GUI_TARGET) $(GUI_OBJS) $(LIBS) $(RPATH)
 	xres -o $(GUI_TARGET) $(GUI_RSRCS)
 	mimeset -f $(GUI_TARGET)
 
 # Link the headless background server binary
 $(SERVER_TARGET): $(SERVER_OBJS) $(SERVER_RSRCS)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) -o $(SERVER_TARGET) $(SERVER_OBJS) $(LIBS) $(RPATH)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $(SERVER_TARGET) $(SERVER_OBJS) $(LIBS) $(RPATH)
 	xres -o $(SERVER_TARGET) $(SERVER_RSRCS) 
 	mimeset -f $(SERVER_TARGET)
 
@@ -63,8 +67,6 @@ clean:
 	rm -rf build
 
 .PHONY: all clean
-
-
 
 
 

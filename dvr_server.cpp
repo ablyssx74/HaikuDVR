@@ -123,7 +123,7 @@ void LoadSchedulesFromDisk() {
                     item.channel = entry.value("channel", "5.1");
                     item.duration = entry.value("duration", "1800");                    
                     item.tunerIp = entry.value("tuner_ip", ""); 
-                    item.showTitle = entry.value("show_title", "Unknown_Show"); // <-- NEW: Safe Title Read
+                    item.showTitle = entry.value("show_title", "Unknown_Show"); 
                     
                     item.processed = entry.value("processed", false);
                     gScheduleList.push_back(item);

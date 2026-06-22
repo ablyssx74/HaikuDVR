@@ -52,7 +52,7 @@
 #include <Screen.h>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.10 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.11 (Haiku OS)";
 }
 
 
@@ -162,6 +162,8 @@ struct ScheduleItem {
 struct UpcomingShowItem {
     std::string title;
     std::string startTimeStr; 
+    BString endTimeStr;      
+    BString description;     
     int32 durationMinutes; 
 };
 
@@ -171,6 +173,8 @@ struct ChannelGuideItem {
     std::string nowPlaying; 
     int32 nowPlayingDurationMinutes; 
     std::vector<UpcomingShowItem> futureLineup; 
+    std::string nowPlayingEndTimeStr;
+    std::string nowPlayingDescription;
 };
 
 struct GuideProgramBlock {
@@ -178,6 +182,8 @@ struct GuideProgramBlock {
     BString timeDisplay;
     float cellWidthPixels; 
     int32 durationMinutes; 
+    BString endTimeStr;  
+    BString description;  
 };
 
 struct GuideRowModel {
@@ -510,7 +516,7 @@ public:
         .End();
 
         BMessage pulseMsg(MSG_REFRESH_LIBRARY);
-        bigtime_t oneSecondInterval = 1000000; // Tracked in microseconds
+        bigtime_t oneSecondInterval = 1000000;
         
         fPulseTimer = new BMessageRunner(BMessenger(this), &pulseMsg, oneSecondInterval);
 
@@ -680,7 +686,6 @@ private:
         BDirectory directory(fRecordingDir.String());
         if (directory.InitCheck() != B_OK) return;
 
-        // Keep track of files still existing on disk to detect deletions
         std::vector<BString> filesOnDisk;
 
         BEntry entry;
@@ -702,29 +707,24 @@ private:
             BString expectedLabel;
             expectedLabel << name << " (" << _FormatFileSize(fileSize) << ")";
 
-            // Check if this recording file is already present in our UI list
             bool alreadyExists = false;
             int32 itemCount = fRecordingsList->CountItems();
             
             for (int32 i = 0; i < itemCount; i++) {
                 RecordingListItem* existingItem = (RecordingListItem*)fRecordingsList->ItemAt(i);
                 
-                // FIXED: Use fFullFilePath (assuming that is its string property name based on delete block)
                 if (existingItem != nullptr && existingItem->fFullFilePath == pathString) {
                     alreadyExists = true;
                     
-                    // FIXED: Compare the label string directly to check if the size chunk changed on disk
                     if (BString(existingItem->Text()) != expectedLabel) {
                         existingItem->SetText(expectedLabel.String());
-                        fRecordingsList->InvalidateItem(i); // Force redrawing the changed line
+                        fRecordingsList->InvalidateItem(i); 
                     }
                     break;
                 }
             }
 
-            // If it's a completely new file, add it using your 3-argument constructor
             if (!alreadyExists) {
-                // FIXED: Passes (Label, Full Path, Clean File Name) to match line 472 candidate
                 RecordingListItem* newItem = new RecordingListItem(
                     expectedLabel.String(), 
                     pathString.String(), 
@@ -734,7 +734,6 @@ private:
             }
         }
 
-        // Clean up visual elements from our list if their files were deleted externally from disk
         for (int32 i = fRecordingsList->CountItems() - 1; i >= 0; i--) {
             RecordingListItem* item = (RecordingListItem*)fRecordingsList->ItemAt(i);
             if (item != nullptr) {
@@ -748,7 +747,6 @@ private:
             }
         }
 
-        // Update the storage footprint footer text block layout metric
         if (fTotalUsageLabel != nullptr) {
             BString footerLabel;
             footerLabel << "Total Library Footprint Storage: " << _FormatFileSize(totalAccumulatedBytes);
@@ -807,9 +805,9 @@ int32 gIconThreadRunning = 0;
 BMessenger* gIconWindowMessenger = nullptr;
 
 
-int32 SerialIconDownloaderThread(void* data) {
-    size_t StorageWriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
+size_t StorageWriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
 
+int32 SerialIconDownloaderThread(void* data) {
     atomic_set(&gIconThreadRunning, 1);
 
     while (true) {
@@ -830,26 +828,30 @@ int32 SerialIconDownloaderThread(void* data) {
 
         CURL* downloadCurl = curl_easy_init();
         if (downloadCurl) {
-            std::ofstream iconOut(job.iconPath.c_str(), std::ios::binary);
-            if (iconOut.is_open()) {
-                curl_easy_setopt(downloadCurl, CURLOPT_URL, job.downloadUrl.c_str());
-                curl_easy_setopt(downloadCurl, CURLOPT_USERAGENT, "Mozilla/5.0 HaikuDVR/1.0");
-                curl_easy_setopt(downloadCurl, CURLOPT_WRITEFUNCTION, StorageWriteCallback);
-                curl_easy_setopt(downloadCurl, CURLOPT_WRITEDATA, &iconOut);
-                curl_easy_setopt(downloadCurl, CURLOPT_TIMEOUT, 6L);
-                
-                CURLcode res = curl_easy_perform(downloadCurl);
-                iconOut.close();
-                
-                if (res == CURLE_OK) {
-                    if (gIconWindowMessenger && gIconWindowMessenger->IsValid()) {
-                        BMessage completionMsg(MSG_REFRESH_CHANNEL_LIST_ICONS);
-                        gIconWindowMessenger->SendMessage(&completionMsg);
+
+            {
+                std::ofstream iconOut(job.iconPath.c_str(), std::ios::binary);
+                if (iconOut.is_open()) {
+                    curl_easy_setopt(downloadCurl, CURLOPT_URL, job.downloadUrl.c_str());
+                    curl_easy_setopt(downloadCurl, CURLOPT_USERAGENT, "Mozilla/5.0 HaikuDVR/1.0");
+                    curl_easy_setopt(downloadCurl, CURLOPT_WRITEFUNCTION, StorageWriteCallback);
+                    curl_easy_setopt(downloadCurl, CURLOPT_WRITEDATA, &iconOut);
+                    curl_easy_setopt(downloadCurl, CURLOPT_TIMEOUT, 6L);
+                    
+                    CURLcode res = curl_easy_perform(downloadCurl);
+                    iconOut.close(); 
+                    
+                    if (res == CURLE_OK) {
+                        if (gIconWindowMessenger && gIconWindowMessenger->IsValid()) {
+                            BMessage completionMsg(MSG_REFRESH_CHANNEL_LIST_ICONS);
+                            gIconWindowMessenger->SendMessage(&completionMsg);
+                        }
+                    } else {
+                        std::remove(job.iconPath.c_str()); 
                     }
-                } else {
-                    std::remove(job.iconPath.c_str()); 
                 }
-            }
+            } 
+            
             curl_easy_cleanup(downloadCurl);
         }
         snooze(40000); 
@@ -858,6 +860,7 @@ int32 SerialIconDownloaderThread(void* data) {
     atomic_set(&gIconThreadRunning, 0);
     return 0;
 }
+
 
 
 class CalendarWindow : public BWindow {
@@ -1052,7 +1055,7 @@ int32 ClockSchedulerThread(void* data) {
 
 
 // =========================================================================
-// FIXED: HEADER VIEW WITH PERFECTLY CENTERED GLYPHS AND MELLOW HOVER GLOWS
+//  HEADER VIEW WITH PERFECTLY CENTERED GLYPHS AND MELLOW HOVER GLOWS
 // =========================================================================
 class TimelineHeaderView : public BView {
 private:
@@ -1060,21 +1063,20 @@ private:
     BRect fTimeDownRect;
     BRect fTimeUpRect;
     BWindow* fMainAppTarget;
+    BString fCachedSelectedTime;
+    BString fCachedSelectedDate;
 
-    // Hover tracking state variables
     bool fHoveringMinus;
     bool fHoveringPlus;
 
     // Helper method to draw a glyph perfectly centered inside a rectangle
     void DrawCenteredGlyph(const char* glyph, BRect rect, BFont* font) {
-        // REMOVED: unused escapement_delta line to clean up compiler warnings
         float stringWidth = font->StringWidth(glyph);
         
         font_height fh;
         font->GetHeight(&fh);
         float stringHeight = fh.ascent + fh.descent;
 
-        // Calculate precise mathematical center offsets
         float xOffset = rect.left + ((rect.Width() - stringWidth) / 2.0f);
         float yOffset = rect.top + fh.ascent + ((rect.Height() - stringHeight) / 2.0f);
 
@@ -1092,6 +1094,9 @@ public:
         fHoveringMinus = false;
         fHoveringPlus = false;
         
+        fCachedSelectedTime = "4:00 PM";
+        fCachedSelectedDate = "2026-06-22";
+        
         fDateClickRect.Set(90.0, 0.0, 185.0, frame.Height());
         fTimeDownRect.Set(200.0, 8.0, 222.0, 32.0);
         fTimeUpRect.Set(230.0, 8.0, 252.0, 32.0);
@@ -1104,11 +1109,9 @@ public:
         bool oldHoverMinus = fHoveringMinus;
         bool oldHoverPlus = fHoveringPlus;
 
-        // Check if mouse coordinates fall within button hit boxes
         fHoveringMinus = fTimeDownRect.Contains(point);
         fHoveringPlus = fTimeUpRect.Contains(point);
 
-        // Only trigger a visual redraw pass if a hover state actually changed
         if (fHoveringMinus != oldHoverMinus || fHoveringPlus != oldHoverPlus) {
             Invalidate(fTimeDownRect);
             Invalidate(fTimeUpRect);
@@ -1120,9 +1123,8 @@ public:
         BRect bounds = Bounds();
         rgb_color textColor = ui_color(B_PANEL_TEXT_COLOR);
         rgb_color gridLineColor = ui_color(B_CONTROL_BORDER_COLOR);
-        rgb_color accentColor = ui_color(B_KEYBOARD_NAVIGATION_COLOR); // Native underline color
+        rgb_color accentColor = ui_color(B_KEYBOARD_NAVIGATION_COLOR); 
         
-        // FIXED: Soft, mellow charcoal highlight tint instead of stark blue
         rgb_color softGlowColor = { 80, 80, 80, 255 };
         
         const float kHeaderWidth = 300.0;
@@ -1171,7 +1173,7 @@ public:
         // 1. Draw Minus Button
         if (fHoveringMinus) {
             SetHighColor(softGlowColor);
-            FillRect(fTimeDownRect);             // Soft blend background fill
+            FillRect(fTimeDownRect);             
             SetHighColor(textColor);
         } else {
             SetHighColor(gridLineColor);
@@ -1183,7 +1185,7 @@ public:
         // 2. Draw Plus Button
         if (fHoveringPlus) {
             SetHighColor(softGlowColor);
-            FillRect(fTimeUpRect);               // Soft blend background fill
+            FillRect(fTimeUpRect);               
             SetHighColor(textColor);
         } else {
             SetHighColor(gridLineColor);
@@ -1193,19 +1195,98 @@ public:
         DrawCenteredGlyph("+", fTimeUpRect, &glyphFont);
 
         // =========================================================================
-        // REVERT FONT & CONTINUE TIMELINE RENDERING
+        // TIMELINE RENDERING 
         // =========================================================================
         SetFont(&labelFont);
         SetHighColor(gridLineColor);
         StrokeLine(BPoint(kHeaderWidth, bounds.top), BPoint(kHeaderWidth, bounds.bottom));
 
         float currentLeft = kHeaderWidth + 1.0;
-        const char* timeIntervals[] = { "SELECTED TIME", "+ 30 MINS", "+ 1.0 HOUR", "+ 1.5 HOURS" };
+        
+        std::time_t realSysTime = std::time(nullptr);
+        std::tm* sysTm = std::localtime(&realSysTime);
+        
+        char liveDateBuf[32] = {0};
+        char liveTimeBuf[32] = {0};
+        std::strftime(liveDateBuf, sizeof(liveDateBuf), "%Y-%m-%d", sysTm);
+        std::strftime(liveTimeBuf, sizeof(liveTimeBuf), "%I:%M %p", sysTm);
+        
+        BString cleanLiveTime(liveTimeBuf);
+        if (cleanLiveTime.StartsWith("0")) {
+            cleanLiveTime.Remove(0, 1);
+        }
+
+        const char* timeIntervals[] = { "DASHBOARD_MONITOR", "+ 30 MINS", "+ 1.0 HOUR", "+ 1.5 HOURS" };
 
         for (int i = 0; i < 4; i++) {
-            SetHighColor(textColor);
-            MovePenTo(currentLeft + 20, bounds.top + 24);
-            DrawString(timeIntervals[i]);
+            if (i == 0) {
+                BFont monitorFont;
+                GetFont(&monitorFont);
+                monitorFont.SetFace(B_BOLD_FACE);
+                monitorFont.SetSize(9.5f); 
+                SetFont(&monitorFont);
+
+                // =========================================================================
+                // 1. CONVERT COMBINED SELECTED TIME STRING TO 12-HOUR AM/PM FORMAT
+                // =========================================================================
+                BString processedSelectedTime = fCachedSelectedTime;
+                int32 selHour = 12, selMin = 0;
+                
+               
+                if (std::sscanf(processedSelectedTime.String(), "%d:%d", &selHour, &selMin) == 2) {
+                    char ampmBuf[16];
+                    std::snprintf(ampmBuf, sizeof(ampmBuf), "%s", (selHour >= 12 ? "PM" : "AM"));
+                    
+                    int32 displayHour = (selHour > 12) ? (selHour - 12) : ((selHour == 0) ? 12 : selHour);
+                    processedSelectedTime.SetToFormat("%d:%02d %s", displayHour, selMin, ampmBuf);
+                }
+
+                // =========================================================================
+                // 2. TYPESET UNIFIED DATA STRINGS WITH ALIGNED TABLE COLUMNS
+                // =========================================================================
+                BString timePart1, timePart2;
+                timePart1.SetToFormat("Current Time: %s", cleanLiveTime.String());
+                timePart2.SetToFormat("Selected Time: %s", processedSelectedTime.String());
+                
+                BString datePart1, datePart2;
+                datePart1.SetToFormat("Current Date: %s", liveDateBuf);
+                datePart2.SetToFormat("Selected Date: %s", fCachedSelectedDate.String());
+
+                float firstColumnWidth = 125.0f;
+                float separatorOffset = currentLeft + 16.0f + firstColumnWidth;
+
+                // =========================================================================
+                // 3. PAINT GRID STRINGS (ALL UNIFIED IN CRISP TEXTURE WHITE)
+                // =========================================================================
+                SetHighColor(textColor); 
+                
+                MovePenTo(currentLeft + 16.0f, bounds.top + 16.0f);
+                DrawString(timePart1.String());
+                
+                MovePenTo(separatorOffset, bounds.top + 16.0f);
+                DrawString("|");
+                
+                MovePenTo(separatorOffset + 14.0f, bounds.top + 16.0f);
+                DrawString(timePart2.String());
+
+                MovePenTo(currentLeft + 16.0f, bounds.top + 31.0f);
+                DrawString(datePart1.String());
+                
+                MovePenTo(separatorOffset, bounds.top + 31.0f);
+                DrawString("|");
+                
+                MovePenTo(separatorOffset + 14.0f, bounds.top + 31.0f);
+                DrawString(datePart2.String());
+
+                SetFont(&labelFont);
+
+            
+            } else {
+                SetHighColor(textColor);
+                MovePenTo(currentLeft + 20, bounds.top + 24);
+                DrawString(timeIntervals[i]);
+            }
+
 
             SetHighColor(gridLineColor);
             StrokeLine(BPoint(currentLeft + kCellWidth - 12, bounds.top + 8), 
@@ -1217,6 +1298,8 @@ public:
         SetHighColor(gridLineColor);
         StrokeLine(BPoint(bounds.left, bounds.bottom), BPoint(bounds.right, bounds.bottom));
     }
+
+
 
     void MouseDown(BPoint point) override {
         if (fMainAppTarget != nullptr) {
@@ -1238,11 +1321,26 @@ public:
         }
         BView::MouseDown(point);
     }
+    
+    void MessageReceived(BMessage* message) override {
+        switch (message->what) {
+            case 'UCLT': { 
+                const char* newTime = nullptr;
+                const char* newDate = nullptr;
+                
+                if (message->FindString("time", &newTime) == B_OK) fCachedSelectedTime = newTime;
+                if (message->FindString("date", &newDate) == B_OK) fCachedSelectedDate = newDate;
+                
+                Invalidate(); 
+                break;
+            }
+            default:
+                BView::MessageReceived(message);
+                break;
+        }
+    }
+
 };
-
-
-
-
 
 
 
@@ -1260,36 +1358,48 @@ public:
     }
 
     virtual ~ChannelListItem() {
+        // Leaving this empty is correct because fIconCache or the item list
+        // owns the bitmap lifecycle, preventing double-free crashes.
     }
 
     void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
-        if (IsSelected() || drawEverything) {
-            rgb_color bgColor;
-            if (IsSelected()) {
-                bgColor = ui_color(B_MENU_SELECTED_BACKGROUND_COLOR);
-                owner->SetHighColor(ui_color(B_MENU_SELECTED_ITEM_TEXT_COLOR));
-            } else {
-                bgColor = owner->ViewColor();
-                owner->SetHighColor(owner->HighColor());
-            }
-            owner->SetLowColor(bgColor);
-            owner->FillRect(itemRect, B_SOLID_LOW);
+        rgb_color bgColor;
+        rgb_color textColor;
+
+        if (IsSelected()) {
+            bgColor = ui_color(B_MENU_SELECTED_BACKGROUND_COLOR);
+            textColor = ui_color(B_MENU_SELECTED_ITEM_TEXT_COLOR);
+        } else {
+            bgColor = ui_color(B_PANEL_BACKGROUND_COLOR); 
+            textColor = ui_color(B_PANEL_TEXT_COLOR); 
         }
+
+        owner->SetLowColor(bgColor);
+        owner->SetHighColor(bgColor);
+        owner->FillRect(itemRect, B_SOLID_HIGH);
 
         float iconOffset = 5.0;
         if (channelIcon != nullptr) {
             BRect destRect(itemRect.left + 5, itemRect.top + 1, itemRect.left + 27, itemRect.top + 23);            
             drawing_mode oldMode = owner->DrawingMode();
+            
             owner->SetDrawingMode(B_OP_ALPHA);            
             owner->DrawBitmap(channelIcon, channelIcon->Bounds(), destRect, B_FILTER_BITMAP_BILINEAR);            
             owner->SetDrawingMode(oldMode);            
+            
             iconOffset = 32.0; 
         }
-        owner->MovePenTo(itemRect.left + iconOffset, itemRect.top + 16);
+
+        font_height fh;
+        owner->GetFontHeight(&fh);
+        float textHeight = fh.ascent + fh.descent;
+        float middleOfRow = itemRect.top + (itemRect.Height() / 2.0f);
+        float baselineY = middleOfRow - (textHeight / 2.0f) + fh.ascent;
+
+        owner->SetHighColor(textColor);
+        owner->MovePenTo(itemRect.left + iconOffset, baselineY);
         owner->DrawString(textDisplay.c_str());
-
     }
-
 };
 
 
@@ -1313,7 +1423,7 @@ public:
         SetHeight(140); 
     }
 
-    void TrackMouseHover(BView* owner, BPoint point, BRect itemRect) {
+     void TrackMouseHover(BView* owner, BPoint point, BRect itemRect) {
         const float kHeaderWidth = 300.0;
         const float kCellWidth = 350.0;
 
@@ -1329,8 +1439,18 @@ public:
         int32 cellIndex = -1;
 
         if (localX > kHeaderWidth) {
-            cellIndex = (int32)((localX - kHeaderWidth) / kCellWidth);
-            if (cellIndex >= (int32)fData.programs.size()) cellIndex = -1;
+            float relativeX = localX - kHeaderWidth;
+            int32 targetedColumn = (int32)(relativeX / kCellWidth);
+            
+            if (targetedColumn >= 0 && targetedColumn < 4 && (size_t)targetedColumn < fData.programs.size()) {
+                float columnLeftEdge = targetedColumn * kCellWidth;
+                
+                float cardRightEdge = columnLeftEdge + (kCellWidth - 12.0f);
+                
+                if (relativeX >= columnLeftEdge && relativeX <= cardRightEdge) {
+                    cellIndex = targetedColumn;
+                }
+            }
         }
 
         if (fHoveredCellIndex != cellIndex) {
@@ -1345,12 +1465,45 @@ public:
 
         float localX = point.x - itemRect.left;
         if (localX > kHeaderWidth) {
-            int32 cellIndex = (int32)((localX - kHeaderWidth) / kCellWidth);
-            if (cellIndex >= 0 && cellIndex < (int32)fData.programs.size()) {
-                const auto& selectedProg = fData.programs[cellIndex];
+            int32 targetCellIndex = -1;
+            float currentLeft = kHeaderWidth + 1.0f;
+
+            for (size_t idx = 0; idx < fData.programs.size(); idx++) {
+                bool isContinuation = false;
+                for (int32 prev = (int32)idx - 1; prev >= 0; prev--) {
+                    if (fData.programs[prev].title == fData.programs[idx].title) {
+                        isContinuation = true;
+                        break;
+                    }
+                }
+                
+                if (isContinuation) {
+                    continue;
+                }
+
+                int32 cellsToSpan = 1;
+                for (size_t next = idx + 1; next < fData.programs.size(); next++) {
+                    if (fData.programs[next].title == fData.programs[idx].title) {
+                        cellsToSpan++;
+                    } else {
+                        break;
+                    }
+                }
+
+                float spannedCellWidth = cellsToSpan * kCellWidth;
+                if (localX >= currentLeft && localX < (currentLeft + spannedCellWidth)) {
+                    targetCellIndex = (int32)idx;
+                    break;
+                }
+                currentLeft += kCellWidth;
+            }
+
+            if (targetCellIndex >= 0 && targetCellIndex < (int32)fData.programs.size()) {
+                const auto& selectedProg = fData.programs[targetCellIndex];
 
                 BMessage selectionBroadcast(MSG_PREFILL_RECORD_SCHEDULE);
                 selectionBroadcast.AddString("show_title", selectedProg.title.String());
+                
                 selectionBroadcast.AddString("start_time", selectedProg.timeDisplay.String());
                 selectionBroadcast.AddString("channel_label", fData.channelLabel.String());
                 selectionBroadcast.AddInt32("duration_minutes", selectedProg.durationMinutes);
@@ -1370,13 +1523,14 @@ public:
         }
     }
 
+    
+
 
 
       void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
         rgb_color panelBg = ui_color(B_PANEL_BACKGROUND_COLOR);
         rgb_color textColor = ui_color(B_PANEL_TEXT_COLOR);
         rgb_color gridLineColor = ui_color(B_CONTROL_BORDER_COLOR);
-        rgb_color cellBgColor = ui_color(B_DOCUMENT_BACKGROUND_COLOR);
         
         owner->SetHighColor(panelBg);
         owner->FillRect(itemRect);
@@ -1452,18 +1606,47 @@ public:
         }
 
         // =========================================================================
-        // COMBINED SINGLE PASS RENDER ENGINE
+        // COMBINED SINGLE PASS RENDER ENGINE (DYNAMIC SPAN & GLOW INTEGRATION)
         // =========================================================================
         float currentLeft = itemRect.left + kHeaderWidth + 1.0;
         
         gScheduleLocker.Lock();
         for (size_t idx = 0; idx < fData.programs.size(); idx++) {
             auto prog = fData.programs[idx];
-            BRect cellRect(currentLeft, itemRect.top + 12, currentLeft + kCellWidth - 12, itemRect.bottom - 13);
 
-            // 1. DYNAMIC STRING INTERCEPT: ELIMINATE "LIVE NOW" ENTIRELY
-            BString displayTimeText = prog.timeDisplay;
+            // A. Check if this program started in a previous column block step
+            bool isContinuation = false;
+            for (int32 prev = (int32)idx - 1; prev >= 0; prev--) {
+                if (fData.programs[prev].title == prog.title) {
+                    isContinuation = true;
+                    break;
+                }
+            }
+
+            float standardStepWidth = kCellWidth; 
             
+            // B. Skip calculation loops if a previous wide block handles this show
+            if (isContinuation) {
+                currentLeft += standardStepWidth;
+                continue; 
+            }
+
+            // C. Determine how many 30-minute block slots this program spans
+            int32 cellsToSpan = 1;
+            for (size_t next = idx + 1; next < fData.programs.size(); next++) {
+                if (fData.programs[next].title == prog.title) {
+                    cellsToSpan++;
+                } else {
+                    break;
+                }
+            }
+
+            // D. Compute the expanded horizontal boundaries for wide program cards
+            float spannedCellWidth = (cellsToSpan * standardStepWidth) - 12.0f;
+            BRect cellRect(currentLeft, itemRect.top + 12, currentLeft + spannedCellWidth, itemRect.bottom - 13);
+
+            // E. Clean formatting to match native Haiku interface layouts
+            BString displayTimeText = prog.timeDisplay;
             if (displayTimeText == "LIVE NOW") {
                 int32 h = localToday->tm_hour;
                 int32 m = localToday->tm_min;
@@ -1481,7 +1664,6 @@ public:
                 displayTimeText = calculatedTimeBuf;
             }
 
-            // 2. CONVERT DISPLAY TIMES FOR THE RECORDING SCHEDULER
             std::string normalizedCellTime = "";
             int hours = 0, minutes = 0;
             char ampm[16] = {0};
@@ -1500,7 +1682,7 @@ public:
                 normalizedCellTime = displayTimeText.String(); 
             }
 
-            // 3. RUN CRITICAL SCHEDULER TASK COMPARISONS
+            // F. Compare entries with the active recording scheduling queue
             bool isScheduled = false;
             for (size_t i = 0; i < gScheduleList.size(); i++) {
                 if (!gScheduleList[i].processed) {
@@ -1515,55 +1697,129 @@ public:
                 }
             }
 
-            // 4. DRAW MATRIX CARD BACKGROUND SHAPES
+            // =========================================================================
+            // G. DRAW MATRIX CARD BACKGROUND SHAPES & INTERACTIVE HOVER GLOWS
+            // =========================================================================
+            rgb_color normalCellBg    = { 26, 26, 26, 255 };      // Deep charcoal card backing
+            rgb_color standardBorder  = { 45, 45, 45, 255 };      // Subtle clean card separator grid
+            rgb_color scheduledBgColor = { 75, 20, 20, 255 };     // Rich crimson backing for recording element
+            rgb_color borderRed        = { 220, 40, 40, 255 };    // High-visibility scarlet red stroke
+            
+            rgb_color glowBorderColor = { 0, 210, 210, 255 };     // Vivid neon teal tracking boundary
+            rgb_color glowInnerColor  = { 12, 45, 45, 255 };      // Soft glowing teal canvas blend
+
             if (isScheduled) {
                 owner->PushState(); 
-                rgb_color scheduledBgColor = { 75, 20, 20, 255 }; 
                 owner->SetHighColor(scheduledBgColor);
-                owner->FillRect(cellRect.InsetByCopy(1.0, 1.0));
-                if ((int32)idx != fHoveredCellIndex) {
-                    rgb_color borderRed = { 220, 40, 40, 255 };
-                    owner->SetHighColor(borderRed);
-                    owner->StrokeRect(cellRect);
-                    owner->StrokeRect(cellRect.InsetByCopy(1.0, 1.0));
-                }
+                owner->FillRect(cellRect);
                 owner->SetLowColor(scheduledBgColor);
             } else {
-                owner->SetHighColor(cellBgColor);
-                owner->FillRect(cellRect);
                 if ((int32)idx == fHoveredCellIndex) {
-                    owner->SetHighColor(ui_color(B_MENU_SELECTED_BACKGROUND_COLOR));
-                    owner->StrokeRect(cellRect);
-                    owner->StrokeRect(cellRect.InsetByCopy(1.0, 1.0));
+                    owner->SetHighColor(glowInnerColor);
                 } else {
-                    owner->SetHighColor(gridLineColor);
-                    owner->StrokeRect(cellRect);
+                    owner->SetHighColor(normalCellBg);
                 }
-                owner->SetLowColor(cellBgColor);
+                owner->FillRect(cellRect);
+                owner->SetLowColor((int32)idx == fHoveredCellIndex ? glowInnerColor : normalCellBg);
             }
 
-            // 5. DRAW FIELD STRINGS PLACEMENTS
+            // Draw Outline Framing Graphics
+            if (isScheduled) {
+                if ((int32)idx == fHoveredCellIndex) {
+                    owner->SetHighColor(glowBorderColor); 
+                } else {
+                    owner->SetHighColor(borderRed);
+                }
+                owner->StrokeRect(cellRect);
+                owner->StrokeRect(cellRect.InsetByCopy(1.0, 1.0)); 
+            } else {
+                if ((int32)idx == fHoveredCellIndex) {
+                    owner->SetHighColor(glowBorderColor);
+                    owner->StrokeRect(cellRect);
+                    owner->StrokeRect(cellRect.InsetByCopy(1.0, 1.0)); 
+                } else {
+                    owner->SetHighColor(standardBorder);
+                    owner->StrokeRect(cellRect);
+                }
+            }
+
+            // =========================================================================
+            // H. FIELD STRINGS PLACEMENTS (WITH TIME RANGES & SYNOPSIS)
+            // =========================================================================
+            BFont timeFont;
+            owner->GetFont(&timeFont);
+            timeFont.SetFace(B_REGULAR_FACE);
+            timeFont.SetSize(10.0); 
+            owner->SetFont(&timeFont);
+
+            if (isScheduled) {
+                owner->SetHighColor(255, 140, 140, 255);
+            } else {
+                owner->SetHighColor(140, 140, 140, 255); 
+            }
+
+            // Read the end time directly from the local block structure
+            BString endString = prog.endTimeStr;
+            if (endString.IsEmpty()) {
+                time_t estEndEpoch = rawToday + (idx * 30 * 60) + (30 * 60);
+                struct tm* estTm = std::localtime(&estEndEpoch);
+                
+                char estBuf[32] = {0}; 
+                std::strftime(estBuf, sizeof(estBuf), "%I:%M %p", estTm);
+                endString = estBuf;
+                if (endString.StartsWith("0")) { endString.Remove(0, 1); }
+            }
+
+            BString timeRangeStr;
+            timeRangeStr.SetToFormat("%s - %s", displayTimeText.String(), endString.String());
+
+            owner->MovePenTo(cellRect.left + 20, cellRect.top + 28);
+            owner->DrawString(timeRangeStr.String()); 
+
+            // B. Draw Bold Program Title
             BFont titleFont;
             owner->GetFont(&titleFont);
-            titleFont.SetSize(11.0);
+            titleFont.SetFace(B_BOLD_FACE);
+            titleFont.SetSize(12.0); 
             owner->SetFont(&titleFont);
 
-            if (isScheduled) owner->SetHighColor(255, 140, 140, 255);
-            else owner->SetHighColor(textColor);
+            if (isScheduled) {
+                owner->SetHighColor(255, 255, 255, 255); 
+            } else {
+                owner->SetHighColor(textColor);         
+            }
 
-            owner->MovePenTo(cellRect.left + 20, cellRect.top + 36);
-            owner->DrawString(displayTimeText.String()); 
-
-            if (isScheduled) owner->SetHighColor(255, 255, 255, 255);
-            else owner->SetHighColor(textColor);
-
-            owner->MovePenTo(cellRect.left + 20, cellRect.top + 70);
+            owner->MovePenTo(cellRect.left + 20, cellRect.top + 50);
             BString truncatedTitle = prog.title;
             owner->TruncateString(&truncatedTitle, B_TRUNCATE_END, cellRect.Width() - 32);
             owner->DrawString(truncatedTitle.String());
 
+            // C. Draw Description Synopsis Text Paragraph
+            BFont descFont;
+            owner->GetFont(&descFont);
+            descFont.SetFace(B_ITALIC_FACE);
+            descFont.SetSize(11.0); 
+            owner->SetFont(&descFont);
 
-            // 6. DRAW EXTRA LAYER FLAGS (RECORD BADGES)
+            if (isScheduled) {
+                owner->SetHighColor(220, 200, 200, 255); 
+            } else {
+                owner->SetHighColor(170, 170, 170, 255); 
+            }
+
+            owner->MovePenTo(cellRect.left + 20, cellRect.top + 72);
+            
+            BString shortDesc = prog.description;
+            if (shortDesc.IsEmpty()) { 
+                shortDesc = "No further program description text details provided by broadcaster."; 
+            }
+            
+            owner->TruncateString(&shortDesc, B_TRUNCATE_END, cellRect.Width() - 32);
+            owner->DrawString(shortDesc.String());
+
+            // =========================================================================
+            // I. EXTRA LAYER FLAGS (RECORD BADGES ACCENT)
+            // =========================================================================
             if (isScheduled) {
                 owner->SetHighColor(255, 60, 60, 255);
                 BFont badgeFont;
@@ -1573,22 +1829,21 @@ public:
                 owner->SetFont(&badgeFont);
                 
                 float badgeX = cellRect.right - owner->StringWidth("[REC]") - 20;
-                float badgeY = cellRect.top + 36; 
+                float badgeY = cellRect.top + 28; 
                 owner->MovePenTo(badgeX, badgeY);
                 owner->DrawString("[REC]");
 
                 owner->PopState(); 
             }
 
-            currentLeft += kCellWidth;
+            currentLeft += standardStepWidth;
         }
         gScheduleLocker.Unlock();
-
-
 
         owner->SetHighColor(gridLineColor);
         owner->StrokeLine(BPoint(itemRect.left, itemRect.bottom), BPoint(itemRect.right, itemRect.bottom));
     }
+
 
 
     
@@ -1674,13 +1929,11 @@ public:
 
                     BPopUpMenu* contextMenu = new BPopUpMenu("Context", false, false);
                     
-                    // Option A: Watch Live
                     BString watchLabel;
                     watchLabel << "Watch " << cleanNumberOnly.String() << " Live";
                     BMenuItem* playItem = new BMenuItem(watchLabel.String(), NULL);
                     contextMenu->AddItem(playItem);
                     
-                    // Options B & C are only valid if we right-clicked on an actual program cell
                     BMenuItem* queueItem = nullptr;
                     BMenuItem* removeItem = nullptr;
                     int32 matchingActiveIndex = -1;
@@ -1825,10 +2078,28 @@ public:
                             fParentShortcutTarget->PostMessage(&playMsg);
                         } 
                         else if (queueItem != nullptr && selectedItem == queueItem) {
+                            // =========================================================================
+                            // DYNAMIC ROOT CELL LOOKUP FOR RECORD SCHEDULING (CONTINUATION AWARE)
+                            // =========================================================================
+                            int32 rootCellIndex = cellIndex;
+                            
+                            if (rootCellIndex > 0 && rootCellIndex < (int32)item->fData.programs.size()) {
+                                std::string currentTitle = item->fData.programs[rootCellIndex].title.String();
+                                for (int32 prev = rootCellIndex - 1; prev >= 0; prev--) {
+                                    if (item->fData.programs[prev].title.String() == currentTitle) {
+                                        rootCellIndex = prev; 
+                                    } else {
+                                        break; 
+                                    }
+                                }
+                            }
+
+                            const auto& targetProg = item->fData.programs[rootCellIndex];
+
                             BMessage selectionBroadcast(MSG_PREFILL_RECORD_SCHEDULE);
-                            selectionBroadcast.AddString("show_title", item->fData.programs[cellIndex].title.String());
+                            selectionBroadcast.AddString("show_title", targetProg.title.String());
                             selectionBroadcast.AddString("channel_label", item->fData.channelLabel.String());
-                            selectionBroadcast.AddInt32("duration_minutes", item->fData.programs[cellIndex].durationMinutes);
+                            selectionBroadcast.AddInt32("duration_minutes", targetProg.durationMinutes);
                             
                             BString targetSubchannel = item->fData.channelLabel;
                             int32 spaceIndex = targetSubchannel.FindFirst(" ");
@@ -1837,7 +2108,8 @@ public:
                             }
                             targetSubchannel.Trim();
                             selectionBroadcast.AddString("numeric_subchannel", targetSubchannel.String());
-                            BString targetTimeStr = item->fData.programs[cellIndex].timeDisplay;
+                            
+                            BString targetTimeStr = targetProg.timeDisplay;
  
                             if (targetTimeStr == "LIVE NOW") {
                                 time_t now = real_time_clock();
@@ -1859,7 +2131,7 @@ public:
                                 if (currentViewDateStr != todayStr) {
                                     int h = 12, m = 0;
                                     if (sscanf(currentViewTimeStr.c_str(), "%d:%d", &h, &m) >= 1) {
-                                        m += (int)(cellIndex * 30);
+                                        m += (int)(rootCellIndex * 30);
                                         h += m / 60; m = m % 60; h = h % 24;
                                         char adjustedBuffer[32];
                                         snprintf(adjustedBuffer, sizeof(adjustedBuffer), "%d:%02d %s", 
@@ -1887,6 +2159,7 @@ public:
                             
                             fParentShortcutTarget->PostMessage(&selectionBroadcast);
                         }
+
                         else if (removeItem != nullptr && selectedItem == removeItem) {
                             BMessage removeMsg(MSG_REMOVE_SCHEDULE);
                             removeMsg.AddInt32("list_index", matchingActiveIndex);
@@ -1973,6 +2246,8 @@ private:
     BWindow* fMainAppWindow;
     BListView* fMainChannelListView;
 
+
+// @Datapusher
 void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loadedChannels, BListView* mainListView) {
 	    if (mainListView == nullptr) return;
 	
@@ -2031,7 +2306,14 @@ void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loaded
 	            }
 	        }
 	
-	        rowData.programs.push_back({ liveChan.nowPlaying.c_str(), finalColumn1Time.String(), 350.0f, liveChan.nowPlayingDurationMinutes });
+	        rowData.programs.push_back({ 
+	            liveChan.nowPlaying.c_str(), 
+	            finalColumn1Time.String(), 
+	            350.0f, 
+	            liveChan.nowPlayingDurationMinutes,
+	            liveChan.nowPlayingEndTimeStr.c_str(),  
+	            liveChan.nowPlayingDescription.c_str()   
+	        });
 	        
 	        for (const auto& nextShow : liveChan.futureLineup) {
 	            BString nextTimeLabel = nextShow.startTimeStr.c_str();
@@ -2047,7 +2329,9 @@ void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loaded
 	                nextShow.title.c_str(), 
 	                nextTimeLabel.String(), 
 	                350.0f, 
-	                nextShow.durationMinutes 
+	                nextShow.durationMinutes,
+	                nextShow.endTimeStr.String(),     
+	                nextShow.description.String()      
 	            });
 	        }
 	        
@@ -2135,6 +2419,44 @@ private:
 
 
 
+
+bool IsRemoteFileNewer(const std::string& url, const std::string& localPath) {
+    if (cfg.debugEnable) std::printf("[DVR DEBUG] Checking local time-window cache status...\n");
+
+    struct stat attrib;
+    if (stat(localPath.c_str(), &attrib) != 0) {
+       if (cfg.debugEnable) std::printf("[DVR DEBUG] Local XML file missing. Forcing download.\n");
+        return true; 
+    }
+
+    std::string cacheControlPath = localPath + ".cache";
+    std::ifstream cacheIn(cacheControlPath);
+    uint32 savedSyncTime = 0;
+    
+    if (cacheIn.is_open()) {
+        cacheIn >> savedSyncTime;
+        cacheIn.close();
+    }
+
+    uint32 currentTime = real_time_clock();
+    uint32 cacheExpirationWindow = 14400; 
+
+    if (savedSyncTime > 0 && (currentTime - savedSyncTime) < cacheExpirationWindow) {
+       // uint32 remainingTime = cacheExpirationWindow - (currentTime - savedSyncTime);
+       //  std::printf("[DVR DEBUG] SUCCESS: Local cache is only %d seconds old (Expires in %d mins). Skipping network check completely!\n", 
+       //             (currentTime - savedSyncTime), remainingTime / 60);
+        return false; // Local cache is perfectly valid!
+    }
+
+    if (cfg.debugEnable) std::printf("[DVR DEBUG] Cache window expired or invalid. Ready to sync with remote server.\n");
+    return true;
+}
+
+
+
+
+
+
 void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
 
     fChannelListView->MakeEmpty();
@@ -2186,6 +2508,25 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
     targetTimeBox.tm_isdst = -1; 
     std::time_t targetComparisonEpoch = std::mktime(&targetTimeBox);
 
+    // =========================================================================
+    // 🚀 THREAD-SAFE HEADER SYNC PASS (PREVENTS DEADLOCKS SYSTEM-WIDE)
+    // =========================================================================
+    BView* headerView = FindView("timelineHeader");
+    if (headerView != nullptr) {
+        BMessage syncHeaderMsg('UCLT');
+        
+        if (fTimeInput != nullptr && fTimeInput->Text() != nullptr) {
+            syncHeaderMsg.AddString("time", fTimeInput->Text());
+        }
+        
+        syncHeaderMsg.AddString("date", targetDateOnly.c_str());
+        
+        BMessenger(headerView).SendMessage(&syncHeaderMsg);
+    }
+
+    // =========================================================================
+
+
     std::vector<std::string> tuners = DiscoverAllTuners();
     if (tuners.empty()) {
         fStatusLabel->SetText("Status: Guide Error - No active tuners discovered.");
@@ -2231,33 +2572,61 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         if (!deviceAuthToken.empty()) {          
         
             std::string xmltvUrl = "https://api.hdhomerun.com/api/xmltv?DeviceAuth=" + deviceAuthToken;
-           //  if (cfg.debugEnable) std::printf("[DVR NETWORK] Fetching Master XMLTV Payload: %s\n", xmltvUrl.c_str());        
+           //  if (cfg.debugEnable) std::printf("[DVR NETWORK] Fetching Master XMLTV Payload: %s\n", xmltvUrl.c_str());  
+        
+	        if (!IsRemoteFileNewer(xmltvUrl, xmlCachePath)) {
+	            fLastNetworkSyncTime = real_time_clock();
+	            fCachedGuidePayload = "LOADED";
+	            needNetworkFetch = false; 
+	        }
+           
 
-            FILE* xmlFile = std::fopen(xmlCachePath.c_str(), "wb");
-            curl = curl_easy_init();
-            if (curl && xmlFile) {
-                curl_easy_setopt(curl, CURLOPT_URL, xmltvUrl.c_str());
-                curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 HaikuDVR/1.0");
-                curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-                curl_easy_setopt(curl, CURLOPT_WRITEDATA, xmlFile);
-                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L); 
-                
-                CURLcode res = curl_easy_perform(curl);
-                curl_easy_cleanup(curl);
-                std::fclose(xmlFile);
+	        if (needNetworkFetch) {
+	            FILE* xmlFile = std::fopen(xmlCachePath.c_str(), "wb");
+	            curl = curl_easy_init();
+	            if (curl && xmlFile) {
+	                curl_easy_setopt(curl, CURLOPT_URL, xmltvUrl.c_str());
+	                curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 HaikuDVR/1.0");
+	                curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+	                curl_easy_setopt(curl, CURLOPT_WRITEDATA, xmlFile);
+	                
+	                curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+	                
 
-                if (res == CURLE_OK) {
-                    fLastNetworkSyncTime = real_time_clock();
-                    fCachedGuidePayload = "LOADED";
-                } else {
-                    fStatusLabel->SetText("Status: Cloud XMLTV download failed.");
-                    return;
-                }
-            } else if (xmlFile) {
-                std::fclose(xmlFile);
-            }
+	                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L); 
+	                
+	                CURLcode res = curl_easy_perform(curl);
+	                
+	                if (res == CURLE_OK) {
+	                    uint32 syncTimestamp = real_time_clock();
+	                    fLastNetworkSyncTime = syncTimestamp;
+	                    fCachedGuidePayload = "LOADED";
+	                    
+	                    std::string cacheControlPath = xmlCachePath + ".cache";
+	                    std::ofstream cacheOut(cacheControlPath);
+	                    if (cacheOut.is_open()) {
+	                        cacheOut << syncTimestamp << "\n";
+	                        cacheOut.close();
+	                        if (cfg.debugEnable) std::printf("[DVR DEBUG] Saved fresh sync timestamp token: %u\n", syncTimestamp);
+	                    }
+	                }
+
+	                curl_easy_cleanup(curl);
+	                std::fclose(xmlFile);
+	
+	                if (res != CURLE_OK) {
+	                    fStatusLabel->SetText("Status: Cloud XMLTV download failed.");
+	                    return;
+	                }
+	            } else if (xmlFile) {
+	                std::fclose(xmlFile);
+	            }
+	        }
         }
     }
+
+
+
 
     std::ifstream xmlFile(xmlCachePath.c_str());
     if (!xmlFile.is_open()) {
@@ -2322,7 +2691,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
 
 
     // -------------------------------------------------------------------------
-    // PASS 2: STREAM PARSE FIXED 30-MINUTE TIMELINE BUCKETS (TIMEZONE-SAFE)
+    // PASS 2: STREAM PARSE
     // -------------------------------------------------------------------------
     xmlFile.clear();
     xmlFile.seekg(0, std::ios::beg);
@@ -2330,10 +2699,59 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
     std::string progChanId = "";
     std::string progStartRaw = "";
     std::string progEndRaw = "";
+    std::string titleText = "";
+    std::string descText = ""; 
+
+    auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
+        if (rawXmlTime.length() < 14) return 0;
+        int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
+        std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
+        std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
+        std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
+        std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
+        std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
+        std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
+
+        std::tm tmTime = {0};
+        tmTime.tm_year = y - 1900;
+        tmTime.tm_mon  = mo - 1;
+        tmTime.tm_mday = d;
+        tmTime.tm_hour = h;
+        tmTime.tm_min  = m;
+        tmTime.tm_sec  = s;
+        tmTime.tm_isdst = -1;
+
+        long offsetSeconds = 0;
+        size_t spacePos = rawXmlTime.find(' ');
+        if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
+            int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
+            int oh = 0, om = 0;
+            std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
+            std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
+            offsetSeconds = sign * ((oh * 3600) + (om * 60));
+        }
+
+        std::time_t localEpoch = std::mktime(&tmTime);
+        
+        std::time_t sysNow = std::time(nullptr);
+        std::tm* sysLocal = std::localtime(&sysNow);
+        std::tm tmCopy = *sysLocal;
+        std::time_t sysLocalEpoch = std::mktime(&tmCopy);
+        std::tm* sysUtc = std::gmtime(&sysNow);
+        tmCopy = *sysUtc;
+        std::time_t sysUtcEpoch = std::mktime(&tmCopy);
+        long systemTimezoneOffset = (long)(sysLocalEpoch - sysUtcEpoch);
+
+        return localEpoch + systemTimezoneOffset - offsetSeconds;
+    };
 
     while (std::getline(xmlFile, xmlLine)) {
+        // A. Identify program block start boundaries
         size_t progPos = xmlLine.find("<programme start=\"");
         if (progPos != std::string::npos) {
+            titleText = "";
+            descText = "";
+            
             size_t sStart = progPos + 18;
             size_t sEnd = xmlLine.find("\"", sStart);
             if (sEnd != std::string::npos) {
@@ -2359,124 +2777,126 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             continue;
         }
 
-        size_t titlePos = xmlLine.find("<title");
-        if (titlePos != std::string::npos && !progChanId.empty()) {
-            size_t valStart = xmlLine.find(">", titlePos) + 1;
-            size_t valEnd = xmlLine.find("</title>", valStart);
-            
-            if (valEnd != std::string::npos && valStart != std::string::npos) {
-                std::string titleText = xmlLine.substr(valStart, valEnd - valStart);
-                std::string associatedChNum = xmlIdToChannelNumMap[progChanId];
-
-                if (!associatedChNum.empty()) {
+        // B. Accumulate metadata attributes while inside the open block stream context
+        if (!progChanId.empty()) {
+            size_t titlePos = xmlLine.find("<title");
+            if (titlePos != std::string::npos) {
+                size_t valStart = xmlLine.find(">", titlePos) + 1;
+                size_t valEnd = xmlLine.find("</title>", valStart);
+                if (valEnd != std::string::npos) {
+                    titleText = xmlLine.substr(valStart, valEnd - valStart);
                     
-                    auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
-                        if (rawXmlTime.length() < 14) return 0;
-                        int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
-                        std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
-                        std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
-                        std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
-                        std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
-                        std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
-                        std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
+                    // =========================================================================
+                    // 🧽 CORE XML TEXT ENTITY SANITIZATION (FIXES AMPERSANDS SYSTEM-WIDE)
+                    // =========================================================================
+                    size_t pos;
+                    while ((pos = titleText.find("&amp;")) != std::string::npos) { titleText.replace(pos, 5, "&"); }
+                    while ((pos = titleText.find("&quot;")) != std::string::npos) { titleText.replace(pos, 6, "\""); }
+                    while ((pos = titleText.find("&apos;")) != std::string::npos) { titleText.replace(pos, 6, "'"); }
+                    while ((pos = titleText.find("&lt;")) != std::string::npos) { titleText.replace(pos, 4, "<"); }
+                    while ((pos = titleText.find("&gt;")) != std::string::npos) { titleText.replace(pos, 4, ">"); }
+                    // =========================================================================
+                }
+            }
 
-                        std::tm tmTime = {0};
-                        tmTime.tm_year = y - 1900;
-                        tmTime.tm_mon  = mo - 1;
-                        tmTime.tm_mday = d;
-                        tmTime.tm_hour = h;
-                        tmTime.tm_min  = m;
-                        tmTime.tm_sec  = s;
-                        tmTime.tm_isdst = -1;
+            size_t descPos = xmlLine.find("<desc");
+            if (descPos != std::string::npos) {
+                size_t valStart = xmlLine.find(">", descPos) + 1;
+                size_t valEnd = xmlLine.find("</desc>", valStart);
+                if (valEnd != std::string::npos) {
+                    descText = xmlLine.substr(valStart, valEnd - valStart);
+                    
+                    size_t pos;
+                    while ((pos = descText.find("&amp;")) != std::string::npos) { descText.replace(pos, 5, "&"); }
+                    while ((pos = descText.find("&quot;")) != std::string::npos) { descText.replace(pos, 6, "\""); }
+                    while ((pos = descText.find("&apos;")) != std::string::npos) { descText.replace(pos, 6, "'"); }
+                }
+            }
+        }
 
-                        long offsetSeconds = 0;
-                        size_t spacePos = rawXmlTime.find(' ');
-                        if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
-                            int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
-                            int oh = 0, om = 0;
-                            std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
-                            std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
-                            offsetSeconds = sign * ((oh * 3600) + (om * 60));
+
+        // C. Evaluate block layout parameters only when the node explicitly terminates
+        if (xmlLine.find("</programme>") != std::string::npos) {
+            std::string associatedChNum = xmlIdToChannelNumMap[progChanId];
+
+            if (!associatedChNum.empty() && !titleText.empty()) {
+                std::time_t progStartEpoch = parseXmlTimeToEpoch(progStartRaw);
+                std::time_t progEndEpoch   = parseXmlTimeToEpoch(progEndRaw);
+
+                auto& activeItem = cloudGuideMap[associatedChNum];
+
+                for (int32 bucket = 0; bucket < 4; bucket++) {
+                    std::time_t bucketTargetEpoch = targetComparisonEpoch + (bucket * 30 * 60);
+
+                    if (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) {
+                        
+                        std::time_t displayLocalEpoch = bucketTargetEpoch;
+                        std::tm* displayTime = std::localtime(&displayLocalEpoch);
+                        char timeBuf[32] = {0};
+                        std::strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", displayTime);
+
+                        BString formattedTimeStr(timeBuf);
+                        if (formattedTimeStr.StartsWith("0")) {
+                            formattedTimeStr.Remove(0, 1);
                         }
 
-                        std::time_t localEpoch = std::mktime(&tmTime);
+                        std::time_t endEpochCopy = progEndEpoch;
+                        std::tm* endTm = std::localtime(&endEpochCopy);
+                        char endBuf[32] = {0};
+                        std::strftime(endBuf, sizeof(endBuf), "%I:%M %p", endTm);
+                        BString formattedEndTimeStr(endBuf);
+                        if (formattedEndTimeStr.StartsWith("0")) {
+                            formattedEndTimeStr.Remove(0, 1);
+                        }
                         
-                        std::time_t sysNow = std::time(nullptr);
-                        std::tm* sysLocal = std::localtime(&sysNow);
-                        std::tm tmCopy = *sysLocal;
-                        std::time_t sysLocalEpoch = std::mktime(&tmCopy);
-                        std::tm* sysUtc = std::gmtime(&sysNow);
-                        tmCopy = *sysUtc;
-                        std::time_t sysUtcEpoch = std::mktime(&tmCopy);
-                        long systemTimezoneOffset = (long)(sysLocalEpoch - sysUtcEpoch);
-
-                        return localEpoch + systemTimezoneOffset - offsetSeconds;
-                    };
-
-                    std::time_t progStartEpoch = parseXmlTimeToEpoch(progStartRaw);
-                    std::time_t progEndEpoch   = parseXmlTimeToEpoch(progEndRaw);
-
-                    auto& activeItem = cloudGuideMap[associatedChNum];
-
-                    for (int32 bucket = 0; bucket < 4; bucket++) {
-                        std::time_t bucketTargetEpoch = targetComparisonEpoch + (bucket * 30 * 60);
-
-                        if (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) {
+                        if (bucket == 0) {
+                            activeItem.nowPlaying = titleText;
+                            activeItem.nowPlayingDurationMinutes = (int32)((progEndEpoch - progStartEpoch) / 60);
                             
-                            std::time_t displayLocalEpoch = bucketTargetEpoch;
-                            std::tm* displayTime = std::localtime(&displayLocalEpoch);
-                            char timeBuf[32] = {0};
-                            std::strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", displayTime);
+                            activeItem.nowPlayingEndTimeStr = formattedEndTimeStr.String();
+                            activeItem.nowPlayingDescription = descText;
+                        } else {
 
-                            // =========================================================================
-                            //  GRID BUCKET EVALUATION
-                            // =========================================================================
-                            if (bucket == 0) {
-                                activeItem.nowPlaying = titleText;
-                                activeItem.guideName = associatedChNum;
-                                activeItem.nowPlayingDurationMinutes = (int32)((progEndEpoch - progStartEpoch) / 60);
-
-                            } else {
-       
-                                while ((int32)activeItem.futureLineup.size() < bucket) {
-                                    UpcomingShowItem placeholder;
-                                    placeholder.title = "No Programming Data Available";                                    
-                                    std::time_t placeholderEpoch = targetComparisonEpoch + (activeItem.futureLineup.size() * 30 * 60);
-                                    std::tm* pTime = std::localtime(&placeholderEpoch);
-                                    char pBuf[32] = {0};
-                                    std::strftime(pBuf, sizeof(pBuf), "%I:%M %p", pTime);
-                                    
-                                    BString formattedPTime(pBuf);
-                                    if (formattedPTime.StartsWith("0")) {
-                                        formattedPTime.Remove(0, 1);
-                                    }
-                                    placeholder.startTimeStr = formattedPTime.String();
-                                    placeholder.durationMinutes = 30;
-
-                                    activeItem.futureLineup.push_back(placeholder);
+                            while ((int32)activeItem.futureLineup.size() < bucket) {
+                                UpcomingShowItem placeholder;
+                                placeholder.title = "No Programming Data Available";                                    
+                                std::time_t placeholderEpoch = targetComparisonEpoch + ((activeItem.futureLineup.size() + 1) * 30 * 60);
+                                std::tm* pTime = std::localtime(&placeholderEpoch);
+                                char pBuf[32] = {0};
+                                std::strftime(pBuf, sizeof(pBuf), "%I:%M %p", pTime);
+                                
+                                BString formattedPTime(pBuf);
+                                if (formattedPTime.StartsWith("0")) {
+                                    formattedPTime.Remove(0, 1);
                                 }
+                                placeholder.startTimeStr = formattedPTime.String();
+                                placeholder.endTimeStr = "";
+                                placeholder.description = "";
+                                placeholder.durationMinutes = 30;
 
-                                UpcomingShowItem futureShow;
-
-                                futureShow.title = titleText;
-                                futureShow.durationMinutes = (int32)((progEndEpoch - progStartEpoch) / 60);
-                                futureShow.startTimeStr = timeBuf;
-
-                                activeItem.futureLineup[bucket - 1] = futureShow;
+                                activeItem.futureLineup.push_back(placeholder);
                             }
+
+                            UpcomingShowItem futureShow;
+                            futureShow.title = titleText;
+                            futureShow.durationMinutes = (int32)((progEndEpoch - progStartEpoch) / 60);
+                            futureShow.startTimeStr = formattedTimeStr.String();
+                            futureShow.endTimeStr = formattedEndTimeStr.String();
+                            futureShow.description = descText.c_str(); 
+
+                            activeItem.futureLineup[bucket - 1] = futureShow;
                         }
                     }
-
                 }
             }
             progChanId = "";
             progStartRaw = "";
             progEndRaw = "";
+            titleText = "";
+            descText = "";
         }
     }
     xmlFile.close();
-
-
 
 
     // -------------------------------------------------------------------------
@@ -2494,7 +2914,6 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         curl_easy_perform(curl);
         curl_easy_cleanup(curl);
     }
-
 
     try {
         auto jLineup = json::parse(lineupPayload);
@@ -2521,10 +2940,16 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                 int32 activeListRowIndex = (int32)fLoadedChannels.size();
                 fLoadedChannels.push_back(finalItem);
 
+                std::string downloadUrl = "";
                 if (channelEntry.contains("ImageURL")) {
-                    std::string downloadUrl = channelEntry["ImageURL"].get<std::string>();
-                    
+                    downloadUrl = channelEntry["ImageURL"].get<std::string>();
+                } else if (cloudIconMap.find(chNum) != cloudIconMap.end()) {
+                    downloadUrl = cloudIconMap[chNum];
+                }
+
+                if (!downloadUrl.empty()) {
                     std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + finalItem.guideName + ".png";
+                    
                     std::ifstream checkFile(iconPath.c_str());
                     bool fileExistsOnDisk = checkFile.good();
                     checkFile.close();
@@ -2543,12 +2968,18 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
     }
 
 
-    // -------------------------------------------------------------------------
+     // -------------------------------------------------------------------------
     // PASS 4: POPULATE RENDERING LIST LAYER AND INITIALIZE ASSETS
     // -------------------------------------------------------------------------
+    for (size_t i = 0; i < fIconCache.size(); i++) {
+        delete fIconCache[i];
+    }
+    fIconCache.clear();
+
     for (size_t i = 0; i < fLoadedChannels.size(); i++) {
         const auto& item = fLoadedChannels[i];
 
+        // Restored your exact naming paths to align with Pass 3's real-time downloads
         std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + item.guideName + ".png";
         
         std::ifstream checkFile(iconPath.c_str());
@@ -2581,12 +3012,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         }
 
         std::string displayLabel = item.guideNumber + " - " + item.guideName + " (" + timeContextLabel + item.nowPlaying + ") ";
-        /*
-        std::printf("[DVR XML Guide Sync] Ch: %s | Active Context Day: %s | Title: %s\n", 
-                    item.guideNumber.c_str(), 
-                    (targetDateStr ? targetDateStr : "TODAY"), 
-                    item.nowPlaying.c_str());
-		*/
+        
         // --- End of Pass 4 List View Addition Loop ---
         fChannelListView->AddItem(new ChannelListItem(displayLabel.c_str(), activeIcon));
     }
@@ -2596,29 +3022,48 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         gIconWindowMessenger = new BMessenger(this);
     }
 
-
     if (atomic_get(&gIconThreadRunning) == 0) {
         gIconQueueLocker.Lock();
         bool queueHasWork = !gIconDownloadQueue.empty();
         gIconQueueLocker.Unlock();
 
         if (queueHasWork) {
-
             thread_id downloader = spawn_thread(SerialIconDownloaderThread, "SerialIconWorker", B_LOW_PRIORITY, NULL);
             if (downloader >= B_OK) {
                 resume_thread(downloader);
             }
         }
     }
-} 
+}
 
 
-    void RefreshScheduleListView() {
+void RefreshScheduleListView() {
         fScheduleListView->MakeEmpty();
         gScheduleLocker.Lock();
         for (const auto& item : gScheduleList) {
             if (!item.processed) {
-                std::string durText = (item.duration == "1800") ? "30m" : "1h+";
+                long totalSeconds = std::atol(item.duration.c_str());
+                long totalMinutes = totalSeconds / 60;
+                
+                std::string durText = "";
+                if (totalMinutes >= 60) {
+                    long hours = totalMinutes / 60;
+                    long remainingMins = totalMinutes % 60;
+                    
+                    if (remainingMins > 0) {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%ldh %ldm", hours, remainingMins);
+                        durText = buf;
+                    } else {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%ldh", hours); // "7200" will now correctly display as "2h"
+                        durText = buf;
+                    }
+                } else {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%ldm", totalMinutes);
+                    durText = buf;
+                }
                 
                 std::string shortDate = (item.startDate.length() >= 10) ? item.startDate.substr(5) : item.startDate;
                 
@@ -2628,6 +3073,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         }
         gScheduleLocker.Unlock();
     }
+
 
 
     void AddDurationItem(const char* label, const char* secondsValue, bool isDefault = false) {
@@ -2661,12 +3107,16 @@ public:
             resume_thread(updateThread);
         }
         
-        // Refresh every 1 minute       
+        // Refresh every 5 minutes       
         fLastNetworkSyncTime = 0; 
         fRefreshRunner = new BMessageRunner(BMessenger(this), 
             new BMessage(MSG_PERIODIC_GUIDE_REFRESH), 
-            60000000, -1);
-        
+            300000000LL, -1); 
+
+
+        new BMessageRunner(BMessenger(this), new BMessage('TICK'), 60000000LL, -1);
+
+
         fSelectedDirectory = gGlobalSaveDirectory;
         fFolderPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), NULL, B_DIRECTORY_NODE, false, new BMessage(MSG_DIR_CHOSEN));
         std::string initialButtonText = "Save To: " + fSelectedDirectory;
@@ -2839,17 +3289,17 @@ public:
         fStatusLabel->SetAlignment(B_ALIGN_LEFT);                       
                     
         // =========================================================================
-        // RIGHT COLUMN: "QUICK VIEW" CONTAINER BBOX
+        // RIGHT COLUMN: "QUICK VIEW" CONTAINER BBOX (FIXED CONTAINER HEIGHTS)
         // =========================================================================
-        BBox* quickViewBox = new BBox(BRect(360, 15, 860, 215), "quick_view_box");
+        BBox* quickViewBox = new BBox(BRect(360, 25, 860, 225), "quick_view_box");
         quickViewBox->SetLabel("Quick View");
         quickViewBox->SetBorder(B_FANCY_BORDER);
 
         fChannelListView = new BListView(BRect(0, 0, 480, 180), "channel_list", B_SINGLE_SELECTION_LIST);
         fChannelListView->SetSelectionMessage(new BMessage(MSG_CHANNEL_CLICKED));        
         
-        // Wrap and map coordinates relative to the inner margin limits of quickViewBox
         fChannelScrollView = new BScrollView("scroll_channels", fChannelListView, B_FOLLOW_LEFT | B_FOLLOW_TOP, 0, false, true);
+        
         fChannelScrollView->MoveTo(10, 20);
         fChannelScrollView->ResizeTo(480, 150);        
         quickViewBox->AddChild(fChannelScrollView);
@@ -2857,7 +3307,7 @@ public:
         // =========================================================================
         // RIGHT COLUMN: "QUEUED SCHEDULES" CONTAINER BBOX
         // =========================================================================
-        BBox* queuedSchedulesBox = new BBox(BRect(360, 230, 860, 355), "queued_schedules_box");
+        BBox* queuedSchedulesBox = new BBox(BRect(360, 240, 860, 365), "queued_schedules_box");
         queuedSchedulesBox->SetLabel("Queued Schedules (💡 Right Click to Delete )");
         queuedSchedulesBox->SetBorder(B_FANCY_BORDER);
 
@@ -2868,14 +3318,15 @@ public:
         fScheduleScrollView->MoveTo(10, 20);
         fScheduleScrollView->ResizeTo(480, 95);
         queuedSchedulesBox->AddChild(fScheduleScrollView);
+
         
         // =========================================================================
-        // APPLICATION BACKEND SYSTEM CONSOLES
+        // APPLICATION BACKEND SYSTEM CONSOLES (RECALIBRATED VERTICAL SPACING)
         // =========================================================================
-        fRestartBackendButton = new BButton(BRect(730, 365, 860, 395), "restart_backend", "ABORT!", new BMessage(MSG_RESTART_BACKEND));
+        fRestartBackendButton = new BButton(BRect(730, 375, 860, 405), "restart_backend", "ABORT!", new BMessage(MSG_RESTART_BACKEND));
         fRestartBackendButton->SetToolTip("Warning: ABORT! will immediately abort any active scheduled recording streams currently in progress!");
-        
-        BBox* statusBox = new BBox(BRect(730, 405, 860, 435), "bebox_status_wrapper");
+
+        BBox* statusBox = new BBox(BRect(730, 415, 860, 445), "bebox_status_wrapper");
         statusBox->SetBorder(B_FANCY_BORDER); 
 
         fBackendStatusLabel = new BStringView(BRect(5, 5, 125, 25), "backend_status", "Backend: Checking...");
@@ -2884,6 +3335,7 @@ public:
         fBackendStatusLabel->SetFont(&monoFont);
         fBackendStatusLabel->SetAlignment(B_ALIGN_CENTER);
         statusBox->AddChild(fBackendStatusLabel);
+
 
         // =========================================================================
         // ASSEMBLY: APPEND STRUCTURAL OBJECTS INTO MAIN PANEL VIEW
@@ -3016,41 +3468,7 @@ public:
 	         break;
 	     }
 	
-     case MSG_DATE_SELECTED: {
-         const char* newDateString = nullptr;
-         if (message->FindString("date_string", &newDateString) == B_OK) {
-             fDateInput->SetText(newDateString);
-             FetchAndPopulateChannelList(newDateString);
 
-             BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));             
-             if (realGuideList != nullptr) {
-                 realGuideList->MakeEmpty(); 
-                 realGuideList->Invalidate(); 
-             }
-
-           if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
-                 BMessage refreshMessage(MSG_DATE_SELECTED);
-                 fGuideWindow->PostMessage(&refreshMessage);
-                 fGuideWindow->Unlock();
-           }
-
-             std::time_t rawToday = std::time(nullptr);
-             std::tm* localToday = std::localtime(&rawToday);
-             char todayBuf[32];
-             std::strftime(todayBuf, sizeof(todayBuf), "%Y-%m-%d", localToday);
-
-             BStringView* timeHeaderLabel = dynamic_cast<BStringView*>(FindView("cur_time_head")); 
-             
-             if (timeHeaderLabel != nullptr) {
-                 if (std::string(newDateString) == todayBuf) {
-                     timeHeaderLabel->SetText("CURRENT TIME");
-                 } else {
-                     timeHeaderLabel->SetText("SELECTED TIME");
-                 }
-             }
-         }
-         break;
-     }
 
 	
 	     case MSG_DISK_SPACE_WARNING: {
@@ -3083,52 +3501,105 @@ public:
              break;
          }
 
+     case MSG_DATE_SELECTED: {
+         const char* newDateString = nullptr;
+         if (message->FindString("date_string", &newDateString) == B_OK) {
+             fDateInput->SetText(newDateString);
+             FetchAndPopulateChannelList(newDateString);
 
+             BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));             
+             if (realGuideList != nullptr) {
+                 realGuideList->MakeEmpty(); 
+                 realGuideList->Invalidate(); 
+             }
 
-	     case MSG_CLOCK_UP:
-	     case MSG_CLOCK_DOWN: {
-	         std::string timeStr = fTimeInput->Text();
-	         size_t colonPos = timeStr.find(':');
-	         if (colonPos != std::string::npos) {
-	             int hours = std::atoi(timeStr.substr(0, colonPos).c_str());
-	             int minutes = std::atoi(timeStr.substr(colonPos + 1).c_str());
-	             
-	             if (message->what == MSG_CLOCK_UP) {
-	                 minutes += 15;
-	             } else {
-	                 minutes -= 15;
-	             }
-	             
-	             if (minutes >= 60) { minutes = 0; hours++; }
-	             if (minutes < 0) { minutes = 45; hours--; }
-	             if (hours >= 24) { hours = 0; }
-	             if (hours < 0) { hours = 23; }
-	             
-	             char updatedTimeBuffer[16];
-	             sprintf(updatedTimeBuffer, "%02d:%02d", hours, minutes);
-	             fTimeInput->SetText(updatedTimeBuffer);
-
-                 // 1. Force the internal data structures to update with the new time filter               
-                 if (fDateInput != nullptr) {
-                     FetchAndPopulateChannelList(fDateInput->Text());
+             if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+                 BMessage refreshMessage(MSG_DATE_SELECTED);
+                 fGuideWindow->PostMessage(&refreshMessage);
+                 
+                 BView* childHeader = fGuideWindow->FindView("timelineHeader");
+                 if (childHeader != nullptr) {
+                     BMessage syncHeaderMsg('UCLT');
+                     if (fTimeInput != nullptr && fTimeInput->Text() != nullptr) {
+                         syncHeaderMsg.AddString("time", fTimeInput->Text());
+                     }
+                     syncHeaderMsg.AddString("date", newDateString);
+                     BMessenger(childHeader).SendMessage(&syncHeaderMsg);
                  }
+                 
+                 fGuideWindow->Unlock();
+             }
 
-                 // 2. Also wipe and redraw the main grid list view if it exists locally
-                 BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));
-                 if (realGuideList != nullptr) {
-                     realGuideList->MakeEmpty();
-                     realGuideList->Invalidate();
-                 }
+             std::time_t rawToday = std::time(nullptr);
+             std::tm* localToday = std::localtime(&rawToday);
+             char todayBuf[32];
+             std::strftime(todayBuf, sizeof(todayBuf), "%Y-%m-%d", localToday);
 
-                 // 3. Notify your open full-screen Guide Window to rebuild its entire matrix row dataset               
-                 if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
-                     BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
-                     fGuideWindow->PostMessage(&refreshGuide);
-                     fGuideWindow->Unlock();
+             BStringView* timeHeaderLabel = dynamic_cast<BStringView*>(FindView("cur_time_head")); 
+             
+             if (timeHeaderLabel != nullptr) {
+                 if (std::string(newDateString) == todayBuf) {
+                     timeHeaderLabel->SetText("CURRENT TIME");
+                 } else {
+                     timeHeaderLabel->SetText("SELECTED TIME");
                  }
-	         }
-	         break;
-	     }
+             }
+         }
+         break;
+     }
+
+		case MSG_CLOCK_UP:
+		case MSG_CLOCK_DOWN: {
+		    std::string timeStr = fTimeInput->Text();
+		    size_t colonPos = timeStr.find(':');
+		    if (colonPos != std::string::npos) {
+		        int hours = std::atoi(timeStr.substr(0, colonPos).c_str());
+		        int minutes = std::atoi(timeStr.substr(colonPos + 1).c_str());
+		        
+		        if (message->what == MSG_CLOCK_UP) {
+		            minutes += 30;
+		        } else {
+		            minutes -= 30;
+		        }
+		        
+		        if (minutes >= 60) { minutes = 0; hours++; }
+		        if (minutes < 0) { minutes = 30; hours--; } 
+		        if (hours >= 24) { hours = 0; }
+		        if (hours < 0) { hours = 23; }
+		        
+		        char updatedTimeBuffer[16];
+		        sprintf(updatedTimeBuffer, "%02d:%02d", hours, minutes);
+		        fTimeInput->SetText(updatedTimeBuffer);
+		
+		        if (fDateInput != nullptr) {
+		            FetchAndPopulateChannelList(fDateInput->Text());
+		        }
+		
+		        BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));
+		        if (realGuideList != nullptr) {
+		            realGuideList->MakeEmpty();
+		            realGuideList->Invalidate();
+		        }
+		
+		        if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+		            BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
+		            fGuideWindow->PostMessage(&refreshGuide);
+		            
+		            BView* childHeader = fGuideWindow->FindView("timelineHeader");
+		            if (childHeader != nullptr) {
+		                BMessage syncHeaderMsg('UCLT');
+		                syncHeaderMsg.AddString("time", updatedTimeBuffer);
+		                if (fDateInput != nullptr && fDateInput->Text() != nullptr) {
+		                    syncHeaderMsg.AddString("date", fDateInput->Text());
+		                }
+		                BMessenger(childHeader).SendMessage(&syncHeaderMsg);
+		            }
+		            
+		            fGuideWindow->Unlock();
+		        }
+		    }
+		    break;
+		}
 
 
 
@@ -3214,7 +3685,6 @@ public:
           case MSG_REFRESH_CHANNEL_LIST_ICONS: {
             int32 totalUiItems = fChannelListView ? fChannelListView->CountItems() : 0;
 
-            // 1. Update the Main Scheduler Window list view items row matrix
             for (int32 idx = 0; idx < totalUiItems; idx++) {
                 if (idx >= (int32)fLoadedChannels.size()) break;
 
@@ -3242,7 +3712,6 @@ public:
                 }
             }
 
-            // 2. Forward the notification directly down to your secondary Guide Window context!
             if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
                 fGuideWindow->PostMessage(MSG_REFRESH_CHANNEL_LIST_ICONS);
                 fGuideWindow->Unlock();
@@ -3273,6 +3742,11 @@ public:
 	          	 if (fChannelListView != nullptr) {
              		fChannelListView->Invalidate(); 
        			  }            
+       			  
+       			 BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));
+	             if (realGuideList != nullptr) {
+	                 realGuideList->Invalidate(); 
+	             }
 	             
 	             fStatusLabel->SetText("Status: Schedule deleted.");
 	         }
@@ -3284,32 +3758,50 @@ public:
 	         break;
 
 
-	     case MSG_CHANNEL_CLICKED: {
-	         int32 selection = fChannelListView->CurrentSelection();
-	         if (selection >= 0 && (size_t)selection < fLoadedChannels.size()) {
-	             const auto& channel = fLoadedChannels[selection];
-	             
-	             fChannelInput->SetText(channel.guideNumber.c_str());
-	             
-	             std::string guidePreview = "Lineup for " + channel.guideName + ": ";
-	             if (!channel.futureLineup.empty()) {
-	                 for (size_t s = 0; s < channel.futureLineup.size(); s++) {
-	                     guidePreview += "[" + channel.futureLineup[s].startTimeStr + "] " 
-	                                  + channel.futureLineup[s].title;
-	                     if (s < channel.futureLineup.size() - 1) guidePreview += "  |  ";
-	                 }
-	             } else {
-	                 guidePreview += "No upcoming schedule data available.";
-	             }
-	             
-	             fStatusLabel->SetText(guidePreview.c_str());
-	             fStatusLabel->SetFont(be_bold_font);
-	             
-	             fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-	             fStatusLabel->Invalidate();
-	         }
-	         break;
-	     }
+         case MSG_CHANNEL_CLICKED: {
+             int32 selection = fChannelListView->CurrentSelection();
+             if (selection >= 0 && (size_t)selection < fLoadedChannels.size()) {
+                 const auto& channel = fLoadedChannels[selection];
+                 
+                 fChannelInput->SetText(channel.guideNumber.c_str());
+                 
+                 std::string guidePreview = "Lineup for " + channel.guideName + ": ";
+                 if (!channel.futureLineup.empty()) {
+                     for (size_t s = 0; s < channel.futureLineup.size(); s++) {
+                         BString cleanTitle(channel.futureLineup[s].title.c_str());
+                         
+                         cleanTitle.ReplaceAll("&amp;", "&");
+                         cleanTitle.ReplaceAll("&lt;", "<");
+                         cleanTitle.ReplaceAll("&gt;", ">");
+                         cleanTitle.ReplaceAll("&quot;", "\"");
+                         cleanTitle.ReplaceAll("&apos;", "'");
+
+                         guidePreview += "[";
+                         guidePreview += channel.futureLineup[s].startTimeStr;
+                         guidePreview += "] ";
+                         guidePreview += cleanTitle.String();
+                                      
+                         if (s < channel.futureLineup.size() - 1) {
+                             guidePreview += "  |  ";
+                         }
+                     }
+                 } else {
+                     guidePreview += "No upcoming schedule data available.";
+                 }
+                 
+                 BString finalCleanPreview(guidePreview.c_str());
+                 finalCleanPreview.ReplaceAll("&amp;", "&");
+                 
+                 fStatusLabel->SetText(finalCleanPreview.String());
+                 fStatusLabel->SetFont(be_bold_font);
+                 
+                 fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
+                 fStatusLabel->Invalidate();
+             }
+             break;
+         }
+
+
 
 		case MSG_RESTART_BACKEND:
 		{
@@ -3446,7 +3938,7 @@ public:
      }
 
 
-      case MSG_PREFILL_RECORD_SCHEDULE: {
+     case MSG_PREFILL_RECORD_SCHEDULE: {
         BString showTitle, startTime, channelLabel, numericSubchannel;
         int32 durationMinutes = 0;
         
@@ -3478,9 +3970,9 @@ public:
                 else if (startTime == "LIVE NOW") {
                     std::time_t raw = std::time(nullptr);
                     std::tm* loc = std::localtime(&raw);
-                    char tBuf[32];
-                    std::strftime(tBuf, sizeof(tBuf), "%H:%M", loc);
-                    processedTime = tBuf;
+
+                    int32 roundedMin = (loc->tm_min < 30) ? 0 : 30;
+                    processedTime.SetToFormat("%02d:%02d", loc->tm_hour, roundedMin);
                 }
                 
                 fTimeInput->SetText(processedTime.String());
@@ -3559,14 +4051,20 @@ public:
             bool autoCommit = false;
             if (message->FindBool("auto_commit_queue", &autoCommit) == B_OK && autoCommit) {
                 std::string rawTime = processedTime.String();
-                
+
                 if (rawTime.length() == 4 && rawTime.find(':') == std::string::npos) {
                     rawTime.insert(2, ":");
+                }
+
+                if (rawTime.length() == 5 && rawTime.at(0) == '0') {
+                    // uncomment the line below if your database expects "5:30" instead of "05:30"
+                    // rawTime = rawTime.substr(1); 
                 }
                 
                 if (fTimeInput != nullptr) {
                     fTimeInput->SetText(rawTime.c_str());
                 }
+
                 
                 if (fSelectedDurationSeconds.empty() || fSelectedDurationSeconds == "0ss" || fSelectedDurationSeconds == "0s") {
                     if (fDurationMenu != nullptr && fDurationMenu->FindMarked() != nullptr) {
@@ -3658,11 +4156,11 @@ public:
             if (selectedIndex >= 0) {
                 ChannelListItem* listItem = (ChannelListItem*)fChannelListView->ItemAt(selectedIndex);
                 if (listItem != nullptr) {
-                    BString listRowText(listItem->textDisplay.c_str()); // e.g. "2.1 - WSBDT (Now: Channel 2 Action News)"
+                    BString listRowText(listItem->textDisplay.c_str()); 
                     
                     int32 nowStart = listRowText.FindFirst("(Now: ");
                     if (nowStart != B_ERROR) {
-                        int32 titleStart = nowStart + 6; // Move past "(Now: "
+                        int32 titleStart = nowStart + 6; 
                         int32 nowEnd = listRowText.FindFirst(")", titleStart);
                         
                         if (nowEnd != B_ERROR) {
@@ -4170,6 +4668,18 @@ public:
 		            }
 		            break;
 		        }
+		        
+		        case 'TICK': { 		         
+		            if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+		                BView* childHeader = fGuideWindow->FindView("timelineHeader");
+		                if (childHeader != nullptr) {
+		                    childHeader->Invalidate(); 
+		                }
+		                fGuideWindow->Unlock();
+		            }
+		            break;
+		        }
+
 		
 		       case MSG_SET_PLAYER_MPV: {
 		            cfg.defaultPlayer = "MPV";
