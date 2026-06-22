@@ -52,7 +52,7 @@
 #include <Screen.h>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.11 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.12 (Haiku OS)";
 }
 
 
@@ -2052,13 +2052,13 @@ public:
                         }
 
                         contextMenu->AddSeparatorItem();
-                        BMenuItem* viewRecsItem = new BMenuItem("View Recordings", new BMessage(MSG_VIEW_RECORDINGS));
+                        BMenuItem* viewRecsItem = new BMenuItem("Open Recordings", new BMessage(MSG_VIEW_RECORDINGS));
                         contextMenu->AddItem(viewRecsItem);
 
-                        BMenuItem* showSchedItem = new BMenuItem("Open DVR Scheduler", new BMessage(MSG_SHOW_MAIN_SCHEDULER));
+                        BMenuItem* showSchedItem = new BMenuItem("Open Scheduler", new BMessage(MSG_SHOW_MAIN_SCHEDULER));
                         contextMenu->AddItem(showSchedItem);
 
-                        BMenuItem* exitFsItem = new BMenuItem("Exit Fullscreen", new BMessage(MSG_CLOSE_GUIDE_WINDOW));
+                        BMenuItem* exitFsItem = new BMenuItem("Close Guide", new BMessage(MSG_CLOSE_GUIDE_WINDOW));
                         contextMenu->AddItem(exitFsItem);
 
                         BMenuItem* quitAppItem = new BMenuItem("Quit HaikuDVR", new BMessage(MSG_QUIT_ENTIRE_APP));
@@ -3655,6 +3655,26 @@ public:
 		      break;
 		  }
 
+
+     case MSG_TUNER_SELECTED: {
+         const char* newIp;
+         if (message->FindString("ip", &newIp) == B_OK) {
+             fSelectedIp = newIp;
+             std::string statusMsg = "Selected Tuner: " + fSelectedIp;
+             fStatusLabel->SetText(statusMsg.c_str());
+             FetchAndPopulateChannelList();
+         }
+         
+       	 if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+		            BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
+		            fGuideWindow->PostMessage(&refreshGuide);
+		            fGuideWindow->Unlock();
+         }
+         
+         break;
+     }
+     
+
  	
          case MSG_FILTER_ALL:
          case MSG_FILTER_HD:
@@ -3678,6 +3698,13 @@ public:
              else if (message->what == MSG_FILTER_SD) fCurrentFilter = FILTER_SD;
 
              FetchAndPopulateChannelList();
+             
+             if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+		            BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
+		            fGuideWindow->PostMessage(&refreshGuide);
+		            fGuideWindow->Unlock();
+         	 }
+         	 
              break;
          }
 
@@ -4243,19 +4270,6 @@ public:
         break;
      }
 
-
-     case MSG_TUNER_SELECTED: {
-         const char* newIp;
-         if (message->FindString("ip", &newIp) == B_OK) {
-             fSelectedIp = newIp;
-             std::string statusMsg = "Selected Tuner: " + fSelectedIp;
-             fStatusLabel->SetText(statusMsg.c_str());
-             FetchAndPopulateChannelList();
-         }
-         break;
-     }
-     
-     
      case MSG_START_RECORDING: {
      	
          const char* targetChannel = fChannelInput->Text();
