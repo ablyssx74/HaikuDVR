@@ -52,7 +52,7 @@
 #include <Screen.h>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.14 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.15 (Haiku OS)";
 }
 
 
@@ -247,7 +247,7 @@ void LoadSchedulesFromDisk() {
             gGlobalSaveDirectory        = jIn.value("save_directory", "/boot/home");
             cfg.showUpdateNotifications = jIn.value("show_update_notifications", true);
             cfg.debugEnable             = jIn.value("debug_enable", true);
-            cfg.defaultPlayer           = jIn.value("default_player", "hTV"); // Handled dynamically!
+            cfg.defaultPlayer           = jIn.value("default_player", "mpv"); // Handled dynamically!
             
             if (jIn.contains("schedules") && jIn["schedules"].is_array()) {
                 gScheduleList.clear();

@@ -61,6 +61,10 @@ struct RecordingConfig {
 std::vector<ScheduleItem> gScheduleList;
 std::string gGlobalSaveDirectory = "/boot/home";
 BLocker gScheduleLocker;
+bool gFrontendUpdateNotifications = true;
+bool gFrontendDebugEnable = true;
+BString gFrontendDefaultPlayer = "hTV";
+
 
 void SignalExitInterceptor(int signalType) { 
     atomic_set(&gStopService, 1);
@@ -111,20 +115,24 @@ void LoadSchedulesFromDisk() {
         file >> jIn;
         gScheduleLocker.Lock();
         
-        if (jIn.is_object() && jIn.contains("save_directory")) {
+        if (jIn.is_object()) {
             gGlobalSaveDirectory = jIn.value("save_directory", "/boot/home");
+            
+            // --- BACKEND FIX: PRESERVE FRONTEND SETTINGS IN RAM ---
+            gFrontendUpdateNotifications = jIn.value("show_update_notifications", true);
+            gFrontendDebugEnable         = jIn.value("debug_enable", true);
+            gFrontendDefaultPlayer       = jIn.value("default_player", "hTV").c_str();
 
             if (jIn.contains("schedules") && jIn["schedules"].is_array()) {
                 gScheduleList.clear();
                 for (const auto& entry : jIn["schedules"]) {
                     ScheduleItem item;
-                    item.startDate = entry.value("date", "2026-06-13"); 
+                    item.startDate = entry.value("date", "2026-06-23"); // Updated fallback to current date
                     item.startTime = entry.value("time", "12:00");
-                    item.channel = entry.value("channel", "5.1");
-                    item.duration = entry.value("duration", "1800");                    
-                    item.tunerIp = entry.value("tuner_ip", ""); 
+                    item.channel   = entry.value("channel", "5.1");
+                    item.duration  = entry.value("duration", "1800");                    
+                    item.tunerIp   = entry.value("tuner_ip", ""); 
                     item.showTitle = entry.value("show_title", "Unknown_Show"); 
-                    
                     item.processed = entry.value("processed", false);
                     gScheduleList.push_back(item);
                 }
@@ -143,6 +151,11 @@ void SaveSchedulesToDisk() {
     
     json jRoot = json::object();
     jRoot["save_directory"] = gGlobalSaveDirectory;
+    
+    // --- BACKEND FIX: INJECT FRONTEND SETTINGS BACK INTO THE JSON OBJECT ---
+    jRoot["show_update_notifications"] = gFrontendUpdateNotifications;
+    jRoot["debug_enable"]              = gFrontendDebugEnable;
+    jRoot["default_player"]            = gFrontendDefaultPlayer.String();
     
     json jSchedules = json::array();
     for (const auto& item : gScheduleList) {
