@@ -52,7 +52,7 @@
 #include <Screen.h>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.13 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.14 (Haiku OS)";
 }
 
 
@@ -60,6 +60,7 @@ namespace AppInfo {
 const uint32 MSG_OPEN_CALENDAR_PANEL		= 'opcl';
 const uint32 MSG_SHOW_DATE_PICKER			= 'sdpk';
 const uint32 MSG_SET_PLAYER_MPV          	= 'pmpv';
+const uint32 MSG_SET_PLAYER_HTV 			= 'sphv'; 
 const uint32 MSG_SET_PLAYER_MEDIAPLAYER 	= 'pmed';
 const uint32 MSG_SET_PLAYER_VLC         	= 'pvlc';
 const uint32 MSG_ABORT_SPECIFIC_RECORDING 	= 'absp';
@@ -246,13 +247,13 @@ void LoadSchedulesFromDisk() {
             gGlobalSaveDirectory        = jIn.value("save_directory", "/boot/home");
             cfg.showUpdateNotifications = jIn.value("show_update_notifications", true);
             cfg.debugEnable             = jIn.value("debug_enable", true);
-            cfg.defaultPlayer           = jIn.value("default_player", "MPV");
+            cfg.defaultPlayer           = jIn.value("default_player", "hTV"); // Handled dynamically!
             
             if (jIn.contains("schedules") && jIn["schedules"].is_array()) {
                 gScheduleList.clear();
                 for (const auto& entry : jIn["schedules"]) {
                     ScheduleItem item;
-                    item.startDate = entry.value("date", "2026-06-13"); 
+                    item.startDate = entry.value("date", "2026-06-23"); // Updated fallback to current date
                     item.startTime = entry.value("time", "12:00");
                     item.channel   = entry.value("channel", "5.1");
                     item.duration  = entry.value("duration", "1800");
@@ -271,7 +272,7 @@ void LoadSchedulesFromDisk() {
             gScheduleList.clear();
             for (const auto& entry : jIn) {
                 ScheduleItem item;
-                item.startDate = entry.value("date", "2026-06-13"); 
+                item.startDate = entry.value("date", "2026-06-23"); // Updated fallback to current date
                 item.startTime = entry.value("time", "12:00");
                 item.channel   = entry.value("channel", "5.1");
                 item.duration  = entry.value("duration", "1800");
@@ -288,6 +289,7 @@ void LoadSchedulesFromDisk() {
     }
     file.close();
 }
+
 
 
 
@@ -583,7 +585,6 @@ public:
                             entry_ref fileRef;
                             BEntry entry(item->fFullFilePath.String());
                             if (entry.GetRef(&fileRef) == B_OK) {
-                    
                                 be_roster->Launch(&fileRef);
                             }
                         } 
@@ -592,6 +593,10 @@ public:
                             const char* binaryPath = "/boot/system/bin/mpv";
                             if (cfg.defaultPlayer == "VLC") {
                                 binaryPath = "/boot/system/bin/vlc";
+                            }
+                            // --- ADD hTV OPTION MATCHING ---
+                            else if (cfg.defaultPlayer == "hTV") {
+                                binaryPath = "/boot/system/bin/hTV";
                             }
 
                             pid_t processId = fork();
@@ -611,6 +616,7 @@ public:
                 }
                 break;
             }
+
 
 
 
@@ -2348,7 +2354,7 @@ class DVRWindow : public BWindow {
 
 private:
 	std::string fCachedGuidePayload; 
-	BMenuItem *fPlayerMpvItem, *fPlayerMediaItem, *fPlayerVlcItem;
+	BMenuItem *fPlayerMpvItem, *fPlayerMediaItem, *fPlayerHtvItem, *fPlayerVlcItem;
    	BWindow* fRecordingsBrowser = nullptr;
 	BWindow* fGuideWindow = nullptr; 
     std::vector<BBitmap*> fIconCache;
@@ -3184,16 +3190,23 @@ public:
         fPlayerMpvItem   = new BMenuItem("MPV", new BMessage(MSG_SET_PLAYER_MPV));
         fPlayerMediaItem = new BMenuItem("MediaPlayer", new BMessage(MSG_SET_PLAYER_MEDIAPLAYER));
         fPlayerVlcItem   = new BMenuItem("VLC", new BMessage(MSG_SET_PLAYER_VLC));
+        // --- ADD hTV MENU ITEM ---
+        fPlayerHtvItem   = new BMenuItem("hTV", new BMessage(MSG_SET_PLAYER_HTV));
 
         fPlayerMpvItem->SetMarked(cfg.defaultPlayer == "MPV" || cfg.defaultPlayer.empty());
         fPlayerMediaItem->SetMarked(cfg.defaultPlayer == "MediaPlayer");
         fPlayerVlcItem->SetMarked(cfg.defaultPlayer == "VLC");
+        // --- MATCH CONFIG VALUE FOR CHECKMARK ---
+        fPlayerHtvItem->SetMarked(cfg.defaultPlayer == "hTV");
 
         optionsMenu->AddItem(fPlayerMpvItem);
         optionsMenu->AddItem(fPlayerMediaItem);
         optionsMenu->AddItem(fPlayerVlcItem);
+        // --- INSERT INTO MENU LIST ---
+        optionsMenu->AddItem(fPlayerHtvItem);
         
-        menuBar->AddItem(optionsMenu);        
+        menuBar->AddItem(optionsMenu);
+       
 
         fCurrentFilter = FILTER_ALL;
         BMenu* filterMenu = new BMenu("Filter");
@@ -3936,6 +3949,11 @@ public:
                      binaryPath = "/boot/system/bin/vlc"; 
                      playerName = "VLC";
                  }
+                 // --- ADD hTV OPTION MATCHING ---
+                 else if (cfg.defaultPlayer == "hTV") {
+                     binaryPath = "/boot/system/bin/hTV";
+                     playerName = "hTV";
+                 }
 
                  if (cfg.debugEnable) {
                      printf("[DEBUG PLAYER] Forking independent process for %s: %s\n", playerName, streamUrl.String());
@@ -3964,6 +3982,7 @@ public:
          }
          break;
      }
+
 
 
      case MSG_PREFILL_RECORD_SCHEDULE: {
@@ -4701,6 +4720,7 @@ public:
 		            fPlayerMpvItem->SetMarked(true);
 		            fPlayerMediaItem->SetMarked(false);
 		            fPlayerVlcItem->SetMarked(false);
+		            fPlayerHtvItem->SetMarked(false); // Unmark hTV
 		            SaveSchedulesToDisk();
 		            break;
 		        }
@@ -4710,6 +4730,7 @@ public:
 		            fPlayerMpvItem->SetMarked(false);
 		            fPlayerMediaItem->SetMarked(true);
 		            fPlayerVlcItem->SetMarked(false);
+		            fPlayerHtvItem->SetMarked(false); // Unmark hTV
 		            SaveSchedulesToDisk();
 		            break;
 		        }
@@ -4719,10 +4740,22 @@ public:
 		            fPlayerMpvItem->SetMarked(false);
 		            fPlayerMediaItem->SetMarked(false);
 		            fPlayerVlcItem->SetMarked(true);
+		            fPlayerHtvItem->SetMarked(false); // Unmark hTV
 		            SaveSchedulesToDisk();
 		            break;
-		        }	
-		
+		        }
+
+		       // --- ADD hTV SELECTION CASE BLOCK ---
+		       case MSG_SET_PLAYER_HTV: {
+		            cfg.defaultPlayer = "hTV";
+		            fPlayerMpvItem->SetMarked(false);
+		            fPlayerMediaItem->SetMarked(false);
+		            fPlayerVlcItem->SetMarked(false);
+		            fPlayerHtvItem->SetMarked(true); // Checkmark hTV exclusively
+		            SaveSchedulesToDisk();
+		            break;
+		        }
+
 		         
 	     default:
 	         BWindow::MessageReceived(message);
