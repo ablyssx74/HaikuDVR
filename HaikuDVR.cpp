@@ -52,7 +52,7 @@
 #include <Screen.h>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.12 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.13 (Haiku OS)";
 }
 
 
@@ -2220,8 +2220,9 @@ public:
         fContainerList = new InteractiveGuideListView("guideListContainer", mainAppWindow);
         _BuildGuideRowsFromLiveChannels(loadedChannels, mainChannelListView);
         
-        BScrollView* scrollWrapper = new BScrollView("guideScroll", fContainerList, 0, true, true);        
-        AddShortcut(B_ESCAPE, 0, new BMessage(B_QUIT_REQUESTED));  
+		BScrollView* scrollWrapper = new BScrollView("guideScroll", fContainerList, 0, false, true);        
+		AddShortcut(B_ESCAPE, 0, new BMessage(B_QUIT_REQUESTED));
+
 
         BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
             .SetInsets(0, 0, 0, 0)
