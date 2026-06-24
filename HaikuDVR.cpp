@@ -50,13 +50,17 @@
 #include <StorageKit.h>
 #include <StringList.h>
 #include <Screen.h>
+#include <dirent.h>
+#include <unistd.h>
+
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.15 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.16 (Haiku OS)";
 }
 
 
-
+const uint32 MSG_GUIDE_TOGGLE_FULLSCREEN    = 'gtfs';
+const uint32 MSG_TOGGLE_FULLSCREEN 			= 'enfs';
 const uint32 MSG_OPEN_CALENDAR_PANEL		= 'opcl';
 const uint32 MSG_SHOW_DATE_PICKER			= 'sdpk';
 const uint32 MSG_SET_PLAYER_MPV          	= 'pmpv';
@@ -124,6 +128,7 @@ void ensure_config_dir() {
 struct AppConfig {
     bool showUpdateNotifications = true;
     bool debugEnable = true; 
+    bool fullscreenEnable = true;
     std::string defaultPlayer; 
 };
 
@@ -204,10 +209,11 @@ void SaveSchedulesToDisk() {
     
     json jRoot = json::object();
     
-    jRoot["save_directory"] = gGlobalSaveDirectory; 
-
+    jRoot["save_directory"] 		   = gGlobalSaveDirectory;     
+    
     jRoot["show_update_notifications"] = cfg.showUpdateNotifications; 
     jRoot["debug_enable"]              = cfg.debugEnable;
+    jRoot["enable_fullscreen"]         = cfg.fullscreenEnable;
     jRoot["default_player"]            = cfg.defaultPlayer;
     
     json jSchedules = json::array();
@@ -247,13 +253,14 @@ void LoadSchedulesFromDisk() {
             gGlobalSaveDirectory        = jIn.value("save_directory", "/boot/home");
             cfg.showUpdateNotifications = jIn.value("show_update_notifications", true);
             cfg.debugEnable             = jIn.value("debug_enable", true);
-            cfg.defaultPlayer           = jIn.value("default_player", "mpv"); // Handled dynamically!
+            cfg.fullscreenEnable 		= jIn.value("enable_fullscreen", true);
+            cfg.defaultPlayer           = jIn.value("default_player", "mpv"); 
             
             if (jIn.contains("schedules") && jIn["schedules"].is_array()) {
                 gScheduleList.clear();
                 for (const auto& entry : jIn["schedules"]) {
                     ScheduleItem item;
-                    item.startDate = entry.value("date", "2026-06-23"); // Updated fallback to current date
+                    item.startDate = entry.value("date", "2026-06-23"); 
                     item.startTime = entry.value("time", "12:00");
                     item.channel   = entry.value("channel", "5.1");
                     item.duration  = entry.value("duration", "1800");
@@ -267,12 +274,13 @@ void LoadSchedulesFromDisk() {
         else if (jIn.is_array()) {
             cfg.showUpdateNotifications = true;
             cfg.debugEnable             = true;
+            cfg.fullscreenEnable		= true;
             cfg.defaultPlayer           = "MPV"; 
             
             gScheduleList.clear();
             for (const auto& entry : jIn) {
                 ScheduleItem item;
-                item.startDate = entry.value("date", "2026-06-23"); // Updated fallback to current date
+                item.startDate = entry.value("date", "2026-06-23"); 
                 item.startTime = entry.value("time", "12:00");
                 item.channel   = entry.value("channel", "5.1");
                 item.duration  = entry.value("duration", "1800");
@@ -1100,8 +1108,8 @@ public:
         fHoveringMinus = false;
         fHoveringPlus = false;
         
-        fCachedSelectedTime = "4:00 PM";
-        fCachedSelectedDate = "2026-06-22";
+        fCachedSelectedTime = ""; 
+        fCachedSelectedDate = "";
         
         fDateClickRect.Set(90.0, 0.0, 185.0, frame.Height());
         fTimeDownRect.Set(200.0, 8.0, 222.0, 32.0);
@@ -1236,14 +1244,15 @@ public:
                 // 1. CONVERT COMBINED SELECTED TIME STRING TO 12-HOUR AM/PM FORMAT
                 // =========================================================================
                 BString processedSelectedTime = fCachedSelectedTime;
-                int32 selHour = 12, selMin = 0;
                 
-               
+                // FIXED: Using standard native int allows sscanf to write values safely
+                int selHour = 12, selMin = 0; 
+                
                 if (std::sscanf(processedSelectedTime.String(), "%d:%d", &selHour, &selMin) == 2) {
                     char ampmBuf[16];
                     std::snprintf(ampmBuf, sizeof(ampmBuf), "%s", (selHour >= 12 ? "PM" : "AM"));
                     
-                    int32 displayHour = (selHour > 12) ? (selHour - 12) : ((selHour == 0) ? 12 : selHour);
+                    int displayHour = (selHour > 12) ? (selHour - 12) : ((selHour == 0) ? 12 : selHour);
                     processedSelectedTime.SetToFormat("%d:%02d %s", displayHour, selMin, ampmBuf);
                 }
 
@@ -1330,13 +1339,19 @@ public:
     
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
-            case 'UCLT': { 
+ 			case 'UCLT': { 
                 const char* newTime = nullptr;
                 const char* newDate = nullptr;
                 
-                if (message->FindString("time", &newTime) == B_OK) fCachedSelectedTime = newTime;
-                if (message->FindString("date", &newDate) == B_OK) fCachedSelectedDate = newDate;
+                // Securely extract the updated strings sent from FetchAndPopulateChannelList
+                if (message->FindString("time", &newTime) == B_OK && newTime != nullptr) {
+                    fCachedSelectedTime.SetTo(newTime);
+                }
+                if (message->FindString("date", &newDate) == B_OK && newDate != nullptr) {
+                    fCachedSelectedDate.SetTo(newDate);
+                }
                 
+                // Immediately force the Haiku app_server to re-render the view
                 Invalidate(); 
                 break;
             }
@@ -2063,7 +2078,11 @@ public:
 
                         BMenuItem* showSchedItem = new BMenuItem("Open Scheduler", new BMessage(MSG_SHOW_MAIN_SCHEDULER));
                         contextMenu->AddItem(showSchedItem);
-
+                       
+                        BMenuItem* contextFsItem = new BMenuItem("Fullscreen Mode", new BMessage(MSG_GUIDE_TOGGLE_FULLSCREEN));
+                        contextFsItem->SetMarked(cfg.fullscreenEnable);
+                        contextMenu->AddItem(contextFsItem);               
+						
                         BMenuItem* exitFsItem = new BMenuItem("Close Guide", new BMessage(MSG_CLOSE_GUIDE_WINDOW));
                         contextMenu->AddItem(exitFsItem);
 
@@ -2177,6 +2196,9 @@ public:
                         else if (selectedItem->Message() != nullptr && selectedItem->Message()->what == MSG_SHOW_MAIN_SCHEDULER) {
                             fParentShortcutTarget->PostMessage(MSG_SHOW_MAIN_SCHEDULER);
                         }
+                        else if (selectedItem->Message() != nullptr && selectedItem->Message()->what == MSG_GUIDE_TOGGLE_FULLSCREEN) {
+                            fParentShortcutTarget->PostMessage(MSG_GUIDE_TOGGLE_FULLSCREEN);
+                        }
                         else if (selectedItem->Message() != nullptr && selectedItem->Message()->what == MSG_CLOSE_GUIDE_WINDOW) {
                             Window()->PostMessage(B_QUIT_REQUESTED);
                         }
@@ -2202,19 +2224,30 @@ class RealTVGuideWindow : public BWindow {
 public:
     RealTVGuideWindow(BRect frame, const std::vector<ChannelGuideItem>& loadedChannels, BListView* mainChannelListView, BWindow* mainAppWindow) 
         : BWindow(frame, "Interactive TV Guide Matrix", B_DOCUMENT_WINDOW, B_ASYNCHRONOUS_CONTROLS) {
-        
-        BScreen screen(this);
-        if (screen.IsValid()) {
-            BRect screenFrame = screen.Frame();
-            
-            MoveTo(screenFrame.left, screenFrame.top);
-            ResizeTo(screenFrame.Width(), screenFrame.Height());
 
-            SetLook(B_NO_BORDER_WINDOW_LOOK);
-            SetFlags(Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
+        if (cfg.fullscreenEnable) {
+            BScreen screen(this);
+            if (screen.IsValid()) {
+                BRect screenFrame = screen.Frame();
+                
+                MoveTo(screenFrame.left, screenFrame.top);
+                ResizeTo(screenFrame.Width(), screenFrame.Height());
+
+                SetLook(B_NO_BORDER_WINDOW_LOOK);
+                SetFlags(Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
+            } else {
+                ResizeTo(1050, 650);
+            }
         } else {
+            // Standard user interface window boundaries if fullscreen is disabled
+            SetLook(B_DOCUMENT_WINDOW_LOOK);
             ResizeTo(1050, 650);
+            
+            // Re-center window safely on display relative to the main workspace layout frame
+            CenterOnScreen();
         }
+
+
         
         fMainAppWindow = mainAppWindow;
         fMainChannelListView = mainChannelListView;
@@ -2371,6 +2404,8 @@ private:
 	BMenuItem* fNotifyOffItem;
 	BMenuItem* fDebugOnItem;
 	BMenuItem* fDebugOffItem;
+	BMenuItem* fFullscreenOnItem;
+	BMenuItem* fFullscreenOffItem;
 	BMessageRunner* fRefreshRunner;
 	time_t   fLastNetworkSyncTime; 
 					
@@ -2427,12 +2462,14 @@ private:
 
 
 
+
+
 bool IsRemoteFileNewer(const std::string& url, const std::string& localPath) {
     if (cfg.debugEnable) std::printf("[DVR DEBUG] Checking local time-window cache status...\n");
 
     struct stat attrib;
     if (stat(localPath.c_str(), &attrib) != 0) {
-       if (cfg.debugEnable) std::printf("[DVR DEBUG] Local XML file missing. Forcing download.\n");
+        if (cfg.debugEnable) std::printf("[DVR DEBUG] Local XML file missing. Forcing download.\n");
         return true; 
     }
 
@@ -2445,19 +2482,65 @@ bool IsRemoteFileNewer(const std::string& url, const std::string& localPath) {
         cacheIn.close();
     }
 
+    // Set a 3-day expiration window for the master payload database
+    uint32 cacheExpirationWindow = 259200; 
     uint32 currentTime = real_time_clock();
-    uint32 cacheExpirationWindow = 14400; 
 
     if (savedSyncTime > 0 && (currentTime - savedSyncTime) < cacheExpirationWindow) {
-       // uint32 remainingTime = cacheExpirationWindow - (currentTime - savedSyncTime);
-       //  std::printf("[DVR DEBUG] SUCCESS: Local cache is only %d seconds old (Expires in %d mins). Skipping network check completely!\n", 
-       //             (currentTime - savedSyncTime), remainingTime / 60);
-        return false; // Local cache is perfectly valid!
+        if (cfg.debugEnable) {
+            uint32 remainingTime = cacheExpirationWindow - (currentTime - savedSyncTime);
+            std::printf("[DVR DEBUG] SUCCESS: Master cache is %u secs old (Expires in %u mins). Skipping network.\n", 
+                        (currentTime - savedSyncTime), remainingTime / 60);
+        }
+        return false; 
     }
 
-    if (cfg.debugEnable) std::printf("[DVR DEBUG] Cache window expired or invalid. Ready to sync with remote server.\n");
+    if (cfg.debugEnable) std::printf("[DVR DEBUG] Cache window expired or invalid for master payload. Ready to sync with server.\n");
+
+    // =========================================================================
+    //  AUTOMATED CACHE PURGE ENGINE (REMOVES EXPIRED DAILY CHUNK FILES)
+    // =========================================================================
+    std::printf("[DVR PURGE] Running storage sweep routine on expired XML chunks...\n");
+    
+    // Get today's date formatted as an integer integer key (e.g., 20260624)
+    std::time_t rawToday = std::time(nullptr);
+    std::tm* localToday = std::localtime(&rawToday);
+    char todayBuf[16];
+    std::strftime(todayBuf, sizeof(todayBuf), "%Y%m%d", localToday);
+    long todayIntKey = std::atol(todayBuf);
+
+    std::string configDirectoryPath = "/boot/home/config/settings/HaikuDVR";
+    DIR* dir = opendir(configDirectoryPath.c_str());
+    if (dir != nullptr) {
+        struct dirent* entry;
+        uint32 deletedFilesCount = 0;
+
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string filename(entry->d_name);
+            
+            if (filename.rfind("guide_", 0) == 0 && filename.length() == 18) { 
+                std::string datePart = filename.substr(6, 8);
+                
+                if (datePart.find_first_not_of("0123456789") == std::string::npos) {
+                    long fileDateIntKey = std::atol(datePart.c_str());
+                    
+                    if (fileDateIntKey < todayIntKey) {
+                        std::string fullPathToDelete = configDirectoryPath + "/" + filename;
+                        if (unlink(fullPathToDelete.c_str()) == 0) {
+                            deletedFilesCount++;
+                        }
+                    }
+                }
+            }
+        }
+        closedir(dir);
+        std::printf("[DVR PURGE] Storage sweep complete. Purged %u obsolete history file chunks.\n", deletedFilesCount);
+    }
+    // =========================================================================
+
     return true;
 }
+
 
 
 
@@ -2514,9 +2597,18 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
     targetTimeBox.tm_sec  = 0;
     targetTimeBox.tm_isdst = -1; 
     std::time_t targetComparisonEpoch = std::mktime(&targetTimeBox);
+    
+    // =========================================================================
+    //  CONFIGURATION CORRECTION: SEPARATE MASTER CACHE FROM THE TARGET CHUNK
+    // =========================================================================
+
+    std::string xmlCachePath = "/boot/home/config/settings/HaikuDVR/guide.xml"; 
+    std::string masterXmlPath = "/boot/home/config/settings/HaikuDVR/guide_master.xml"; 
+    std::string targetChunkPath = "/boot/home/config/settings/HaikuDVR/guide_" + cleanTargetDate + ".xml"; 
+
 
     // =========================================================================
-    // 🚀 THREAD-SAFE HEADER SYNC PASS (PREVENTS DEADLOCKS SYSTEM-WIDE)
+    // THREAD-SAFE HEADER SYNC PASS (PREVENTS DEADLOCKS SYSTEM-WIDE)
     // =========================================================================
     BView* headerView = FindView("timelineHeader");
     if (headerView != nullptr) {
@@ -2526,13 +2618,11 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             syncHeaderMsg.AddString("time", fTimeInput->Text());
         }
         
-        syncHeaderMsg.AddString("date", targetDateOnly.c_str());
-        
+        syncHeaderMsg.AddString("date", targetDateOnly.c_str());        
         BMessenger(headerView).SendMessage(&syncHeaderMsg);
     }
 
     // =========================================================================
-
 
     std::vector<std::string> tuners = DiscoverAllTuners();
     if (tuners.empty()) {
@@ -2540,19 +2630,42 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         return;
     }
     std::string targetIp = fSelectedIp.empty() ? tuners[0] : fSelectedIp;
-
     std::map<std::string, ChannelGuideItem> cloudGuideMap;
     std::map<std::string, std::string> xmlIdToChannelNumMap; 
-    bool isFilteringFutureDay = (targetDateStr != nullptr && std::strlen(targetDateStr) > 0);
 
-    bool needNetworkFetch = fCachedGuidePayload.empty() || 
-                            fLastNetworkSyncTime == 0 || 
-                            (real_time_clock() - fLastNetworkSyncTime) >= 86400 ||
-                            isFilteringFutureDay;
 
-    std::string xmlCachePath = "/boot/home/config/settings/HaikuDVR/guide.xml";
+
+    // Check master file status on disk
+    struct stat masterStat;
+    bool masterMissing = (stat(masterXmlPath.c_str(), &masterStat) != 0);
+
+    // Check if the specific daily target chunk file is missing
+    std::ifstream checkChunk(targetChunkPath.c_str());
+    bool dailyChunkMissing = !checkChunk.good();
+    if (checkChunk.is_open()) {
+        checkChunk.close();
+    }
+
+    std::string xmltvUrlDummy = "https://hdhomerun.com";
+    bool masterCacheExpired = IsRemoteFileNewer(xmltvUrlDummy, masterXmlPath);
+
+ 
+    bool needNetworkFetch = fCachedGuidePayload.empty() || fLastNetworkSyncTime == 0 || dailyChunkMissing || masterMissing || masterCacheExpired;
+    
+    // =========================================================================
+    //  PRESERVATION ON LOCAL CACHE MATCH
+    // =========================================================================
+    if (!needNetworkFetch) {
+
+        fCachedGuidePayload = "LOADED";
+        if (fLastNetworkSyncTime == 0) {
+            fLastNetworkSyncTime = masterStat.st_mtime;
+        }
+    }
+    // =========================================================================
 
     if (needNetworkFetch) {
+    	
         std::string discoveryUrl = "http://" + targetIp + "/discover.json";
         std::string discoverPayload;
         CURL* curl = curl_easy_init();
@@ -2576,68 +2689,201 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             }
         } catch (...) {}
 
-        if (!deviceAuthToken.empty()) {          
+         if (!deviceAuthToken.empty()) {          
         
             std::string xmltvUrl = "https://api.hdhomerun.com/api/xmltv?DeviceAuth=" + deviceAuthToken;
-           //  if (cfg.debugEnable) std::printf("[DVR NETWORK] Fetching Master XMLTV Payload: %s\n", xmltvUrl.c_str());  
-        
-	        if (!IsRemoteFileNewer(xmltvUrl, xmlCachePath)) {
-	            fLastNetworkSyncTime = real_time_clock();
-	            fCachedGuidePayload = "LOADED";
-	            needNetworkFetch = false; 
-	        }
-           
+       
+			if (!masterCacheExpired) {
+			    fLastNetworkSyncTime = real_time_clock();
+			    fCachedGuidePayload = "LOADED";
+			    needNetworkFetch = false; 
+			} else {
+			    needNetworkFetch = true;
+			}
 
-	        if (needNetworkFetch) {
-	            FILE* xmlFile = std::fopen(xmlCachePath.c_str(), "wb");
-	            curl = curl_easy_init();
-	            if (curl && xmlFile) {
-	                curl_easy_setopt(curl, CURLOPT_URL, xmltvUrl.c_str());
-	                curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 HaikuDVR/1.0");
-	                curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-	                curl_easy_setopt(curl, CURLOPT_WRITEDATA, xmlFile);
-	                
-	                curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
-	                
+            if (needNetworkFetch) {
+                FILE* xmlFilePtr = std::fopen(masterXmlPath.c_str(), "wb");
+                curl = curl_easy_init();
+                if (curl && xmlFilePtr) {
+                    curl_easy_setopt(curl, CURLOPT_URL, xmltvUrl.c_str());
+                    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 HaikuDVR/1.0");
+                    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, xmlFilePtr);
+                    curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L); 
+                    
+                    CURLcode res = curl_easy_perform(curl);
+                    
+                    if (res == CURLE_OK) {
+                        uint32 syncTimestamp = real_time_clock();
+                        fLastNetworkSyncTime = syncTimestamp;
+                        fCachedGuidePayload = "LOADED";
+                        
+                        std::string cacheControlPath = masterXmlPath + ".cache"; 
+                        std::ofstream cacheOut(cacheControlPath);
+                        if (cacheOut.is_open()) {
+                            cacheOut << syncTimestamp << "\n";
+                            cacheOut.close();
+                            if (cfg.debugEnable) std::printf("[DVR DEBUG] Saved fresh sync timestamp token: %u\n", syncTimestamp);
+                        }
+                    }
 
-	                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L); 
-	                
-	                CURLcode res = curl_easy_perform(curl);
-	                
-	                if (res == CURLE_OK) {
-	                    uint32 syncTimestamp = real_time_clock();
-	                    fLastNetworkSyncTime = syncTimestamp;
-	                    fCachedGuidePayload = "LOADED";
-	                    
-	                    std::string cacheControlPath = xmlCachePath + ".cache";
-	                    std::ofstream cacheOut(cacheControlPath);
-	                    if (cacheOut.is_open()) {
-	                        cacheOut << syncTimestamp << "\n";
-	                        cacheOut.close();
-	                        if (cfg.debugEnable) std::printf("[DVR DEBUG] Saved fresh sync timestamp token: %u\n", syncTimestamp);
-	                    }
-	                }
-
-	                curl_easy_cleanup(curl);
-	                std::fclose(xmlFile);
-	
-	                if (res != CURLE_OK) {
-	                    fStatusLabel->SetText("Status: Cloud XMLTV download failed.");
-	                    return;
-	                }
-	            } else if (xmlFile) {
-	                std::fclose(xmlFile);
-	            }
-	        }
+                    curl_easy_cleanup(curl);
+                    std::fclose(xmlFilePtr);
+    
+                    if (res != CURLE_OK) {
+                        fStatusLabel->SetText("Status: Cloud XMLTV download failed.");
+                        return;
+                    }
+                } else if (xmlFilePtr) {
+                    std::fclose(xmlFilePtr);
+                }
+            }
         }
     }
 
+    // =========================================================================
+    //  CLIENT-SIDE DAILY CHUNK SPLITTER
+    // =========================================================================
+    std::ifstream testChunk(targetChunkPath.c_str());
+    bool targetChunkMissing = !testChunk.good();
+    if (testChunk.is_open()) {
+        testChunk.close();
+    }
+
+    if (targetChunkMissing) {
+        std::ifstream masterStream(masterXmlPath.c_str());
+
+        if (masterStream.is_open()) {
+            std::string line;
+            std::vector<std::string> channelHeaders;
+            unsigned long headerLinesCount = 0;
+            
+            // 1. Buffer universal XML header elements safely
+            while (std::getline(masterStream, line)) {
+                if (line.find("<programme") != std::string::npos) {
+                    break;
+                }
+                if (line.find("<?xml") != std::string::npos || 
+                    line.find("<tv") != std::string::npos || 
+                    line.find("<channel") != std::string::npos || 
+                    line.find("</channel>") != std::string::npos ||
+                    line.find("<lcn>") != std::string::npos ||
+                    line.find("<icon") != std::string::npos) {
+                    channelHeaders.push_back(line);
+                    headerLinesCount++;
+                }
+            }
 
 
+            // Reset stream context back to the beginning of the file
+            masterStream.clear();
+            masterStream.seekg(0, std::ios::beg);
+            // =========================================================================
+            //  UNIVERSAL DYNAMIC TIMEZONE CLIENT-SIDE DAILY CHUNK SPLITTER
+            // =========================================================================
+            std::map<std::string, std::vector<std::string>> programDateBuckets;
+            std::string currentProgBlock = "";
+            bool insideProgramme = false;
+            std::string progDateKey = ""; 
+            unsigned long totalProgramsParsed = 0;
 
-    std::ifstream xmlFile(xmlCachePath.c_str());
+            // 1. Calculate the user's local timezone offset seconds dynamically
+            std::time_t zoneTimeNow = std::time(nullptr);
+            std::tm* localZoneCheck = std::localtime(&zoneTimeNow);
+            std::tm* utcZoneCheck = std::gmtime(&zoneTimeNow);
+            
+            long localHourMetric = localZoneCheck->tm_hour + (localZoneCheck->tm_yday * 24);
+            long utcHourMetric = utcZoneCheck->tm_hour + (utcZoneCheck->tm_yday * 24);
+            long dynamicTimezoneOffsetSeconds = (localHourMetric - utcHourMetric) * 3600;
+
+            if (cfg.debugEnable) {
+                std::printf("[DVR CHUNK] Dynamic Timezone Offset Detected: %ld hours (%ld seconds)\n", 
+                            dynamicTimezoneOffsetSeconds / 3600, dynamicTimezoneOffsetSeconds);
+            }
+
+            // 2. Parse and group program blocks by date in memory safely
+            while (std::getline(masterStream, line)) {
+                size_t startPos = line.find("<programme start=\"");
+                if (startPos != std::string::npos) {
+                    insideProgramme = true;
+                    currentProgBlock = line + "\n";
+                    
+                    size_t dateIdx = startPos + 18; 
+                    if (dateIdx + 12 <= line.length()) {
+                        std::string rawYear  = line.substr(dateIdx, 4);
+                        std::string rawMonth = line.substr(dateIdx + 4, 2);
+                        std::string rawDay   = line.substr(dateIdx + 6, 2);
+                        std::string rawHour  = line.substr(dateIdx + 8, 2);
+                        std::string rawMin   = line.substr(dateIdx + 10, 2);
+
+                        std::tm tmUtc = {0};
+                        tmUtc.tm_year = std::atoi(rawYear.c_str()) - 1900;
+                        tmUtc.tm_mon  = std::atoi(rawMonth.c_str()) - 1;
+                        tmUtc.tm_mday = std::atoi(rawDay.c_str());
+                        tmUtc.tm_hour = std::atoi(rawHour.c_str());
+                        tmUtc.tm_min  = std::atoi(rawMin.c_str());
+                        tmUtc.tm_isdst = -1;
+
+                        std::time_t utcEpoch = std::mktime(&tmUtc);
+                        if (utcEpoch != (std::time_t)-1) {
+                            std::time_t localEpoch = utcEpoch + dynamicTimezoneOffsetSeconds;
+                            std::tm* localTm = std::localtime(&localEpoch);
+
+                            char convertedDateBuf[16];
+                            std::strftime(convertedDateBuf, sizeof(convertedDateBuf), "%Y%m%d", localTm);
+                            progDateKey = convertedDateBuf; 
+                        } else {
+                            progDateKey = line.substr(dateIdx, 8);
+                        }
+                    }
+                    continue;
+                }
+
+                if (insideProgramme) {
+                    currentProgBlock += line + "\n";
+                    if (line.find("</programme>") != std::string::npos) {
+                        insideProgramme = false;
+                        
+                        if (!progDateKey.empty()) {
+                            programDateBuckets[progDateKey].push_back(currentProgBlock);
+                            totalProgramsParsed++;
+                        }
+                        currentProgBlock = "";
+                    }
+                }
+            }
+            masterStream.close();
+
+            // 3. Write each date's grouped programs to clean, separate files
+            for (auto const& [dateKey, blocks] : programDateBuckets) {
+                std::string chunkPath = "/boot/home/config/settings/HaikuDVR/guide_" + dateKey + ".xml";
+                std::ofstream outFile(chunkPath.c_str(), std::ios::trunc);
+                
+                if (!outFile.is_open()) {
+                    continue;
+                }
+                
+                for (const auto& hLine : channelHeaders) {
+                    outFile << hLine << "\n";
+                }
+                
+                for (const auto& blockText : blocks) {
+                    outFile << blockText;
+                }
+                
+                outFile << "</tv>\n";
+                outFile.close();
+            }
+        }
+    }
+    // =========================================================================
+
+
+    // Direct Pass 1 and Pass 2 to read exclusively from the targeted daily chunk file
+    std::ifstream xmlFile(targetChunkPath.c_str());
     if (!xmlFile.is_open()) {
-        fStatusLabel->SetText("Status: Error - guide.xml could not be opened from disk.");
+        fStatusLabel->SetText("Status: Error - Guide chunk could not be opened from disk.");
         return;
     }
 
@@ -2650,6 +2896,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
     std::map<std::string, std::string> cloudIconMap; 
 
     while (std::getline(xmlFile, xmlLine)) {
+        // Track the current channel configuration block
         size_t chanPos = xmlLine.find("<channel id=\"");
         if (chanPos != std::string::npos) {
             size_t startIdx = chanPos + 13;
@@ -2660,6 +2907,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             continue;
         }
 
+        // Parse Logical Channel Number (LCN)
         size_t lcnPos = xmlLine.find("<lcn>");
         if (lcnPos != std::string::npos && !currentChannelId.empty()) {
             size_t startIdx = lcnPos + 5;
@@ -2677,6 +2925,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             continue; 
         }
 
+        // Parse and map cloud icons to logical channel numbers
         size_t iconPos = xmlLine.find("<icon src=\"");
         if (iconPos != std::string::npos && !currentChannelId.empty()) {
             size_t startIdx = iconPos + 11;
@@ -2688,20 +2937,36 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                     cloudIconMap[chNum] = iconUrl; 
                 }
             }
-            currentChannelId = ""; 
+            currentChannelId = ""; // Reset context after the block finishes
+            continue;
         }
 
+        // Optimized Break: Stop Pass 1 immediately when target daily programs begin
         if (xmlLine.find("<programme") != std::string::npos) {
             break; 
         }
     }
 
+    // -------------------------------------------------------------------------
+    // PASS 2: DUAL-FILE CHUNK SCANNER
+    // -------------------------------------------------------------------------
+    std::vector<std::string> chunksToScan;
+    chunksToScan.push_back(targetChunkPath); // Today's file chunk
 
-    // -------------------------------------------------------------------------
-    // PASS 2: STREAM PARSE
-    // -------------------------------------------------------------------------
-    xmlFile.clear();
-    xmlFile.seekg(0, std::ios::beg);
+    // Calculate tomorrow's local calendar date dynamically
+    std::time_t rawUiTime = std::time(nullptr);
+    std::tm* uiTm = std::localtime(&rawUiTime);
+    uiTm->tm_year = targetYear - 1900;
+    uiTm->tm_mon  = targetMonth - 1;
+    uiTm->tm_mday = targetDay + 1; // Step forward exactly 1 calendar day
+    std::time_t nextDayEpoch = std::mktime(uiTm);
+    std::tm* nextDayTm = std::localtime(&nextDayEpoch);
+
+    char nextDayBuf[16];
+    std::strftime(nextDayBuf, sizeof(nextDayBuf), "%Y%m%d", nextDayTm);
+    std::string tomorrowChunkPath = "/boot/home/config/settings/HaikuDVR/guide_" + std::string(nextDayBuf) + ".xml";
+    
+    chunksToScan.push_back(tomorrowChunkPath);
 
     std::string progChanId = "";
     std::string progStartRaw = "";
@@ -2709,204 +2974,239 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
     std::string titleText = "";
     std::string descText = ""; 
 
-    auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
-        if (rawXmlTime.length() < 14) return 0;
-        int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
-        std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
-        std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
-        std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
-        std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
-        std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
-        std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
-
-        std::tm tmTime = {0};
-        tmTime.tm_year = y - 1900;
-        tmTime.tm_mon  = mo - 1;
-        tmTime.tm_mday = d;
-        tmTime.tm_hour = h;
-        tmTime.tm_min  = m;
-        tmTime.tm_sec  = s;
-        tmTime.tm_isdst = -1;
-
-        long offsetSeconds = 0;
-        size_t spacePos = rawXmlTime.find(' ');
-        if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
-            int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
-            int oh = 0, om = 0;
-            std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
-            std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
-            offsetSeconds = sign * ((oh * 3600) + (om * 60));
+    for (const auto& activeChunkPath : chunksToScan) {
+        std::ifstream xmlFile(activeChunkPath.c_str());
+        if (!xmlFile.is_open()) {
+            continue; 
         }
 
-        std::time_t localEpoch = std::mktime(&tmTime);
-        
-        std::time_t sysNow = std::time(nullptr);
-        std::tm* sysLocal = std::localtime(&sysNow);
-        std::tm tmCopy = *sysLocal;
-        std::time_t sysLocalEpoch = std::mktime(&tmCopy);
-        std::tm* sysUtc = std::gmtime(&sysNow);
-        tmCopy = *sysUtc;
-        std::time_t sysUtcEpoch = std::mktime(&tmCopy);
-        long systemTimezoneOffset = (long)(sysLocalEpoch - sysUtcEpoch);
+        bool isScanningTomorrowFile = (activeChunkPath == tomorrowChunkPath);
 
-        return localEpoch + systemTimezoneOffset - offsetSeconds;
-    };
 
-    while (std::getline(xmlFile, xmlLine)) {
-        // A. Identify program block start boundaries
-        size_t progPos = xmlLine.find("<programme start=\"");
-        if (progPos != std::string::npos) {
-            titleText = "";
-            descText = "";
+        // =========================================================================
+        // LAMBDA: INTEGRATES SCAN CONTEXT TO CALCULATE BASELINE EPOCHS
+        // =========================================================================
+        auto parseXmlTimeToEpoch = [targetYear, targetMonth, targetDay, isScanningTomorrowFile](const std::string& rawXmlTime) -> std::time_t {
+            if (rawXmlTime.length() < 14) return 0;
+            int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
+            std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
+            std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
+            std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
+            std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
+            std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
+            std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
+
+            std::tm tmTime = {0};
+            // Dynamically assign target day offsets matching the active file file chunk context rules
+            std::time_t baseEpochRef = std::time(nullptr);
+            std::tm* calcTm = std::localtime(&baseEpochRef);
+            calcTm->tm_year = targetYear - 1900;
+            calcTm->tm_mon  = targetMonth - 1;
+            calcTm->tm_mday = isScanningTomorrowFile ? (targetDay + 1) : targetDay;
+            std::time_t resolvedDayEpoch = std::mktime(calcTm);
+            std::tm* finalDayTm = std::localtime(&resolvedDayEpoch);
+
+            tmTime.tm_year = finalDayTm->tm_year;
+            tmTime.tm_mon  = finalDayTm->tm_mon;
+            tmTime.tm_mday = finalDayTm->tm_mday;
+            tmTime.tm_hour = h;
+            tmTime.tm_min  = m;
+            tmTime.tm_sec  = s;
+            tmTime.tm_isdst = -1;
+
+            long offsetSeconds = 0;
+            size_t spacePos = rawXmlTime.find(' ');
+            if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
+                int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
+                int oh = 0, om = 0;
+                std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
+                std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
+                offsetSeconds = sign * ((oh * 3600) + (om * 60));
+            }
+
+            std::time_t localEpoch = std::mktime(&tmTime);
+            if (localEpoch == (std::time_t)-1) return 0;
+
+            std::time_t sysTimeNow = std::time(nullptr);
+            std::tm* localTm = std::localtime(&sysTimeNow);
+            long localSeconds = localTm->tm_hour * 3600 + localTm->tm_min * 60;
+            std::tm* utcTm = std::gmtime(&sysTimeNow);
+            long utcSeconds = utcTm->tm_hour * 3600 + utcTm->tm_min * 60;
             
-            size_t sStart = progPos + 18;
-            size_t sEnd = xmlLine.find("\"", sStart);
-            if (sEnd != std::string::npos) {
-                progStartRaw = xmlLine.substr(sStart, sEnd - sStart);
-            }
+            if (localTm->tm_yday > utcTm->tm_yday) localSeconds += 86400;
+            if (localTm->tm_yday < utcTm->tm_yday) utcSeconds += 86400;
+            
+            long timezoneOffsetSeconds = localSeconds - utcSeconds;
+            return localEpoch + timezoneOffsetSeconds - offsetSeconds;
+        };
+        // =========================================================================
 
-            size_t stopPos = xmlLine.find("stop=\"");
-            if (stopPos != std::string::npos) {
-                size_t eEnd = xmlLine.find("\"", stopPos + 6);
-                if (eEnd != std::string::npos) {
-                    progEndRaw = xmlLine.substr(stopPos + 6, eEnd - (stopPos + 6));
+        bool fastForwardToProgrammes = true;
+
+        while (std::getline(xmlFile, xmlLine)) {
+            if (fastForwardToProgrammes) {
+                if (xmlLine.find("<programme") != std::string::npos) {
+                    fastForwardToProgrammes = false;
+                } else {
+                    continue;
                 }
             }
 
-            size_t chanAttrPos = xmlLine.find("channel=\"");
-            if (chanAttrPos != std::string::npos) {
-                size_t cStart = chanAttrPos + 9;
-                size_t cEnd = xmlLine.find("\"", cStart);
-                if (cEnd != std::string::npos) {
-                    progChanId = xmlLine.substr(cStart, cEnd - cStart);
+            size_t progPos = xmlLine.find("<programme start=\"");
+            if (progPos != std::string::npos) {
+                titleText = "";
+                descText = "";
+                
+                size_t sStart = progPos + 18;
+                size_t sEnd = xmlLine.find("\"", sStart);
+                if (sEnd != std::string::npos) {
+                    progStartRaw = xmlLine.substr(sStart, sEnd - sStart);
                 }
-            }
-            continue;
-        }
 
-        // B. Accumulate metadata attributes while inside the open block stream context
-        if (!progChanId.empty()) {
-            size_t titlePos = xmlLine.find("<title");
-            if (titlePos != std::string::npos) {
-                size_t valStart = xmlLine.find(">", titlePos) + 1;
-                size_t valEnd = xmlLine.find("</title>", valStart);
-                if (valEnd != std::string::npos) {
-                    titleText = xmlLine.substr(valStart, valEnd - valStart);
-                    
-                    // =========================================================================
-                    // 🧽 CORE XML TEXT ENTITY SANITIZATION (FIXES AMPERSANDS SYSTEM-WIDE)
-                    // =========================================================================
-                    size_t pos;
-                    while ((pos = titleText.find("&amp;")) != std::string::npos) { titleText.replace(pos, 5, "&"); }
-                    while ((pos = titleText.find("&quot;")) != std::string::npos) { titleText.replace(pos, 6, "\""); }
-                    while ((pos = titleText.find("&apos;")) != std::string::npos) { titleText.replace(pos, 6, "'"); }
-                    while ((pos = titleText.find("&lt;")) != std::string::npos) { titleText.replace(pos, 4, "<"); }
-                    while ((pos = titleText.find("&gt;")) != std::string::npos) { titleText.replace(pos, 4, ">"); }
-                    // =========================================================================
+                size_t stopPos = xmlLine.find("stop=\"");
+                if (stopPos != std::string::npos) {
+                    size_t eEnd = xmlLine.find("\"", stopPos + 6);
+                    if (eEnd != std::string::npos) {
+                        progEndRaw = xmlLine.substr(stopPos + 6, eEnd - (stopPos + 6));
+                    }
                 }
+
+                size_t chanAttrPos = xmlLine.find("channel=\"");
+                if (chanAttrPos != std::string::npos) {
+                    size_t cStart = chanAttrPos + 9;
+                    size_t cEnd = xmlLine.find("\"", cStart);
+                    if (cEnd != std::string::npos) {
+                        progChanId = xmlLine.substr(cStart, cEnd - cStart);
+                    }
+                }
+                continue;
             }
 
-            size_t descPos = xmlLine.find("<desc");
-            if (descPos != std::string::npos) {
-                size_t valStart = xmlLine.find(">", descPos) + 1;
-                size_t valEnd = xmlLine.find("</desc>", valStart);
-                if (valEnd != std::string::npos) {
-                    descText = xmlLine.substr(valStart, valEnd - valStart);
-                    
-                    size_t pos;
-                    while ((pos = descText.find("&amp;")) != std::string::npos) { descText.replace(pos, 5, "&"); }
-                    while ((pos = descText.find("&quot;")) != std::string::npos) { descText.replace(pos, 6, "\""); }
-                    while ((pos = descText.find("&apos;")) != std::string::npos) { descText.replace(pos, 6, "'"); }
+            if (!progChanId.empty()) {
+                size_t titlePos = xmlLine.find("<title");
+                if (titlePos != std::string::npos) {
+                    size_t valStart = xmlLine.find(">", titlePos) + 1;
+                    size_t valEnd = xmlLine.find("</title>", valStart);
+                    if (valEnd != std::string::npos) {
+                        titleText = xmlLine.substr(valStart, valEnd - valStart);
+                        size_t pos;
+                        while ((pos = titleText.find("&amp;")) != std::string::npos) { titleText.replace(pos, 5, "&"); }
+                        while ((pos = titleText.find("&quot;")) != std::string::npos) { titleText.replace(pos, 6, "\""); }
+                        while ((pos = titleText.find("&apos;")) != std::string::npos) { titleText.replace(pos, 6, "'"); }
+                        while ((pos = titleText.find("&lt;")) != std::string::npos) { titleText.replace(pos, 4, "<"); }
+                        while ((pos = titleText.find("&gt;")) != std::string::npos) { titleText.replace(pos, 4, ">"); }
+                    }
                 }
-            }
-        }
 
-
-        // C. Evaluate block layout parameters only when the node explicitly terminates
-        if (xmlLine.find("</programme>") != std::string::npos) {
-            std::string associatedChNum = xmlIdToChannelNumMap[progChanId];
-
-            if (!associatedChNum.empty() && !titleText.empty()) {
-                std::time_t progStartEpoch = parseXmlTimeToEpoch(progStartRaw);
-                std::time_t progEndEpoch   = parseXmlTimeToEpoch(progEndRaw);
-
-                auto& activeItem = cloudGuideMap[associatedChNum];
-
-                for (int32 bucket = 0; bucket < 4; bucket++) {
-                    std::time_t bucketTargetEpoch = targetComparisonEpoch + (bucket * 30 * 60);
-
-                    if (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) {
-                        
-                        std::time_t displayLocalEpoch = bucketTargetEpoch;
-                        std::tm* displayTime = std::localtime(&displayLocalEpoch);
-                        char timeBuf[32] = {0};
-                        std::strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", displayTime);
-
-                        BString formattedTimeStr(timeBuf);
-                        if (formattedTimeStr.StartsWith("0")) {
-                            formattedTimeStr.Remove(0, 1);
-                        }
-
-                        std::time_t endEpochCopy = progEndEpoch;
-                        std::tm* endTm = std::localtime(&endEpochCopy);
-                        char endBuf[32] = {0};
-                        std::strftime(endBuf, sizeof(endBuf), "%I:%M %p", endTm);
-                        BString formattedEndTimeStr(endBuf);
-                        if (formattedEndTimeStr.StartsWith("0")) {
-                            formattedEndTimeStr.Remove(0, 1);
-                        }
-                        
-                        if (bucket == 0) {
-                            activeItem.nowPlaying = titleText;
-                            activeItem.nowPlayingDurationMinutes = (int32)((progEndEpoch - progStartEpoch) / 60);
-                            
-                            activeItem.nowPlayingEndTimeStr = formattedEndTimeStr.String();
-                            activeItem.nowPlayingDescription = descText;
-                        } else {
-
-                            while ((int32)activeItem.futureLineup.size() < bucket) {
-                                UpcomingShowItem placeholder;
-                                placeholder.title = "No Programming Data Available";                                    
-                                std::time_t placeholderEpoch = targetComparisonEpoch + ((activeItem.futureLineup.size() + 1) * 30 * 60);
-                                std::tm* pTime = std::localtime(&placeholderEpoch);
-                                char pBuf[32] = {0};
-                                std::strftime(pBuf, sizeof(pBuf), "%I:%M %p", pTime);
-                                
-                                BString formattedPTime(pBuf);
-                                if (formattedPTime.StartsWith("0")) {
-                                    formattedPTime.Remove(0, 1);
-                                }
-                                placeholder.startTimeStr = formattedPTime.String();
-                                placeholder.endTimeStr = "";
-                                placeholder.description = "";
-                                placeholder.durationMinutes = 30;
-
-                                activeItem.futureLineup.push_back(placeholder);
-                            }
-
-                            UpcomingShowItem futureShow;
-                            futureShow.title = titleText;
-                            futureShow.durationMinutes = (int32)((progEndEpoch - progStartEpoch) / 60);
-                            futureShow.startTimeStr = formattedTimeStr.String();
-                            futureShow.endTimeStr = formattedEndTimeStr.String();
-                            futureShow.description = descText.c_str(); 
-
-                            activeItem.futureLineup[bucket - 1] = futureShow;
-                        }
+                size_t descPos = xmlLine.find("<desc");
+                if (descPos != std::string::npos) {
+                    size_t valStart = xmlLine.find(">", descPos) + 1;
+                    size_t valEnd = xmlLine.find("</desc>", valStart);
+                    if (valEnd != std::string::npos) {
+                        descText = xmlLine.substr(valStart, valEnd - valStart);
+                        size_t pos;
+                        while ((pos = descText.find("&amp;")) != std::string::npos) { descText.replace(pos, 5, "&"); }
+                        while ((pos = descText.find("&quot;")) != std::string::npos) { descText.replace(pos, 6, "\""); }
+                        while ((pos = descText.find("&apos;")) != std::string::npos) { descText.replace(pos, 6, "'"); }
+                        while ((pos = descText.find("&lt;")) != std::string::npos) { descText.replace(pos, 4, "<"); }
+                        while ((pos = descText.find("&gt;")) != std::string::npos) { descText.replace(pos, 4, ">"); }
                     }
                 }
             }
-            progChanId = "";
-            progStartRaw = "";
-            progEndRaw = "";
-            titleText = "";
-            descText = "";
+
+            if (xmlLine.find("</programme>") != std::string::npos) {
+                std::string associatedChNum = xmlIdToChannelNumMap[progChanId];
+
+                if (!associatedChNum.empty() && !titleText.empty()) {
+                    std::time_t progStartEpoch = parseXmlTimeToEpoch(progStartRaw);
+                    std::time_t progEndEpoch   = parseXmlTimeToEpoch(progEndRaw);
+
+                    if (progEndEpoch < progStartEpoch) {
+                        progEndEpoch += 86400; 
+                    }
+
+                                    auto& activeItem = cloudGuideMap[associatedChNum];
+
+                    for (int32 bucket = 0; bucket < 4; bucket++) {
+                        std::time_t bucketTargetEpoch = targetComparisonEpoch + (bucket * 30 * 60);
+
+                        if (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) {
+                            
+                            std::time_t displayLocalEpoch = bucketTargetEpoch;
+                            std::tm* displayTime = std::localtime(&displayLocalEpoch);
+                            char timeBuf[32] = {0};
+                            std::strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", displayTime);
+
+                            BString formattedTimeStr(timeBuf);
+                            if (formattedTimeStr.StartsWith("0")) {
+                                formattedTimeStr.Remove(0, 1);
+                            }
+
+                            std::time_t endEpochCopy = progEndEpoch;
+                            std::tm* endTm = std::localtime(&endEpochCopy);
+                            char endBuf[32] = {0};
+                            std::strftime(endBuf, sizeof(endBuf), "%I:%M %p", endTm);
+                            BString formattedEndTimeStr(endBuf);
+                            if (formattedEndTimeStr.StartsWith("0")) {
+                                formattedEndTimeStr.Remove(0, 1);
+                            }
+                            
+                            if (bucket == 0) {
+                                activeItem.nowPlaying = titleText;
+                                activeItem.nowPlayingDurationMinutes = (int32)((progEndEpoch - progStartEpoch) / 60);
+                                activeItem.nowPlayingEndTimeStr = formattedEndTimeStr.String();
+                                activeItem.nowPlayingDescription = descText;
+                            } else {
+                                while ((int32)activeItem.futureLineup.size() < bucket) {
+                                    UpcomingShowItem placeholder;
+                                    placeholder.title = "To Be Announced";                                    
+                                    std::time_t placeholderEpoch = targetComparisonEpoch + ((activeItem.futureLineup.size() + 1) * 30 * 60);
+                                    std::tm* pTime = std::localtime(&placeholderEpoch);
+                                    char pBuf[32] = {0};
+                                    std::strftime(pBuf, sizeof(pBuf), "%I:%M %p", pTime);
+                                    
+                                    BString formattedPTime(pBuf);
+                                    if (formattedPTime.StartsWith("0")) {
+                                        formattedPTime.Remove(0, 1);
+                                    }
+                                    placeholder.startTimeStr = formattedPTime.String();
+                                    placeholder.endTimeStr = "";
+                                    placeholder.description = "";
+                                    placeholder.durationMinutes = 30;
+                                    activeItem.futureLineup.push_back(placeholder);
+                                }
+
+                                UpcomingShowItem futureShow;
+                                futureShow.title = titleText;
+                                futureShow.durationMinutes = (int32)((progEndEpoch - progStartEpoch) / 60);
+                                futureShow.startTimeStr = formattedTimeStr.String();
+                                futureShow.endTimeStr = formattedEndTimeStr.String();
+                                futureShow.description = descText.c_str(); 
+
+                                activeItem.futureLineup[bucket - 1] = futureShow;
+                            }
+                        }
+                    }
+                }
+                progChanId = "";
+                progStartRaw = "";
+                progEndRaw = "";
+                titleText = "";
+                descText = "";
+            }
         }
+        xmlFile.close();
     }
-    xmlFile.close();
 
 
-    // -------------------------------------------------------------------------
+
+
+
+
+
+
+
+     // -------------------------------------------------------------------------
     // PASS 3: FILTER SELECTIONS AGAINST PHYSICAL HDHOMERUN LINEUP TUNERS
     // -------------------------------------------------------------------------
     std::string lineupUrl = "http://" + targetIp + "/lineup.json";
@@ -2939,9 +3239,12 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                         finalItem.guideName = channelEntry.value("GuideName", "Unknown");
                     }
                 } else {
+                    // Safe daily-chunk fallback: If a tuner channel has no scheduled 
+                    // programs inside today's file, keep the channel visible in the list.
                     finalItem.guideNumber = chNum;
                     finalItem.guideName   = channelEntry.value("GuideName", "Unknown");
-                    finalItem.nowPlaying  = "Live Stream Available";
+                    finalItem.nowPlaying  = "To Be Announced";
+                    finalItem.nowPlayingDurationMinutes = 30;
                 }
 
                 int32 activeListRowIndex = (int32)fLoadedChannels.size();
@@ -2986,7 +3289,6 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
     for (size_t i = 0; i < fLoadedChannels.size(); i++) {
         const auto& item = fLoadedChannels[i];
 
-        // Restored your exact naming paths to align with Pass 3's real-time downloads
         std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + item.guideName + ".png";
         
         std::ifstream checkFile(iconPath.c_str());
@@ -3014,21 +3316,23 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         std::string timeContextLabel = "Now: ";
         if (targetDateStr != nullptr && std::strlen(targetDateStr) > 0) {
             std::string rawDate(targetDateStr);
+            // Formats long strings like "2026-06-24" into a scannable "06-24" UI prefix
             std::string shortDate = (rawDate.length() >= 10) ? rawDate.substr(5) : rawDate;
             timeContextLabel = "On " + shortDate + ": ";
         }
 
         std::string displayLabel = item.guideNumber + " - " + item.guideName + " (" + timeContextLabel + item.nowPlaying + ") ";
         
-        // --- End of Pass 4 List View Addition Loop ---
         fChannelListView->AddItem(new ChannelListItem(displayLabel.c_str(), activeIcon));
     }
     std::fflush(stdout); 
 
+    // Initialize Messenger targeting the current window instance handler securely
     if (gIconWindowMessenger == nullptr) {
         gIconWindowMessenger = new BMessenger(this);
     }
 
+    // Safely verify and spawn the low priority background icon loader thread
     if (atomic_get(&gIconThreadRunning) == 0) {
         gIconQueueLocker.Lock();
         bool queueHasWork = !gIconDownloadQueue.empty();
@@ -3041,6 +3345,10 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             }
         }
     }
+    
+    // Set a final status label message reflecting the chunk compilation context
+    std::string successStatus = "Status: Loaded guide data for " + targetDateOnly;
+    fStatusLabel->SetText(successStatus.c_str());
 }
 
 
@@ -3135,41 +3443,29 @@ public:
         // TOP APPLICATION MENUBAR INITIALIZATION
         // =========================================================================
         BMenuBar* menuBar = new BMenuBar(BRect(0, 0, Bounds().Width(), 20), "top_menubar");
-        BMenu* optionsMenu = new BMenu("Options");
-                
-        // --- Update Alerts Section ---
+        BMenu* optionsMenu = new BMenu("Options");                
+
         BMessage* msgNotifyOn = new BMessage(MSG_TOGGLE_NOTIFICATIONS);
-        msgNotifyOn->AddBool("enable", true);
-        fNotifyOnItem = new BMenuItem("Enable Update Alerts", msgNotifyOn);
-
-        BMessage* msgNotifyOff = new BMessage(MSG_TOGGLE_NOTIFICATIONS);
-        msgNotifyOff->AddBool("enable", false);
-        fNotifyOffItem = new BMenuItem("Disable Update Alerts", msgNotifyOff);
-
-        fNotifyOnItem->SetMarked(cfg.showUpdateNotifications == true);
-        fNotifyOffItem->SetMarked(cfg.showUpdateNotifications == false);
-
-        optionsMenu->AddItem(fNotifyOnItem);
-        optionsMenu->AddItem(fNotifyOffItem);        
-
-        optionsMenu->AddSeparatorItem(); 
-
+        fNotifyOnItem = new BMenuItem("Enable Update Alerts", msgNotifyOn);        
+        fNotifyOnItem->SetMarked(cfg.showUpdateNotifications);
+        optionsMenu->AddItem(fNotifyOnItem);  
+            
+        optionsMenu->AddSeparatorItem();          
+        
         BMessage* msgDebugOn = new BMessage(MSG_TOGGLE_DEBUG);
-        msgDebugOn->AddBool("enable", true);
-        fDebugOnItem = new BMenuItem("Enable Debug Mode", msgDebugOn);
-
-        BMessage* msgDebugOff = new BMessage(MSG_TOGGLE_DEBUG);
-        msgDebugOff->AddBool("enable", false);
-        fDebugOffItem = new BMenuItem("Disable Debug Mode", msgDebugOff);
-
-        fDebugOnItem->SetMarked(cfg.debugEnable == true);
-        fDebugOffItem->SetMarked(cfg.debugEnable == false);
-
-        optionsMenu->AddItem(fDebugOnItem);
-        optionsMenu->AddItem(fDebugOffItem);
-        
+        fDebugOnItem = new BMenuItem("Enable Debug Mode", msgDebugOn);        
+        fDebugOnItem->SetMarked(cfg.debugEnable);
+        optionsMenu->AddItem(fDebugOnItem);  
+            
         optionsMenu->AddSeparatorItem(); 
-        
+        /*
+        BMessage* msgToggleFullscreen = new BMessage(MSG_TOGGLE_FULLSCREEN);
+        fFullscreenOnItem = new BMenuItem("Fullscreen Mode", msgToggleFullscreen);        
+        fFullscreenOnItem->SetMarked(cfg.fullscreenEnable);
+        optionsMenu->AddItem(fFullscreenOnItem); 
+               
+        optionsMenu->AddSeparatorItem(); 
+        */
         BMessage* msgOpenGuide = new BMessage(MSG_OPEN_GUIDE);
         BMenuItem* guideItem = new BMenuItem("Open Guide...", msgOpenGuide);
         optionsMenu->AddItem(guideItem);
@@ -3406,37 +3702,28 @@ public:
         switch (message->what) {
         	
         	
-       case MSG_TOGGLE_DEBUG: {
-            bool enableDebug = true;
-            if (message->FindBool("enable", &enableDebug) == B_OK) {
-                cfg.debugEnable = enableDebug;
-                
-                fDebugOnItem->SetMarked(cfg.debugEnable == true);
-                fDebugOffItem->SetMarked(cfg.debugEnable == false);
-                
-                SaveSchedulesToDisk();
-                
-                printf("[DEBUG_SYS] System logging runtime state mutated via UI: %s\n", 
-                       cfg.debugEnable ? "ENABLED" : "DISABLED");
-            }
+        case MSG_TOGGLE_NOTIFICATIONS: {
+            cfg.showUpdateNotifications = !cfg.showUpdateNotifications;            
+            fNotifyOnItem->SetMarked(cfg.showUpdateNotifications);          
+            SaveSchedulesToDisk();
             break;
         }
-       	
-        case MSG_TOGGLE_NOTIFICATIONS: {
-            bool enableAlerts = true;
-            if (message->FindBool("enable", &enableAlerts) == B_OK) {
-                cfg.showUpdateNotifications = enableAlerts;
-                
-                fNotifyOnItem->SetMarked(cfg.showUpdateNotifications == true);
-                fNotifyOffItem->SetMarked(cfg.showUpdateNotifications == false);
-                
-                SaveSchedulesToDisk();
-                
-                if (cfg.debugEnable) {
-                    printf("[DEBUG_UPDATE] Notification configuration mutated via UI: %s\n", 
-                           cfg.showUpdateNotifications ? "ENABLED" : "DISABLED");
-                }
-            }
+        
+        case MSG_TOGGLE_DEBUG: {
+            cfg.debugEnable = !cfg.debugEnable;            
+            fDebugOnItem->SetMarked(cfg.debugEnable);          
+            SaveSchedulesToDisk();
+                            
+            printf("[DEBUG_SYS] System logging runtime state mutated via UI: %s\n", 
+                   cfg.debugEnable ? "ENABLED" : "DISABLED");
+            break;
+        }
+        
+        
+         case MSG_TOGGLE_FULLSCREEN: {
+            cfg.fullscreenEnable = !cfg.fullscreenEnable;            
+            fFullscreenOnItem->SetMarked(cfg.fullscreenEnable);          
+            SaveSchedulesToDisk();
             break;
         }
 
@@ -4438,6 +4725,40 @@ public:
          
      }
 
+        case MSG_GUIDE_TOGGLE_FULLSCREEN: {
+            if (fGuideWindow != nullptr) {
+                if (fGuideWindow->Lock()) {
+                    cfg.fullscreenEnable = !cfg.fullscreenEnable;
+                    
+                    // FIXED: Using a static scope block tracker preserves coordinates without header alterations
+                    static BRect dynamicSavedFrame(100, 100, 1150, 750);
+                    
+                    if (cfg.fullscreenEnable) {
+                        dynamicSavedFrame = fGuideWindow->Frame();
+                        
+                        BScreen screen(fGuideWindow);
+                        if (screen.IsValid()) {
+                            fGuideWindow->SetLook(B_NO_BORDER_WINDOW_LOOK);
+                            fGuideWindow->SetFlags(fGuideWindow->Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
+                            
+                            fGuideWindow->MoveTo(screen.Frame().left, screen.Frame().top);
+                            fGuideWindow->ResizeTo(screen.Frame().Width(), screen.Frame().Height());
+                        }
+                    } else {
+                        fGuideWindow->SetLook(B_DOCUMENT_WINDOW_LOOK);
+                        fGuideWindow->SetFlags(fGuideWindow->Flags() & ~(B_NOT_MOVABLE | B_NOT_RESIZABLE));
+                        
+                        // Restore original coordinates perfectly
+                        fGuideWindow->MoveTo(dynamicSavedFrame.left, dynamicSavedFrame.top);
+                        fGuideWindow->ResizeTo(dynamicSavedFrame.Width(), dynamicSavedFrame.Height());
+                    }
+                    
+                    fGuideWindow->Unlock();
+                    SaveSchedulesToDisk();
+                }
+            }
+            break;
+        }
 
 
 
@@ -4634,7 +4955,10 @@ public:
 	         atomic_set(&gCancelRecording, 1);
 	         fStopButton->SetEnabled(false);
 	         break;
-	  
+	 
+	 
+
+	 
 	  
 	      case MSG_CLOSE_GUIDE_WINDOW: {
 	      
@@ -4647,6 +4971,8 @@ public:
 	 
 	            break;
 	        }
+	        
+	        
 	         
 	      	case MSG_GUIDE_CLOSED: {
 	            fGuideWindow = nullptr;
@@ -4655,7 +4981,7 @@ public:
 	            if (this->IsHidden()) {
 	                this->Show();
 	                this->Activate(true); 
-	                printf("[FRONTEND] Guide closed while Scheduler was hidden. Restoring Scheduler window view.\n");
+	                if (cfg.debugEnable) printf("[FRONTEND] Guide closed while Scheduler was hidden. Restoring Scheduler window view.\n");
 	            }
 	            break;
 	        }
@@ -4953,7 +5279,7 @@ public:
     void ReadyToRun() override {
         DVRWindow* window = new DVRWindow();
         window->Show();        
-        window->PostMessage(MSG_OPEN_GUIDE);
+       if (cfg.fullscreenEnable) window->PostMessage(MSG_OPEN_GUIDE);
     }
 
 };

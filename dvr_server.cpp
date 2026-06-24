@@ -63,7 +63,8 @@ std::string gGlobalSaveDirectory = "/boot/home";
 BLocker gScheduleLocker;
 bool gFrontendUpdateNotifications = true;
 bool gFrontendDebugEnable = true;
-BString gFrontendDefaultPlayer = "hTV";
+bool gFrontendFullscreenEnable = true;
+BString gFrontendDefaultPlayer = "MPV";
 
 
 void SignalExitInterceptor(int signalType) { 
@@ -78,9 +79,8 @@ std::vector<std::string> DiscoverAllTuners() {
     
     hdhomerun_discover_t* ds = hdhomerun_discover_create(NULL);
     if (ds == NULL) {
-        // Log locally or handle allocation failure out to standard error
         fprintf(stderr, "Error: Failed to create hdhomerun discovery instance\n");
-        return tuners; // Returns clean empty vector
+        return tuners;
     }
     
     int count = hdhomerun_discover_find_devices_v2(ds, 0, 
@@ -91,7 +91,6 @@ std::vector<std::string> DiscoverAllTuners() {
         uint32_t ip = result_list[i].ip_addr;
         char ip_str[32];
         
-        // Convert to standard dot-decimal network notation string
         sprintf(ip_str, "%u.%u.%u.%u", 
             (ip >> 24) & 0xFF, 
             (ip >> 16) & 0xFF, 
@@ -102,7 +101,7 @@ std::vector<std::string> DiscoverAllTuners() {
     }
     
     hdhomerun_discover_destroy(ds);
-    return tuners; // Returns discovered tuners, or empty vector if none found
+    return tuners; 
 }
 
 
@@ -118,16 +117,17 @@ void LoadSchedulesFromDisk() {
         if (jIn.is_object()) {
             gGlobalSaveDirectory = jIn.value("save_directory", "/boot/home");
             
-            // --- BACKEND FIX: PRESERVE FRONTEND SETTINGS IN RAM ---
+            // --- BACKEND PRESERVE FRONTEND SETTINGS IN RAM ---
             gFrontendUpdateNotifications = jIn.value("show_update_notifications", true);
             gFrontendDebugEnable         = jIn.value("debug_enable", true);
-            gFrontendDefaultPlayer       = jIn.value("default_player", "hTV").c_str();
+            gFrontendFullscreenEnable	 = jIn.value("enable_fullscreen", true);
+            gFrontendDefaultPlayer       = jIn.value("default_player", "mpv").c_str();
 
             if (jIn.contains("schedules") && jIn["schedules"].is_array()) {
                 gScheduleList.clear();
                 for (const auto& entry : jIn["schedules"]) {
                     ScheduleItem item;
-                    item.startDate = entry.value("date", "2026-06-23"); // Updated fallback to current date
+                    item.startDate = entry.value("date", "2026-06-23"); 
                     item.startTime = entry.value("time", "12:00");
                     item.channel   = entry.value("channel", "5.1");
                     item.duration  = entry.value("duration", "1800");                    
@@ -152,9 +152,10 @@ void SaveSchedulesToDisk() {
     json jRoot = json::object();
     jRoot["save_directory"] = gGlobalSaveDirectory;
     
-    // --- BACKEND FIX: INJECT FRONTEND SETTINGS BACK INTO THE JSON OBJECT ---
+    // --- BACKEND INJECT FRONTEND SETTINGS BACK INTO THE JSON OBJECT ---
     jRoot["show_update_notifications"] = gFrontendUpdateNotifications;
     jRoot["debug_enable"]              = gFrontendDebugEnable;
+    jRoot["enable_fullscreen"]         = gFrontendFullscreenEnable;
     jRoot["default_player"]            = gFrontendDefaultPlayer.String();
     
     json jSchedules = json::array();
