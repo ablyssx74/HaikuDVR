@@ -57,7 +57,7 @@
 #include <iostream>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.17 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.18 (Haiku OS)";
 }
 
 
@@ -1739,16 +1739,12 @@ public:
             }
 
 
-
-
             // =========================================================================
             // F. Compare entries with the active recording scheduling queue (DIRECT FIX)
             // =========================================================================
             bool isScheduled = false;
 
-            std::tm cellTm = *localToday; 
-            cellTm.tm_hour  = hours;
-            cellTm.tm_min   = minutes;
+            std::tm cellTm = {0}; 
             cellTm.tm_sec   = 0;
             cellTm.tm_isdst = -1; 
 
@@ -1772,14 +1768,41 @@ public:
                 activeSelectedDateStr = gScheduleList[0].startDate.c_str();
             }
 
+            int vy = 2026, vm = 6, vd = 25;
             if (!activeSelectedDateStr.IsEmpty()) {
-                int vy = 0, vm = 0, vd = 0;
-                if (std::sscanf(activeSelectedDateStr.String(), "%d-%d-%d", &vy, &vm, &vd) == 3) {
-                    cellTm.tm_year = vy - 1900;
-                    cellTm.tm_mon  = vm - 1;
-                    cellTm.tm_mday = vd;
+                std::sscanf(activeSelectedDateStr.String(), "%d-%d-%d", &vy, &vm, &vd);
+            }
+            
+            cellTm.tm_year = vy - 1900;
+            cellTm.tm_mon  = vm - 1;
+            cellTm.tm_mday = vd;
+            cellTm.tm_hour = hours;
+            cellTm.tm_min  = minutes;
+
+            // =========================================================================
+            //  CRITICAL FE: MATRIX DRAWER DATE ROLLOVER ENGINE
+            // =========================================================================
+            // Read the main view's base hour control value to evaluate late night grids
+            int baseWindowHour = 12;
+            if (owner != nullptr && owner->Window() != nullptr) { // FIX: Use owner->Window() instead of Window()
+                BTextControl* timeInput = dynamic_cast<BTextControl*>(owner->Window()->FindView("time_input"));
+                if (timeInput != nullptr && timeInput->Text() != nullptr) {
+                    int parsedH = 12, parsedM = 0;
+                    BString rawT(timeInput->Text());
+                    if (std::sscanf(rawT.String(), "%d:%d", &parsedH, &parsedM) >= 1) {
+                        if (rawT.IFindFirst("PM") != B_ERROR && parsedH < 12) parsedH += 12;
+                        baseWindowHour = parsedH;
+                    }
                 }
             }
+
+            // If the view context is late evening (10 PM or 11 PM) 
+            // but this specific grid cell falls in the morning (12 AM - 4:59 AM)
+            if (baseWindowHour >= 22 && hours >= 0 && hours < 5) {
+                cellTm.tm_mday += 1; // Advance timeline cell cleanly to tomorrow's date!
+            }
+            // =========================================================================
+
             
             time_t cellEpochTime = std::mktime(&cellTm);
 
@@ -1800,9 +1823,10 @@ public:
                     // =========================================================================
                     // TERMINAL DIAGNOSTIC VERIFICATION PRINT LAYER
                     // =========================================================================
-                    if (channelMatch && titleMatch) {
+                    if (channelMatch && titleMatch && cfg.debugEnable) {
+                        std::tm* safeCheckTm = std::localtime(&cellEpochTime);
                         std::cout << "\n[GUIDE MATCH DEBUG] Target Channel: " << targetChannel << "\n"
-                                  << "  -> Grid View Date:    " << activeSelectedDateStr.String() << " @ " << hours << ":" << (minutes < 10 ? "0" : "") << minutes << "\n"
+                                  << "  -> Grid View Date Structure: " << (safeCheckTm->tm_year + 1900) << "-" << (safeCheckTm->tm_mon + 1) << "-" << safeCheckTm->tm_mday << " @ " << hours << ":" << (minutes < 10 ? "0" : "") << minutes << "\n"
                                   << "  -> Computed Cell Epoch: " << cellEpochTime << "\n"
                                   << "  -> Schedule Item Title: " << gScheduleList[i].showTitle << "\n"
                                   << "  -> Schedule Date/Time:  " << gScheduleList[i].startDate << " @ " << gScheduleList[i].startTime << "\n"
@@ -1812,6 +1836,7 @@ public:
                                   << "------------------------------------------------------------" << std::endl;
                     }
                     // =========================================================================
+
 
                     // FIX: Requires all three parameters to align perfectly
                     if (channelMatch && titleMatch && timeMatch) {
@@ -2263,11 +2288,78 @@ public:
                                 targetTimeStr = adjustedBuffer;
                             }
 
+                            // =========================================================================
+                            //  STRUCTURAL FIX: STRING BUFFER STRING CORRECTION (COMPILATION REBALANCED)
+                            // =========================================================================
+                            int32 finalRecordYear = 2026;
+                            int32 finalRecordMonth = 6;
+                            int32 finalRecordDay = 25;
+                            bool automaticallyAdvanceRecordDate = false;
+
+                            // 1. Extract base date directly from the UI view text control
+                            if (Window() != nullptr) {
+                                BTextControl* dateInput = dynamic_cast<BTextControl*>(Window()->FindView("date_input"));
+                                if (dateInput != nullptr && dateInput->Text() != nullptr) {
+                                    std::sscanf(dateInput->Text(), "%d-%d-%d", &finalRecordYear, &finalRecordMonth, &finalRecordDay);
+                                }
+                            }
+
+                            // 2. Extract and evaluate the program's literal start time characters
+                            BString internalTimeRaw = targetProg.timeDisplay;
+                            int32 parsedProgHour = 12;
+                            int32 parsedProgMin = 0;
+                            char parsedAmPm[16] = {0};
+
+                            if (std::sscanf(internalTimeRaw.String(), "%d:%d %15s", &parsedProgHour, &parsedProgMin, parsedAmPm) >= 2) {
+                                BString ampmCheck(parsedAmPm);
+                                if (ampmCheck.IFindFirst("AM") != B_ERROR && parsedProgHour == 12) {
+                                    parsedProgHour = 0;
+                                }
+                                if (ampmCheck.IFindFirst("PM") != B_ERROR && parsedProgHour < 12) {
+                                    parsedProgHour += 12;
+                                }
+                            } else {
+                                std::sscanf(internalTimeRaw.String(), "%d:%d", &parsedProgHour, &parsedProgMin);
+                            }
+
+                            // If the program starts between 12:00 AM (0) and 4:59 AM (4), 
+                            // it must roll forward to the next calendar date to avoid past epoch bugs
+                            if (parsedProgHour >= 0 && parsedProgHour < 5) {
+                                automaticallyAdvanceRecordDate = true;
+                                
+                                std::tm rolloverBox = {0};
+                                rolloverBox.tm_year = finalRecordYear - 1900;
+                                rolloverBox.tm_mon  = finalRecordMonth - 1;
+                                rolloverBox.tm_mday = finalRecordDay + 1; // Explicitly step forward 1 day
+                                rolloverBox.tm_hour = 12;
+                                rolloverBox.tm_isdst = -1;
+                                
+                                std::time_t normalizedEpoch = std::mktime(&rolloverBox);
+                                if (normalizedEpoch != (std::time_t)-1) {
+                                    std::tm* safeTm = std::localtime(&normalizedEpoch);
+                                    finalRecordYear = safeTm->tm_year + 1900;
+                                    finalRecordMonth = safeTm->tm_mon + 1;
+                                    finalRecordDay = safeTm->tm_mday;
+                                }
+                            }
+                            // =========================================================================
+
+                            // FIX: Properly declared char array buffer size
+                            char localizedDateBuf[32] = {0};
+                            std::snprintf(localizedDateBuf, sizeof(localizedDateBuf), "%04d-%02d-%02d", 
+                                          finalRecordYear, finalRecordMonth, finalRecordDay);
+
                             selectionBroadcast.AddString("start_time", targetTimeStr.String());
+                            selectionBroadcast.AddString("computed_target_date", localizedDateBuf);
                             selectionBroadcast.AddBool("auto_commit_queue", true);
+                            selectionBroadcast.AddBool("advance_calendar_day", automaticallyAdvanceRecordDate);
                             
                             fParentShortcutTarget->PostMessage(&selectionBroadcast);
                         }
+
+
+                       
+
 
                         else if (removeItem != nullptr && selectedItem == removeItem) {
                             BMessage removeMsg(MSG_REMOVE_SCHEDULE);
@@ -2658,11 +2750,22 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         if (std::sscanf(rawTimeText.String(), "%d:%d", &parsedHour, &parsedMin) >= 1) {
             targetHour = parsedHour;
             targetMin = parsedMin;
+            
+            // =========================================================================
+            //  24-HOUR MILITARY TIME ENFORCEMENT
+            // =========================================================================
             if (rawTimeText.IFindFirst("PM") != B_ERROR && targetHour < 12) {
                 targetHour += 12;
             } else if (rawTimeText.IFindFirst("AM") != B_ERROR && targetHour == 12) {
                 targetHour = 0;
+            } else if (targetHour >= 1 && targetHour <= 11 && rawTimeText.IFindFirst("AM") == B_ERROR) {
+                // Fallback: If no explicit AM/PM marker is found in the input string, 
+                // but the hour matches a standard evening grid slice, step it to 24-hr.
+                if (targetHour >= 5 && targetHour <= 11) {
+                    targetHour += 12;
+                }
             }
+            // =========================================================================
         }
     }
 
@@ -2672,19 +2775,10 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         targetMin = 30;
     }
 
-    std::tm targetTimeBox = {0};
-    targetTimeBox.tm_year = targetYear - 1900;
-    targetTimeBox.tm_mon  = targetMonth - 1;
-    targetTimeBox.tm_mday = targetDay;
-    targetTimeBox.tm_hour = targetHour;
-    targetTimeBox.tm_min  = targetMin;
-    targetTimeBox.tm_sec  = 0;
-    targetTimeBox.tm_isdst = -1; 
-    std::time_t targetComparisonEpoch = std::mktime(&targetTimeBox);
-    
     // =========================================================================
     //  CONFIGURATION CORRECTION: SEPARATE MASTER CACHE FROM THE TARGET CHUNK
     // =========================================================================
+
 
     std::string xmlCachePath = "/boot/home/config/settings/HaikuDVR/guide.xml"; 
     std::string masterXmlPath = "/boot/home/config/settings/HaikuDVR/guide_master.xml"; 
@@ -3229,10 +3323,41 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                         progEndEpoch += 86400; 
                     }
 
-                    auto& activeItem = cloudGuideMap[associatedChNum];
+                             auto& activeItem = cloudGuideMap[associatedChNum];
 
                     for (int32 bucket = 0; bucket < 4; bucket++) {
-                        std::time_t bucketTargetEpoch = targetComparisonEpoch + (bucket * 30 * 60);
+                        // =========================================================================
+                        //  FIX: DYNAMIC CELL MIDNIGHT ROLLOVER MATRIX CALCULATOR
+                        // =========================================================================
+                        std::tm bucketTimeBox = {0};
+                        bucketTimeBox.tm_year = targetYear - 1900;
+                        bucketTimeBox.tm_mon  = targetMonth - 1;
+                        bucketTimeBox.tm_mday = targetDay;
+                        bucketTimeBox.tm_hour = targetHour;
+                        bucketTimeBox.tm_min  = targetMin + (bucket * 30); 
+                        bucketTimeBox.tm_sec  = 0;
+                        bucketTimeBox.tm_isdst = -1;
+
+                        std::time_t bucketTargetEpoch = std::mktime(&bucketTimeBox);
+                        // =========================================================================
+
+                        // Target specifically the problematic midnight show slots to prevent floods
+                        if (titleText.find("Jimmy Kimmel") != std::string::npos || titleText.find("Fallon") != std::string::npos) {
+                            std::tm* debugBucketTm = std::localtime(&bucketTargetEpoch);
+                            std::tm* debugProgStartTm = std::localtime(&progStartEpoch);
+                            std::tm* debugProgEndTm = std::localtime(&progEndEpoch);
+                            
+                            std::printf("[DVR GRID DEBUG] Evaluating Show: %s\n", titleText.c_str());
+                            std::printf("  -> UI Grid Column Bucket: %d\n", bucket);
+                            std::printf("  -> Calculated Grid Column Local Time: %02d:%02d (Day %d)\n", 
+                                        debugBucketTm->tm_hour, debugBucketTm->tm_min, debugBucketTm->tm_mday);
+                            std::printf("  -> Show Data Bounds Local Time: %02d:%02d to %02d:%02d (Day %d)\n", 
+                                        debugProgStartTm->tm_hour, debugProgStartTm->tm_min, 
+                                        debugProgEndTm->tm_hour, debugProgEndTm->tm_min, debugProgStartTm->tm_mday);
+                            std::printf("  -> [EVALUATION] Epoch Check: Grid(%ld) >= Start(%ld) && Grid(%ld) < End(%ld) -> RESULT: %s\n",
+                                        (long)bucketTargetEpoch, (long)progStartEpoch, (long)bucketTargetEpoch, (long)progEndEpoch,
+                                        (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) ? "MATCHED" : "SKIPPED");
+                        }
 
                         if (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) {
                             
@@ -3263,8 +3388,10 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                             } else {
                                 while ((int32)activeItem.futureLineup.size() < bucket) {
                                     UpcomingShowItem placeholder;
-                                    placeholder.title = "To Be Announced";                                    
-                                    std::time_t placeholderEpoch = targetComparisonEpoch + ((activeItem.futureLineup.size() + 1) * 30 * 60);
+                                    placeholder.title = "To Be Announced";  
+                                    placeholder.durationMinutes = 30;
+                                    
+                                    std::time_t placeholderEpoch = bucketTargetEpoch; 
                                     std::tm* pTime = std::localtime(&placeholderEpoch);
                                     char pBuf[32] = {0};
                                     std::strftime(pBuf, sizeof(pBuf), "%I:%M %p", pTime);
@@ -3276,7 +3403,6 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                                     placeholder.startTimeStr = formattedPTime.String();
                                     placeholder.endTimeStr = "";
                                     placeholder.description = "";
-                                    placeholder.durationMinutes = 30;
                                     activeItem.futureLineup.push_back(placeholder);
                                 }
 
@@ -3291,6 +3417,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                             }
                         }
                     }
+
                 }
                 progChanId = "";
                 progStartRaw = "";
@@ -3298,7 +3425,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                 titleText = "";
                 descText = "";
             }
-        } // FIX: Properly closes the standard while (std::getline(...)) loop block
+        } 
         xmlFile.close();
     }
 
@@ -4372,7 +4499,7 @@ public:
 
 
 
-     case MSG_PREFILL_RECORD_SCHEDULE: {
+    case MSG_PREFILL_RECORD_SCHEDULE: {
         BString showTitle, startTime, channelLabel, numericSubchannel;
         int32 durationMinutes = 0;
         
@@ -4482,7 +4609,7 @@ public:
             trackingNotice << showTitle;
             fStatusLabel->SetText(trackingNotice.String());
 
-            bool autoCommit = false;
+                     bool autoCommit = false;
             if (message->FindBool("auto_commit_queue", &autoCommit) == B_OK && autoCommit) {
                 std::string rawTime = processedTime.String();
 
@@ -4491,14 +4618,12 @@ public:
                 }
 
                 if (rawTime.length() == 5 && rawTime.at(0) == '0') {
-                    // uncomment the line below if your database expects "5:30" instead of "05:30"
                     // rawTime = rawTime.substr(1); 
                 }
                 
                 if (fTimeInput != nullptr) {
                     fTimeInput->SetText(rawTime.c_str());
                 }
-
                 
                 if (fSelectedDurationSeconds.empty() || fSelectedDurationSeconds == "0ss" || fSelectedDurationSeconds == "0s") {
                     if (fDurationMenu != nullptr && fDurationMenu->FindMarked() != nullptr) {
@@ -4524,8 +4649,51 @@ public:
                     fSelectedDurationSeconds = fSelectedDurationSeconds.substr(0, sPos); 
                 }
 
+                // =========================================================================
+                //  UNIFIED COUPLING FIX: AUTO-COMMIT DATE CALCULATION SYNC ENGINE
+                // =========================================================================
+                BString finalizedRecordDate = "";
+                BString incomingComputedDateToken;
+                
+                // Prioritize the verified target date pre-computed by our grid selection handler
+                if (message->FindString("computed_target_date", &incomingComputedDateToken) == B_OK && !incomingComputedDateToken.IsEmpty()) {
+                    finalizedRecordDate = incomingComputedDateToken;
+                    if (fDateInput != nullptr) {
+                        fDateInput->SetText(incomingComputedDateToken.String()); // Synchronize UI box
+                    }
+                } 
+                // Fallback approach using message flags if string extraction was bypassed
+                else {
+                    finalizedRecordDate = (fDateInput != nullptr) ? fDateInput->Text() : "";
+                    bool advanceCalendarDayFlag = false;
+                    if (message->FindBool("advance_calendar_day", &advanceCalendarDayFlag) == B_OK && advanceCalendarDayFlag) {
+                        int parsedYear = 2026, parsedMonth = 6, parsedDay = 25;
+                        if (std::sscanf(finalizedRecordDate.String(), "%d-%d-%d", &parsedYear, &parsedMonth, &parsedDay) == 3) {
+                            std::tm rolloverTimeBox = {0};
+                            rolloverTimeBox.tm_year = parsedYear - 1900;
+                            rolloverTimeBox.tm_mon  = parsedMonth - 1;
+                            rolloverTimeBox.tm_mday = parsedDay + 1; // Bump calendar day forward explicitly
+                            rolloverTimeBox.tm_hour = 12;
+                            rolloverTimeBox.tm_isdst = -1;
+                            
+                            std::time_t normalizedFutureEpoch = std::mktime(&rolloverTimeBox);
+                            if (normalizedFutureEpoch != (std::time_t)-1) {
+                                std::tm* safeFutureTm = std::localtime(&normalizedFutureEpoch);
+                                char rebalancedDateBuf[32];
+                                std::strftime(rebalancedDateBuf, sizeof(rebalancedDateBuf), "%Y-%m-%d", safeFutureTm);
+                                finalizedRecordDate = rebalancedDateBuf;
+                                
+                                if (fDateInput != nullptr) {
+                                    fDateInput->SetText(rebalancedDateBuf);
+                                }
+                            }
+                        }
+                    }
+                }
+                // =========================================================================
+
                 ScheduleItem item;
-                item.startDate = fDateInput->Text(); 
+                item.startDate = finalizedRecordDate.String(); // Clean tomorrow target applied safely
                 item.startTime = rawTime; 
                 item.channel = fChannelInput->Text();
                 item.duration = fSelectedDurationSeconds; 
@@ -4551,6 +4719,7 @@ public:
                 std::string confMsg = "Queued for " + item.startTime + " (Ch " + item.channel + ")";
                 fStatusLabel->SetText(confMsg.c_str());
             }
+
         }
         break;
     }
