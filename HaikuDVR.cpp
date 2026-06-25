@@ -46,16 +46,18 @@
 #include <stdlib.h>
 #include <Notification.h>
 #include <Alert.h>
-#include <app/MessageRunner.h>
+#include <MessageRunner.h>
 #include <StorageKit.h>
 #include <StringList.h>
 #include <Screen.h>
 #include <dirent.h>
 #include <unistd.h>
-
+#include <iomanip>
+#include <sstream>
+#include <iostream>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.16 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.17 (Haiku OS)";
 }
 
 
@@ -155,15 +157,18 @@ struct RecordingConfig {
 };
 
 struct ScheduleItem {
-    std::string startDate; 
-    std::string startTime; 
+    std::string startDate;
+    std::string startTime;     // Human-readable serialization string ("19:00")
+    time_t      epochStart;    // Absolute Unix epoch timestamp
+    int64       durationSec;   // Length in integer seconds
+    std::string duration;      // Human-readable serialization string ("10800")
     std::string channel;
-    std::string duration; 
+    std::string channelLabel;  // FIX: Add this missing member variable!
+    std::string tunerIp;
     std::string showTitle;
-    std::string channelLabel;  
-    bool processed;
-    std::string tunerIp; 
+    bool        processed;
 };
+
 
 struct UpcomingShowItem {
     std::string title;
@@ -209,8 +214,7 @@ void SaveSchedulesToDisk() {
     
     json jRoot = json::object();
     
-    jRoot["save_directory"] 		   = gGlobalSaveDirectory;     
-    
+    jRoot["save_directory"]            = gGlobalSaveDirectory;     
     jRoot["show_update_notifications"] = cfg.showUpdateNotifications; 
     jRoot["debug_enable"]              = cfg.debugEnable;
     jRoot["enable_fullscreen"]         = cfg.fullscreenEnable;
@@ -223,7 +227,9 @@ void SaveSchedulesToDisk() {
                 {"date", item.startDate}, 
                 {"time", item.startTime},
                 {"channel", item.channel},
+                {"channel_label", item.channelLabel}, // Added to preserve UI labels
                 {"duration", item.duration},
+                {"processed", item.processed},       // Added to track state safely
                 {"tuner_ip", item.tunerIp},
                 {"show_title", item.showTitle}
             });
@@ -239,6 +245,22 @@ void SaveSchedulesToDisk() {
     }
 }
 
+
+
+
+// Helper utility to generate absolute epoch time from the file strings
+// Add this helper function at the top of your file if it's missing
+static time_t CalculateEpoch(const std::string& dateStr, const std::string& timeStr) {
+    std::string fullDateTimeStr = dateStr + " " + timeStr;
+    std::tm tm_struct = {};
+    std::istringstream ss(fullDateTimeStr);
+    ss >> std::get_time(&tm_struct, "%Y-%m-%d %H:%M");
+    if (!ss.fail()) {
+        tm_struct.tm_isdst = -1; // Let the system handle DST transitions natively
+        return std::mktime(&tm_struct);
+    }
+    return 0; 
+}
 
 void LoadSchedulesFromDisk() {
     std::ifstream file(kSettingsFilePath);
@@ -260,13 +282,19 @@ void LoadSchedulesFromDisk() {
                 gScheduleList.clear();
                 for (const auto& entry : jIn["schedules"]) {
                     ScheduleItem item;
-                    item.startDate = entry.value("date", "2026-06-23"); 
-                    item.startTime = entry.value("time", "12:00");
-                    item.channel   = entry.value("channel", "5.1");
-                    item.duration  = entry.value("duration", "1800");
-                    item.tunerIp   = entry.value("tuner_ip", ""); 
-                    item.showTitle = entry.value("show_title", "Unknown_Show");
-                    item.processed = false;
+                    item.startDate    = entry.value("date", "2026-06-23"); 
+                    item.startTime    = entry.value("time", "12:00");
+                    item.channel      = entry.value("channel", "5.1");
+                    item.channelLabel = entry.value("channel_label", ""); // Added
+                    item.duration     = entry.value("duration", "1800");
+                    item.tunerIp      = entry.value("tuner_ip", ""); 
+                    item.showTitle    = entry.value("show_title", "Unknown_Show");
+                    item.processed    = entry.value("processed", false);   // Added
+
+                    // Added computation conversions for our layout math engine
+                    item.durationSec  = std::atoll(item.duration.c_str());
+                    item.epochStart   = CalculateEpoch(item.startDate, item.startTime);
+
                     gScheduleList.push_back(item);
                 }
             }
@@ -280,13 +308,19 @@ void LoadSchedulesFromDisk() {
             gScheduleList.clear();
             for (const auto& entry : jIn) {
                 ScheduleItem item;
-                item.startDate = entry.value("date", "2026-06-23"); 
-                item.startTime = entry.value("time", "12:00");
-                item.channel   = entry.value("channel", "5.1");
-                item.duration  = entry.value("duration", "1800");
-                item.tunerIp   = entry.value("tuner_ip", "");
-                item.showTitle = entry.value("show_title", "Unknown_Show"); 
-                item.processed = false;
+                item.startDate    = entry.value("date", "2026-06-23"); 
+                item.startTime    = entry.value("time", "12:00");
+                item.channel      = entry.value("channel", "5.1");
+                item.channelLabel = entry.value("channel_label", ""); // Added
+                item.duration     = entry.value("duration", "1800");
+                item.tunerIp      = entry.value("tuner_ip", "");
+                item.showTitle    = entry.value("show_title", "Unknown_Show"); 
+                item.processed    = entry.value("processed", false);   // Added
+
+                // Added computation conversions for our layout math engine
+                item.durationSec  = std::atoll(item.duration.c_str());
+                item.epochStart   = CalculateEpoch(item.startDate, item.startTime);
+
                 gScheduleList.push_back(item);
             }
         }
@@ -297,6 +331,7 @@ void LoadSchedulesFromDisk() {
     }
     file.close();
 }
+
 
 
 
@@ -1703,145 +1738,193 @@ public:
                 normalizedCellTime = displayTimeText.String(); 
             }
 
-            // F. Compare entries with the active recording scheduling queue
+
+
+
+            // =========================================================================
+            // F. Compare entries with the active recording scheduling queue (DIRECT FIX)
+            // =========================================================================
             bool isScheduled = false;
+
+            std::tm cellTm = *localToday; 
+            cellTm.tm_hour  = hours;
+            cellTm.tm_min   = minutes;
+            cellTm.tm_sec   = 0;
+            cellTm.tm_isdst = -1; 
+
+            BString activeSelectedDateStr = "";
+            if (owner != nullptr) {
+                activeSelectedDateStr = currentViewDateStr.c_str(); 
+            }
+
+            // Fallback: If currentViewDateStr was empty, look through the database queue matches
+            if (activeSelectedDateStr.IsEmpty()) {
+                for (size_t i = 0; i < gScheduleList.size(); i++) {
+                   if (gScheduleList[i].channel == targetChannel && gScheduleList[i].showTitle == prog.title.String()) {
+                        activeSelectedDateStr = gScheduleList[i].startDate.c_str();
+                        break;
+                    }
+                }
+            }
+
+            // Last resort safety fallback: default to the first available schedule
+            if (activeSelectedDateStr.IsEmpty() && !gScheduleList.empty()) {
+                activeSelectedDateStr = gScheduleList[0].startDate.c_str();
+            }
+
+            if (!activeSelectedDateStr.IsEmpty()) {
+                int vy = 0, vm = 0, vd = 0;
+                if (std::sscanf(activeSelectedDateStr.String(), "%d-%d-%d", &vy, &vm, &vd) == 3) {
+                    cellTm.tm_year = vy - 1900;
+                    cellTm.tm_mon  = vm - 1;
+                    cellTm.tm_mday = vd;
+                }
+            }
+            
+            time_t cellEpochTime = std::mktime(&cellTm);
+
+            // Loop through schedules
             for (size_t i = 0; i < gScheduleList.size(); i++) {
                 if (!gScheduleList[i].processed) {
-                    bool channelMatch = (gScheduleList[i].channel.find(targetChannel) != std::string::npos);
-                    bool timeMatch = (gScheduleList[i].startTime == normalizedCellTime);
-                    bool dateMatch = currentViewDateStr.empty() ? true : (gScheduleList[i].startDate == currentViewDateStr);
+                    // Check exact channel match ("11.1" == "11.1")
+                    bool channelMatch = (gScheduleList[i].channel == targetChannel);
+                    
+                    // FIX: Validate the program text name matches the scheduled title 
+                    // This prevents long recordings from bleeding into different television shows!
+                    bool titleMatch = (gScheduleList[i].showTitle == prog.title.String());
+                    
+                    time_t recordStart = gScheduleList[i].epochStart;
+                    time_t recordEnd   = recordStart + gScheduleList[i].durationSec;
+                    bool timeMatch = (cellEpochTime >= recordStart && cellEpochTime < recordEnd);
 
-                    if (channelMatch && timeMatch && dateMatch) {
+                    // =========================================================================
+                    // TERMINAL DIAGNOSTIC VERIFICATION PRINT LAYER
+                    // =========================================================================
+                    if (channelMatch && titleMatch) {
+                        std::cout << "\n[GUIDE MATCH DEBUG] Target Channel: " << targetChannel << "\n"
+                                  << "  -> Grid View Date:    " << activeSelectedDateStr.String() << " @ " << hours << ":" << (minutes < 10 ? "0" : "") << minutes << "\n"
+                                  << "  -> Computed Cell Epoch: " << cellEpochTime << "\n"
+                                  << "  -> Schedule Item Title: " << gScheduleList[i].showTitle << "\n"
+                                  << "  -> Schedule Date/Time:  " << gScheduleList[i].startDate << " @ " << gScheduleList[i].startTime << "\n"
+                                  << "  -> Record Window Epoch: " << recordStart << " to " << recordEnd << "\n"
+                                  << "  -> Time Evaluated Match: " << (timeMatch ? "TRUE (RED)" : "FALSE") << "\n"
+                                  << "  -> Math Delta (Cell - RecordStart): " << (cellEpochTime - recordStart) << " seconds\n"
+                                  << "------------------------------------------------------------" << std::endl;
+                    }
+                    // =========================================================================
+
+                    // FIX: Requires all three parameters to align perfectly
+                    if (channelMatch && titleMatch && timeMatch) {
                         isScheduled = true;
                         break;
                     }
                 }
             }
 
+
             // =========================================================================
             // G. DRAW MATRIX CARD BACKGROUND SHAPES & INTERACTIVE HOVER GLOWS
             // =========================================================================
-            rgb_color normalCellBg    = { 26, 26, 26, 255 };      // Deep charcoal card backing
-            rgb_color standardBorder  = { 45, 45, 45, 255 };      // Subtle clean card separator grid
-            rgb_color scheduledBgColor = { 75, 20, 20, 255 };     // Rich crimson backing for recording element
-            rgb_color borderRed        = { 220, 40, 40, 255 };    // High-visibility scarlet red stroke
+            rgb_color normalCellBg    = { 26, 26, 26, 255 };      
+            rgb_color standardBorder  = { 45, 45, 45, 255 };      
+            rgb_color scheduledBgColor = { 75, 20, 20, 255 };     
+            rgb_color borderRed        = { 220, 40, 40, 255 };    
             
-            rgb_color glowBorderColor = { 0, 210, 210, 255 };     // Vivid neon teal tracking boundary
-            rgb_color glowInnerColor  = { 12, 45, 45, 255 };      // Soft glowing teal canvas blend
+            rgb_color glowBorderColor = { 0, 210, 210, 255 };     
+            rgb_color glowInnerColor  = { 12, 45, 45, 255 };      
 
+            // ISOLATION BLOCK 1: Card Shapes Canvas
+            owner->PushState();
             if (isScheduled) {
-                owner->PushState(); 
                 owner->SetHighColor(scheduledBgColor);
                 owner->FillRect(cellRect);
                 owner->SetLowColor(scheduledBgColor);
             } else {
-                if ((int32)idx == fHoveredCellIndex) {
-                    owner->SetHighColor(glowInnerColor);
-                } else {
-                    owner->SetHighColor(normalCellBg);
-                }
+                owner->SetHighColor(((int32)idx == fHoveredCellIndex) ? glowInnerColor : normalCellBg);
                 owner->FillRect(cellRect);
-                owner->SetLowColor((int32)idx == fHoveredCellIndex ? glowInnerColor : normalCellBg);
+                owner->SetLowColor(((int32)idx == fHoveredCellIndex) ? glowInnerColor : normalCellBg);
             }
+            owner->PopState();
 
-            // Draw Outline Framing Graphics
+            // ISOLATION BLOCK 2: Vector Framing Boundaries
+            owner->PushState();
             if (isScheduled) {
-                if ((int32)idx == fHoveredCellIndex) {
-                    owner->SetHighColor(glowBorderColor); 
-                } else {
-                    owner->SetHighColor(borderRed);
-                }
+                owner->SetHighColor(((int32)idx == fHoveredCellIndex) ? glowBorderColor : borderRed);
                 owner->StrokeRect(cellRect);
                 owner->StrokeRect(cellRect.InsetByCopy(1.0, 1.0)); 
             } else {
+                owner->SetHighColor(((int32)idx == fHoveredCellIndex) ? glowBorderColor : standardBorder);
+                owner->StrokeRect(cellRect);
                 if ((int32)idx == fHoveredCellIndex) {
-                    owner->SetHighColor(glowBorderColor);
-                    owner->StrokeRect(cellRect);
-                    owner->StrokeRect(cellRect.InsetByCopy(1.0, 1.0)); 
-                } else {
-                    owner->SetHighColor(standardBorder);
-                    owner->StrokeRect(cellRect);
+                    owner->StrokeRect(cellRect.InsetByCopy(1.0, 1.0));
                 }
             }
+            owner->PopState();
 
             // =========================================================================
             // H. FIELD STRINGS PLACEMENTS (WITH TIME RANGES & SYNOPSIS)
             // =========================================================================
-            BFont timeFont;
-            owner->GetFont(&timeFont);
-            timeFont.SetFace(B_REGULAR_FACE);
-            timeFont.SetSize(10.0); 
-            owner->SetFont(&timeFont);
-
-            if (isScheduled) {
-                owner->SetHighColor(255, 140, 140, 255);
-            } else {
-                owner->SetHighColor(140, 140, 140, 255); 
-            }
-
-            // Read the end time directly from the local block structure
+            
             BString endString = prog.endTimeStr;
             if (endString.IsEmpty()) {
                 time_t estEndEpoch = rawToday + (idx * 30 * 60) + (30 * 60);
                 struct tm* estTm = std::localtime(&estEndEpoch);
-                
                 char estBuf[32] = {0}; 
                 std::strftime(estBuf, sizeof(estBuf), "%I:%M %p", estTm);
                 endString = estBuf;
                 if (endString.StartsWith("0")) { endString.Remove(0, 1); }
             }
-
             BString timeRangeStr;
             timeRangeStr.SetToFormat("%s - %s", displayTimeText.String(), endString.String());
 
+            // ISOLATION BLOCK 3: Timeline Metadata Text
+            owner->PushState();
+            BFont timeFont;
+            owner->GetFont(&timeFont);
+            timeFont.SetFace(B_REGULAR_FACE);
+            timeFont.SetSize(10.0); 
+            owner->SetFont(&timeFont);
+            owner->SetHighColor(isScheduled ? rgb_color{255, 140, 140, 255} : rgb_color{140, 140, 140, 255});
             owner->MovePenTo(cellRect.left + 20, cellRect.top + 28);
             owner->DrawString(timeRangeStr.String()); 
+            owner->PopState();
 
-            // B. Draw Bold Program Title
+            // ISOLATION BLOCK 4: Program Header Title
+            owner->PushState();
             BFont titleFont;
             owner->GetFont(&titleFont);
             titleFont.SetFace(B_BOLD_FACE);
             titleFont.SetSize(12.0); 
             owner->SetFont(&titleFont);
-
-            if (isScheduled) {
-                owner->SetHighColor(255, 255, 255, 255); 
-            } else {
-                owner->SetHighColor(textColor);         
-            }
-
+            owner->SetHighColor(isScheduled ? rgb_color{255, 255, 255, 255} : textColor);         
             owner->MovePenTo(cellRect.left + 20, cellRect.top + 50);
             BString truncatedTitle = prog.title;
             owner->TruncateString(&truncatedTitle, B_TRUNCATE_END, cellRect.Width() - 32);
             owner->DrawString(truncatedTitle.String());
+            owner->PopState();
 
-            // C. Draw Description Synopsis Text Paragraph
+            // ISOLATION BLOCK 5: Block Summary Narrative Text
+            owner->PushState();
             BFont descFont;
             owner->GetFont(&descFont);
             descFont.SetFace(B_ITALIC_FACE);
             descFont.SetSize(11.0); 
             owner->SetFont(&descFont);
-
-            if (isScheduled) {
-                owner->SetHighColor(220, 200, 200, 255); 
-            } else {
-                owner->SetHighColor(170, 170, 170, 255); 
-            }
-
+            owner->SetHighColor(isScheduled ? rgb_color{220, 200, 200, 255} : rgb_color{170, 170, 170, 255});
             owner->MovePenTo(cellRect.left + 20, cellRect.top + 72);
-            
             BString shortDesc = prog.description;
             if (shortDesc.IsEmpty()) { 
                 shortDesc = "No further program description text details provided by broadcaster."; 
             }
-            
             owner->TruncateString(&shortDesc, B_TRUNCATE_END, cellRect.Width() - 32);
             owner->DrawString(shortDesc.String());
+            owner->PopState();
 
             // =========================================================================
             // I. EXTRA LAYER FLAGS (RECORD BADGES ACCENT)
             // =========================================================================
             if (isScheduled) {
+                owner->PushState(); 
                 owner->SetHighColor(255, 60, 60, 255);
                 BFont badgeFont;
                 owner->GetFont(&badgeFont);
@@ -1853,13 +1936,14 @@ public:
                 float badgeY = cellRect.top + 28; 
                 owner->MovePenTo(badgeX, badgeY);
                 owner->DrawString("[REC]");
-
                 owner->PopState(); 
             }
 
             currentLeft += standardStepWidth;
         }
         gScheduleLocker.Unlock();
+
+
 
         owner->SetHighColor(gridLineColor);
         owner->StrokeLine(BPoint(itemRect.left, itemRect.bottom), BPoint(itemRect.right, itemRect.bottom));
@@ -2968,25 +3052,57 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
     
     chunksToScan.push_back(tomorrowChunkPath);
 
-    std::string progChanId = "";
-    std::string progStartRaw = "";
-    std::string progEndRaw = "";
-    std::string titleText = "";
-    std::string descText = ""; 
-
     for (const auto& activeChunkPath : chunksToScan) {
         std::ifstream xmlFile(activeChunkPath.c_str());
         if (!xmlFile.is_open()) {
             continue; 
         }
 
-        bool isScanningTomorrowFile = (activeChunkPath == tomorrowChunkPath);
+        // Fix 1: Re-build channel ID mappings inside each document pass 
+        // to prevent tomorrow's lookups from failing with empty strings.
+        std::map<std::string, std::string> activeFileIdToNumMap;
+        std::string currentChannelId = "";
+        std::string xmlLine;
 
+        while (std::getline(xmlFile, xmlLine)) {
+            size_t chanPos = xmlLine.find("<channel id=\"");
+            if (chanPos != std::string::npos) {
+                size_t startIdx = chanPos + 13;
+                size_t endIdx = xmlLine.find("\"", startIdx);
+                if (endIdx != std::string::npos) {
+                    currentChannelId = xmlLine.substr(startIdx, endIdx - startIdx);
+                }
+                continue;
+            }
+
+            size_t lcnPos = xmlLine.find("<lcn>");
+            if (lcnPos != std::string::npos && !currentChannelId.empty()) {
+                size_t startIdx = lcnPos + 5;
+                size_t endIdx = xmlLine.find("</lcn>", startIdx);
+                if (endIdx != std::string::npos) {
+                    std::string lcnVal = xmlLine.substr(startIdx, endIdx - startIdx);
+                    activeFileIdToNumMap[currentChannelId] = lcnVal;
+                    
+                    if (cloudGuideMap.find(lcnVal) == cloudGuideMap.end()) {
+                        ChannelGuideItem item;
+                        item.guideNumber = lcnVal;
+                        item.nowPlaying  = "To Be Announced";
+                        item.nowPlayingDurationMinutes = 30;
+                        cloudGuideMap[lcnVal] = item;
+                    }
+                }
+                continue; 
+            }
+
+            if (xmlLine.find("<programme") != std::string::npos) {
+                break; 
+            }
+        }
 
         // =========================================================================
-        // LAMBDA: INTEGRATES SCAN CONTEXT TO CALCULATE BASELINE EPOCHS
+        // FIX 2: LAMBDA PLACED SECURELY IN OUTER LOOP SCOPE FOR COMPILER VISIBILITY
         // =========================================================================
-        auto parseXmlTimeToEpoch = [targetYear, targetMonth, targetDay, isScanningTomorrowFile](const std::string& rawXmlTime) -> std::time_t {
+        auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
             if (rawXmlTime.length() < 14) return 0;
             int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
             std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
@@ -2997,21 +3113,12 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
 
             std::tm tmTime = {0};
-            // Dynamically assign target day offsets matching the active file file chunk context rules
-            std::time_t baseEpochRef = std::time(nullptr);
-            std::tm* calcTm = std::localtime(&baseEpochRef);
-            calcTm->tm_year = targetYear - 1900;
-            calcTm->tm_mon  = targetMonth - 1;
-            calcTm->tm_mday = isScanningTomorrowFile ? (targetDay + 1) : targetDay;
-            std::time_t resolvedDayEpoch = std::mktime(calcTm);
-            std::tm* finalDayTm = std::localtime(&resolvedDayEpoch);
-
-            tmTime.tm_year = finalDayTm->tm_year;
-            tmTime.tm_mon  = finalDayTm->tm_mon;
-            tmTime.tm_mday = finalDayTm->tm_mday;
-            tmTime.tm_hour = h;
-            tmTime.tm_min  = m;
-            tmTime.tm_sec  = s;
+            tmTime.tm_year  = y - 1900;
+            tmTime.tm_mon   = mo - 1;
+            tmTime.tm_mday  = d;
+            tmTime.tm_hour  = h;
+            tmTime.tm_min   = m;
+            tmTime.tm_sec   = s;
             tmTime.tm_isdst = -1;
 
             long offsetSeconds = 0;
@@ -3039,19 +3146,16 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             long timezoneOffsetSeconds = localSeconds - utcSeconds;
             return localEpoch + timezoneOffsetSeconds - offsetSeconds;
         };
-        // =========================================================================
 
-        bool fastForwardToProgrammes = true;
+        std::string progChanId = "";
+        std::string progStartRaw = "";
+        std::string progEndRaw = "";
+        std::string titleText = "";
+        std::string descText = ""; 
 
+            // Step B: Loop through programs sequentially
+        // FIX: Ensure this is a standard while statement, NOT a do-while loop block!
         while (std::getline(xmlFile, xmlLine)) {
-            if (fastForwardToProgrammes) {
-                if (xmlLine.find("<programme") != std::string::npos) {
-                    fastForwardToProgrammes = false;
-                } else {
-                    continue;
-                }
-            }
-
             size_t progPos = xmlLine.find("<programme start=\"");
             if (progPos != std::string::npos) {
                 titleText = "";
@@ -3125,7 +3229,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                         progEndEpoch += 86400; 
                     }
 
-                                    auto& activeItem = cloudGuideMap[associatedChNum];
+                    auto& activeItem = cloudGuideMap[associatedChNum];
 
                     for (int32 bucket = 0; bucket < 4; bucket++) {
                         std::time_t bucketTargetEpoch = targetComparisonEpoch + (bucket * 30 * 60);
@@ -3194,13 +3298,9 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                 titleText = "";
                 descText = "";
             }
-        }
+        } // FIX: Properly closes the standard while (std::getline(...)) loop block
         xmlFile.close();
     }
-
-
-
-
 
 
 

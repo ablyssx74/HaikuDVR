@@ -15,6 +15,9 @@
 #include <signal.h>
 #include <unistd.h> 
 #include <map>
+#include <iomanip>
+#include <sstream>
+
 #include <nlohmann/json.hpp>
 #include "hdhomerun.h"
 
@@ -40,12 +43,15 @@ int32 gCancelRecording = 0;
 
 struct ScheduleItem {
     std::string startDate;
-    std::string startTime;
+    std::string startTime;     // Human-readable serialization string ("19:00")
+    time_t      epochStart;    // Absolute Unix epoch timestamp
+    int64       durationSec;   // Length in integer seconds
+    std::string duration;      // Human-readable serialization string ("10800")
     std::string channel;
-    std::string duration;
-    std::string showTitle; 
-    std::string tunerIp; 
-    bool processed;
+    std::string channelLabel;  // FIX: Add this missing member variable!
+    std::string tunerIp;
+    std::string showTitle;
+    bool        processed;
 };
 
 
@@ -105,6 +111,23 @@ std::vector<std::string> DiscoverAllTuners() {
 }
 
 
+
+
+
+// Unified helper utility to generate absolute epoch time from file strings
+static time_t CalculateEpoch(const std::string& dateStr, const std::string& timeStr) {
+    std::string fullDateTimeStr = dateStr + " " + timeStr;
+    std::tm tm_struct = {};
+    std::istringstream ss(fullDateTimeStr);
+    ss >> std::get_time(&tm_struct, "%Y-%m-%d %H:%M");
+    if (!ss.fail()) {
+        // FIX: Use standard tm structure field name
+        tm_struct.tm_isdst = -1; // Let the system handle DST transitions
+        return std::mktime(&tm_struct);
+    }
+    return 0; 
+}
+
 void LoadSchedulesFromDisk() {
     std::ifstream file(kSettingsFilePath);
     if (!file.is_open()) return;
@@ -127,13 +150,19 @@ void LoadSchedulesFromDisk() {
                 gScheduleList.clear();
                 for (const auto& entry : jIn["schedules"]) {
                     ScheduleItem item;
-                    item.startDate = entry.value("date", "2026-06-23"); 
-                    item.startTime = entry.value("time", "12:00");
-                    item.channel   = entry.value("channel", "5.1");
-                    item.duration  = entry.value("duration", "1800");                    
-                    item.tunerIp   = entry.value("tuner_ip", ""); 
-                    item.showTitle = entry.value("show_title", "Unknown_Show"); 
-                    item.processed = entry.value("processed", false);
+                    item.startDate    = entry.value("date", "2026-06-23"); 
+                    item.startTime    = entry.value("time", "12:00");
+                    item.channel      = entry.value("channel", "5.1");
+                    item.channelLabel = entry.value("channel_label", ""); // Track frontend labels safely
+                    item.duration     = entry.value("duration", "1800");                    
+                    item.tunerIp      = entry.value("tuner_ip", ""); 
+                    item.showTitle    = entry.value("show_title", "Unknown_Show"); 
+                    item.processed    = entry.value("processed", false);
+                    
+                    // Added calculation math metrics generation for background workers
+                    item.durationSec  = std::atoll(item.duration.c_str());
+                    item.epochStart   = CalculateEpoch(item.startDate, item.startTime);
+
                     gScheduleList.push_back(item);
                 }
             }
@@ -146,10 +175,13 @@ void LoadSchedulesFromDisk() {
 }
 
 
+
 void SaveSchedulesToDisk() {
     gScheduleLocker.Lock();
     
     json jRoot = json::object();
+    
+    // Assign directly since gGlobalSaveDirectory is a standard std::string in the backend
     jRoot["save_directory"] = gGlobalSaveDirectory;
     
     // --- BACKEND INJECT FRONTEND SETTINGS BACK INTO THE JSON OBJECT ---
@@ -164,6 +196,7 @@ void SaveSchedulesToDisk() {
             {"date", item.startDate},
             {"time", item.startTime},
             {"channel", item.channel},
+            {"channel_label", item.channelLabel}, // Preserve custom labels on export
             {"duration", item.duration},
             {"processed", item.processed},
             {"tuner_ip", item.tunerIp},
@@ -179,6 +212,7 @@ void SaveSchedulesToDisk() {
         file.close();
     }
 }
+
 
 
 size_t StorageWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
