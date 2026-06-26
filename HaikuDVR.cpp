@@ -57,7 +57,7 @@
 #include <iostream>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.19 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.20 (Haiku OS)";
 }
 
 
@@ -3042,17 +3042,22 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
 
             // 1. Calculate the user's local timezone offset seconds dynamically
             std::time_t zoneTimeNow = std::time(nullptr);
-            std::tm* localZoneCheck = std::localtime(&zoneTimeNow);
-            std::tm* utcZoneCheck = std::gmtime(&zoneTimeNow);
+            std::tm tmLocal = {};
+            std::tm tmUtc = {};
             
-            long localHourMetric = localZoneCheck->tm_hour + (localZoneCheck->tm_yday * 24);
-            long utcHourMetric = utcZoneCheck->tm_hour + (utcZoneCheck->tm_yday * 24);
-            long dynamicTimezoneOffsetSeconds = (localHourMetric - utcHourMetric) * 3600;
+            // Reentrant safety wrappers prevent memory corruption bugs
+            localtime_r(&zoneTimeNow, &tmLocal);
+            gmtime_r(&zoneTimeNow, &tmUtc);
+
+            std::time_t localEpochCheck = std::mktime(&tmLocal);
+            std::time_t utcEpochCheck = timegm(&tmUtc);
+            long dynamicTimezoneOffsetSeconds = localEpochCheck - utcEpochCheck;
 
             if (cfg.debugEnable) {
                 std::printf("[DVR CHUNK] Dynamic Timezone Offset Detected: %ld hours (%ld seconds)\n", 
                             dynamicTimezoneOffsetSeconds / 3600, dynamicTimezoneOffsetSeconds);
             }
+
 
             // 2. Parse and group program blocks by date in memory safely
             while (std::getline(masterStream, line)) {
@@ -3226,7 +3231,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             continue; 
         }
 
-        // Fix 1: Re-build channel ID mappings inside each document pass 
+        // Re-build channel ID mappings inside each document pass 
         // to prevent tomorrow's lookups from failing with empty strings.
         std::map<std::string, std::string> activeFileIdToNumMap;
         std::string currentChannelId = "";
@@ -3267,53 +3272,47 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
             }
         }
 
-        // =========================================================================
-        // FIX 2: LAMBDA PLACED SECURELY IN OUTER LOOP SCOPE FOR COMPILER VISIBILITY
-        // =========================================================================
-        auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
-            if (rawXmlTime.length() < 14) return 0;
-            int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
-            std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
-            std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
-            std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
-            std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
-            std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
-            std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
+			// =========================================================================
+			//  TIMEZONE-AWARE XML STRING TO EPOCH LAMBDA
+			// =========================================================================
+			auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
+			    if (rawXmlTime.length() < 14) return 0;
+			    int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
+			    std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
+			    std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
+			    std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
+			    std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
+			    std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
+			    std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
+			
+			    std::tm tmTime = {0};
+			    tmTime.tm_year  = y - 1900;
+			    tmTime.tm_mon   = mo - 1;
+			    tmTime.tm_mday  = d;
+			    tmTime.tm_hour  = h;
+			    tmTime.tm_min   = m;
+			    tmTime.tm_sec   = s;
+			    tmTime.tm_isdst = -1;
+			
+			    // Parse fields purely as linear absolute UTC time
+			    std::time_t utcEpoch = timegm(&tmTime);
+			    if (utcEpoch == (std::time_t)-1) return 0;
+			
+			    //  Isolate and handle the XML provider's trailing timezone offset string
+			    long providerOffsetSeconds = 0;
+			    size_t spacePos = rawXmlTime.find(' ');
+			    if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
+			        int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
+			        int oh = 0, om = 0;
+			        std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
+			        std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
+			        providerOffsetSeconds = sign * ((oh * 3600) + (om * 60));
+			    }
+			
+			    // Return the clean absolute linear point in time
+			    return utcEpoch - providerOffsetSeconds;
+			};
 
-            std::tm tmTime = {0};
-            tmTime.tm_year  = y - 1900;
-            tmTime.tm_mon   = mo - 1;
-            tmTime.tm_mday  = d;
-            tmTime.tm_hour  = h;
-            tmTime.tm_min   = m;
-            tmTime.tm_sec   = s;
-            tmTime.tm_isdst = -1;
-
-            long offsetSeconds = 0;
-            size_t spacePos = rawXmlTime.find(' ');
-            if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
-                int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
-                int oh = 0, om = 0;
-                std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
-                std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
-                offsetSeconds = sign * ((oh * 3600) + (om * 60));
-            }
-
-            std::time_t localEpoch = std::mktime(&tmTime);
-            if (localEpoch == (std::time_t)-1) return 0;
-
-            std::time_t sysTimeNow = std::time(nullptr);
-            std::tm* localTm = std::localtime(&sysTimeNow);
-            long localSeconds = localTm->tm_hour * 3600 + localTm->tm_min * 60;
-            std::tm* utcTm = std::gmtime(&sysTimeNow);
-            long utcSeconds = utcTm->tm_hour * 3600 + utcTm->tm_min * 60;
-            
-            if (localTm->tm_yday > utcTm->tm_yday) localSeconds += 86400;
-            if (localTm->tm_yday < utcTm->tm_yday) utcSeconds += 86400;
-            
-            long timezoneOffsetSeconds = localSeconds - utcSeconds;
-            return localEpoch + timezoneOffsetSeconds - offsetSeconds;
-        };
 
         std::string progChanId = "";
         std::string progStartRaw = "";
@@ -3321,8 +3320,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
         std::string titleText = "";
         std::string descText = ""; 
 
-            // Step B: Loop through programs sequentially
-        // FIX: Ensure this is a standard while statement, NOT a do-while loop block!
+        // Step B: Loop through programs sequentially
         while (std::getline(xmlFile, xmlLine)) {
             size_t progPos = xmlLine.find("<programme start=\"");
             if (progPos != std::string::npos) {
@@ -3413,28 +3411,30 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
                         bucketTimeBox.tm_isdst = -1;
 
                         std::time_t bucketTargetEpoch = std::mktime(&bucketTimeBox);
+                        std::time_t cellEndEpoch      = bucketTargetEpoch + 1800; // 30 mins
                         // =========================================================================
-						if (cfg.debugEnable) {
-	                        // Target specifically the problematic midnight show slots to prevent floods
-	                        if (titleText.find("Jimmy Kimmel") != std::string::npos || titleText.find("Fallon") != std::string::npos) {
-	                            std::tm* debugBucketTm = std::localtime(&bucketTargetEpoch);
-	                            std::tm* debugProgStartTm = std::localtime(&progStartEpoch);
-	                            std::tm* debugProgEndTm = std::localtime(&progEndEpoch);
-	                            
-	                            std::printf("[DVR GRID DEBUG] Evaluating Show: %s\n", titleText.c_str());
-	                            std::printf("  -> UI Grid Column Bucket: %d\n", bucket);
-	                            std::printf("  -> Calculated Grid Column Local Time: %02d:%02d (Day %d)\n", 
-	                                        debugBucketTm->tm_hour, debugBucketTm->tm_min, debugBucketTm->tm_mday);
-	                            std::printf("  -> Show Data Bounds Local Time: %02d:%02d to %02d:%02d (Day %d)\n", 
-	                                        debugProgStartTm->tm_hour, debugProgStartTm->tm_min, 
-	                                        debugProgEndTm->tm_hour, debugProgEndTm->tm_min, debugProgStartTm->tm_mday);
-	                            std::printf("  -> [EVALUATION] Epoch Check: Grid(%ld) >= Start(%ld) && Grid(%ld) < End(%ld) -> RESULT: %s\n",
-	                                        (long)bucketTargetEpoch, (long)progStartEpoch, (long)bucketTargetEpoch, (long)progEndEpoch,
-	                                        (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) ? "MATCHED" : "SKIPPED");
-	                        }
-						}
-                        if (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) {
-                            
+                        
+                        if (cfg.debugEnable) {
+                            if (titleText.find("Jimmy Kimmel") != std::string::npos || titleText.find("Fallon") != std::string::npos) {
+                                std::tm debugProgStartTm, debugProgEndTm;
+                                localtime_r(&progStartEpoch, &debugProgStartTm);
+                                localtime_r(&progEndEpoch, &debugProgEndTm);
+                                
+                                std::printf("[DVR GRID DEBUG] Evaluating Show: %s\n", titleText.c_str());
+                                std::printf("  -> UI Grid Column Bucket: %d\n", bucket);
+                                std::printf("  -> Calculated Grid Column Local Time: %02d:%02d (Day %d)\n", 
+                                            bucketTimeBox.tm_hour, bucketTimeBox.tm_min, bucketTimeBox.tm_mday);
+                                std::printf("  -> Show Data Bounds Local Time: %02d:%02d to %02d:%02d (Day %d)\n", 
+                                            debugProgStartTm.tm_hour, debugProgStartTm.tm_min, 
+                                            debugProgEndTm.tm_hour, debugProgEndTm.tm_min, debugProgStartTm.tm_mday);
+                                std::printf("  -> [EVALUATION] Epoch Check: Grid(%ld) >= Start(%ld) && Grid(%ld) < End(%ld) -> RESULT: %s\n",
+                                            (long)bucketTargetEpoch, (long)progStartEpoch, (long)bucketTargetEpoch, (long)progEndEpoch,
+                                            (progStartEpoch < cellEndEpoch && progEndEpoch > bucketTargetEpoch) ? "MATCHED" : "SKIPPED");
+                            }
+                        }
+
+                        if (progStartEpoch < cellEndEpoch && progEndEpoch > bucketTargetEpoch) {
+                        
                             std::time_t displayLocalEpoch = bucketTargetEpoch;
                             std::tm* displayTime = std::localtime(&displayLocalEpoch);
                             char timeBuf[32] = {0};
