@@ -20,6 +20,7 @@ requires {
 	nlohmann_json
 	curl
 	mpv
+	sqlite
 }	
 urls {
 	"https://github.com/ablyssx74/HaikuDVR"

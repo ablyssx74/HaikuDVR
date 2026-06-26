@@ -6,7 +6,7 @@ CXXFLAGS = -Wall -O3 -fdata-sections -ffunction-sections -I./include -I/boot/sys
 # Target binary definitions
 GUI_TARGET = HaikuDVR
 SERVER_TARGET = dvr_server
-VERSION = 1.0.20
+VERSION = 1.0.22
 PACKAGE_DIR := build/package
 
 # Shared target architectures
@@ -31,7 +31,7 @@ SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
 SERVER_RSRCS = dvr_server.rsrc 
 
 # Shared linking assets
-LIBS = -L./lib -lhdhomerun -lbe -ltranslation -lcurl -lnetwork -ltracker -lshared
+LIBS = -L./lib -lhdhomerun -lbe -ltranslation -lcurl -lnetwork -ltracker -lshared -lsqlite3
 RPATH = -Wl,-rpath=$$ORIGIN/lib
 
 # OPTIMIZED: Added garbage collection linking flags and symbol stripping (-s)
