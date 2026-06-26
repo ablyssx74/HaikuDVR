@@ -57,7 +57,7 @@
 #include <iostream>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.18 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.19 (Haiku OS)";
 }
 
 
@@ -912,6 +912,39 @@ int32 SerialIconDownloaderThread(void* data) {
 
 
 
+#include <vector>
+#include <ctime>
+#include <string>
+#include <Window.h>
+#include <View.h>
+#include <Button.h>
+#include <StringView.h>
+#include <MessageFilter.h>
+
+enum {
+    MSG_PREV_MONTH = 'PRVM',
+    MSG_NEXT_MONTH = 'NXTM',
+    MSG_CANCEL_WINDOW = 'CNCL'
+};
+
+class CalendarClickFilter : public BMessageFilter {
+public:
+    CalendarClickFilter(BWindow* targetWindow) 
+        : BMessageFilter(B_PROGRAMMED_DELIVERY, B_ANY_SOURCE, B_MOUSE_UP),
+          fWindow(targetWindow) {}
+
+	filter_result Filter(BMessage* message, BHandler** target) override {
+	    if (fWindow != nullptr) {
+	        fWindow->PostMessage(MSG_DATE_SELECTED);
+	    }
+	    return B_DISPATCH_MESSAGE; 
+	}
+
+
+private:
+    BWindow* fWindow;
+};
+
 class CalendarWindow : public BWindow {
 	private:
 	    std::vector<BBitmap*> fIconCache;
@@ -919,58 +952,141 @@ class CalendarWindow : public BWindow {
 	    BMessenger fTargetMessenger;
 	
 	public:
-	    CalendarWindow(BPoint spawnPoint, BMessenger target) 
-	        : BWindow(BRect(spawnPoint.x, spawnPoint.y, spawnPoint.x + 220, spawnPoint.y + 200), 
-	                  "Select Date", B_MODAL_WINDOW, B_NOT_RESIZABLE | B_NOT_ZOOMABLE) {
-	        
-	        fTargetMessenger = target;
-	
-	        BView* panel = new BView(Bounds(), "CalPanel", B_FOLLOW_ALL, B_WILL_DRAW);
-	        panel->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));	
-	        fCalendar = new BPrivate::BCalendarView(BRect(10, 10, 210, 190), "calendar");	        
-	        fCalendar->SetSelectionMessage(new BMessage(MSG_DATE_SELECTED));
-	        fCalendar->SetInvocationMessage(new BMessage(MSG_DATE_SELECTED));	        
-	        fCalendar->SetFlags(fCalendar->Flags() | B_NAVIGABLE | B_WILL_DRAW);	        
-	        fCalendar->SetTarget(this);	
-	        panel->AddChild(fCalendar);
-	        AddChild(panel);
-	    }
+		CalendarWindow(BPoint spawnPoint, BMessenger target) 
+		    : BWindow(BRect(spawnPoint.x, spawnPoint.y, spawnPoint.x + 240, spawnPoint.y + 290), 
+		              "Select Date", B_MODAL_WINDOW, B_NOT_RESIZABLE | B_NOT_ZOOMABLE) {
+		    
+		    fTargetMessenger = target;
+		
+		    BView* panel = new BView(Bounds(), "CalPanel", B_FOLLOW_ALL, B_WILL_DRAW);
+		    panel->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));	
+		    AddChild(panel);
+		
+		    // Month Navigation Buttons at the top
+		    BButton* prevBtn = new BButton(BRect(10, 10, 40, 35), "prev", "<", new BMessage(MSG_PREV_MONTH));
+		    BButton* nextBtn = new BButton(BRect(200, 10, 230, 35), "next", ">", new BMessage(MSG_NEXT_MONTH));
+		    
+		    // Text string view to show the current month/year context
+		    BStringView* monthLabel = new BStringView(BRect(50, 15, 190, 35), "monthLabel", "");
+		    monthLabel->SetAlignment(B_ALIGN_CENTER);
+		
+		    panel->AddChild(prevBtn);
+		    panel->AddChild(monthLabel);
+		    panel->AddChild(nextBtn);
+		
+		    // Calendar view positioned safely down to give navigation controls headroom
+		    fCalendar = new BPrivate::BCalendarView(BRect(10, 45, 230, 240), "calendar");	        
+		    
+		    // Reconnected back to the main scheduling notification message
+		    fCalendar->SetSelectionMessage(new BMessage(MSG_DATE_SELECTED));
+		    fCalendar->SetInvocationMessage(new BMessage(MSG_DATE_SELECTED));	        
+		    fCalendar->SetFlags(fCalendar->Flags() | B_NAVIGABLE | B_WILL_DRAW);	        
+		    fCalendar->SetTarget(this);	
+		    
+		    // Apply click filter explicitly to calendar grid view to enable smooth single-clicks
+		    fCalendar->AddFilter(new CalendarClickFilter(this));
+		    panel->AddChild(fCalendar);
+		    
+		    // Add bottom OK and Cancel action buttons
+		    BButton* cancelBtn = new BButton(BRect(10, 250, 115, 280), "cancel", "Cancel", new BMessage(MSG_CANCEL_WINDOW));
+		    BButton* okBtn = new BButton(BRect(125, 250, 230, 280), "ok", "OK", new BMessage(MSG_DATE_SELECTED));
+		    okBtn->MakeDefault(true);
+		    
+		    panel->AddChild(cancelBtn);
+		    panel->AddChild(okBtn);
+		    
+		    // Synchronize label context match
+		    UpdateMonthLabel();
+		}
 
     void MessageReceived(BMessage* message) override {
-        if (message->what == MSG_DATE_SELECTED) {
-            BPrivate::BDate selectedDate = fCalendar->Date();            
-            int year  = selectedDate.Year();
-            int month = selectedDate.Month();
-            int day   = selectedDate.Day();
-            char dateBuffer[32];
-            sprintf(dateBuffer, "%04d-%02d-%02d", year, month, day);
+        switch (message->what) {
+            case B_KEY_DOWN: {
+                int8 byte;
+                if (message->FindInt8("byte", &byte) == B_OK && byte == B_ESCAPE) {
+                    PostMessage(MSG_CANCEL_WINDOW);
+                    return;
+                }
+                BWindow::MessageReceived(message);
+                break;
+            }
+            case MSG_PREV_MONTH: {
+                BPrivate::BDate d = fCalendar->Date();
+                int32 month = d.Month();
+                int32 year = d.Year();
+                
+                // FIXED: Force day parameter to 1 to guarantee a valid date construction
+                if (month == 1) {
+                    fCalendar->SetDate(BPrivate::BDate(year - 1, 12, 1));
+                } else {
+                    fCalendar->SetDate(BPrivate::BDate(year, month - 1, 1));
+                }
+                UpdateMonthLabel();
+                break;
+            }
+            case MSG_NEXT_MONTH: {
+                BPrivate::BDate d = fCalendar->Date();
+                int32 month = d.Month();
+                int32 year = d.Year();
+                
+                // FIXED: Force day parameter to 1 to guarantee a valid date construction
+                if (month == 12) {
+                    fCalendar->SetDate(BPrivate::BDate(year + 1, 1, 1));
+                } else {
+                    fCalendar->SetDate(BPrivate::BDate(year, month + 1, 1));
+                }
+                UpdateMonthLabel();
+                break;
+            }
 
-            BMessage reply(MSG_DATE_SELECTED);
-            reply.AddString("date_string", dateBuffer);
-            fTargetMessenger.SendMessage(&reply);
+            case MSG_DATE_SELECTED: {
+                BPrivate::BDate selectedDate = fCalendar->Date();            
+                int year  = selectedDate.Year();
+                int month = selectedDate.Month();
+                int day   = selectedDate.Day();
+                
+                char dateBuffer[32];
+                sprintf(dateBuffer, "%04d-%02d-%02d", year, month, day);
 
-            this->Lock();
-            this->Quit();
-        } else {
-            BWindow::MessageReceived(message);
+                BMessage reply(MSG_DATE_SELECTED);
+                reply.AddString("date_string", dateBuffer);
+                fTargetMessenger.SendMessage(&reply);
+
+                this->Lock();
+                this->Quit();
+                break;
+            }
+            case MSG_CANCEL_WINDOW: {
+                this->Lock();
+                this->Quit();
+                break;
+            }
+            default:
+                BWindow::MessageReceived(message);
+                break;
         }
     }
-    
-    void DispatchMessage(BMessage* message, BHandler* handler) override {
-        if (message->what == B_MOUSE_UP && fCalendar != nullptr) {
-            BPoint mousePos;
-            uint32 buttons;
-            fCalendar->GetMouse(&mousePos, &buttons);
+
+    void UpdateMonthLabel() {
+        BStringView* monthLabel = dynamic_cast<BStringView*>(FindView("monthLabel"));
+        if (monthLabel != nullptr) {
+            const char* months[] = {
+                "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"
+            };
+            BPrivate::BDate d = fCalendar->Date();
+            int32 month = d.Month();
+            int32 year = d.Year();
             
-            if (fCalendar->Bounds().Contains(mousePos)) {
-                snooze(10000); 
-                PostMessage(MSG_DATE_SELECTED);
-                return;
+            if (month >= 1 && month <= 12) {
+                char buf[32];
+                sprintf(buf, "%s %d", months[month - 1], year);
+                monthLabel->SetText(buf);
             }
         }
-        BWindow::DispatchMessage(message, handler);
     }
 };
+
 
 
 class ScheduleListView : public BListView {
@@ -1461,13 +1577,15 @@ public:
 
 
 // =========================================================================
-//  LIST ITEM WITH HOVER TRACKING AND CELL CLICK INTERFACE
+//  LIST ITEM WITH HOVER TRACKING AND CELL CLICK INTERFACE (FIXED FUTURE MONTHS)
 // =========================================================================
 class GuideListRowItem : public BListItem {
 public:
     GuideRowModel fData;
     int32 fRowIndex;
     int32 fHoveredCellIndex; 
+
+	bool fCellIsScheduledMap[4] = {false, false, false, false}; 
 
     GuideListRowItem(GuideRowModel data, int32 index) 
         : BListItem(), fData(data), fRowIndex(index), fHoveredCellIndex(-1) {
@@ -1532,10 +1650,7 @@ public:
                         break;
                     }
                 }
-                
-                if (isContinuation) {
-                    continue;
-                }
+                if (isContinuation) continue;
 
                 int32 cellsToSpan = 1;
                 for (size_t next = idx + 1; next < fData.programs.size(); next++) {
@@ -1559,8 +1674,6 @@ public:
 
                 BMessage selectionBroadcast(MSG_PREFILL_RECORD_SCHEDULE);
                 selectionBroadcast.AddString("show_title", selectedProg.title.String());
-                
-                selectionBroadcast.AddString("start_time", selectedProg.timeDisplay.String());
                 selectionBroadcast.AddString("channel_label", fData.channelLabel.String());
                 selectionBroadcast.AddInt32("duration_minutes", selectedProg.durationMinutes);
                 
@@ -1572,14 +1685,49 @@ public:
                 targetSubchannel.Trim();
                 selectionBroadcast.AddString("numeric_subchannel", targetSubchannel.String());
 
+                // =========================================================================
+                // EXTRACT CALENDAR DATE & NORMALIZE TIMESTAMPS TO 24-HOUR FORMAT
+                // =========================================================================
+                BString activeSelectedDateStr = "";
+                if (parentWindow != nullptr) {
+                    BTextControl* dateInput = dynamic_cast<BTextControl*>(parentWindow->FindView("date_input"));
+                    if (dateInput != nullptr && dateInput->Text() != nullptr) {
+                        activeSelectedDateStr = dateInput->Text();
+                    }
+                }
+
+                std::string rawDisplayTime = selectedProg.timeDisplay.String();
+                std::string standardized24HourTime = "";
+                int hours = 0, minutes = 0;
+                char ampm[16] = {0};
+                
+                if (std::sscanf(rawDisplayTime.c_str(), "%d:%d %15s", &hours, &minutes, ampm) >= 2) {
+                    std::string ampmStr(ampm);
+                    if (ampmStr.find("PM") != std::string::npos || ampmStr.find("pm") != std::string::npos) {
+                        if (hours < 12) hours += 12;
+                    } else if (ampmStr.find("AM") != std::string::npos || ampmStr.find("am") != std::string::npos) {
+                        if (hours == 12) hours = 0;
+                    }
+                    char normBuffer[32];
+                    std::snprintf(normBuffer, sizeof(normBuffer), "%02d:%02d", hours, minutes);
+                    standardized24HourTime = normBuffer;
+                } else {
+                    standardized24HourTime = rawDisplayTime; 
+                }
+
+                // Pack both formats so all backend versions extract it flawlessly
+                selectionBroadcast.AddString("start_time", standardized24HourTime.c_str());
+                if (!activeSelectedDateStr.IsEmpty()) {
+                    selectionBroadcast.AddString("date_string", activeSelectedDateStr.String());
+                    selectionBroadcast.AddString("start_date", activeSelectedDateStr.String());
+                }
+
                 if (parentWindow != nullptr) {
                     parentWindow->PostMessage(&selectionBroadcast);
                 }
             }
         }
     }
-
-    
 
 
 
@@ -1948,6 +2096,12 @@ public:
             // =========================================================================
             // I. EXTRA LAYER FLAGS (RECORD BADGES ACCENT)
             // =========================================================================
+            
+            // 
+            if (idx < 4) {
+                fCellIsScheduledMap[idx] = isScheduled;
+            }
+            
             if (isScheduled) {
                 owner->PushState(); 
                 owner->SetHighColor(255, 60, 60, 255);
@@ -2068,110 +2222,36 @@ public:
                     BMenuItem* removeItem = nullptr;
                     int32 matchingActiveIndex = -1;
 
-                     if (cellIndex >= 0 && cellIndex < (int32)item->fData.programs.size()) {
-                        std::string targetTime = item->fData.programs[cellIndex].timeDisplay.String();
-                        std::string targetChannel = cleanNumberOnly.String(); // e.g., "2.1"
+                                         if (cellIndex >= 0 && cellIndex < (int32)item->fData.programs.size()) {
+                        std::string targetChannel = cleanNumberOnly.String(); 
                         std::string targetTitle = item->fData.programs[cellIndex].title.String();
 
                         // =========================================================================
-                        // EXTRACT CALENDAR DATE CONTEXT UPFRONT
+                        // FIXED: READ THE RED RENDERING FLAG DIRECTLY (NO MORE MATH DRIFT)
                         // =========================================================================
-                        time_t now = real_time_clock();
-                        struct tm* timeInfo = localtime(&now);
-                        char todayBuffer[32];
-                        strftime(todayBuffer, sizeof(todayBuffer), "%Y-%m-%d", timeInfo);
-                        std::string todayStr(todayBuffer);
-
-                        std::string currentViewDateStr = todayStr;
-                        std::string currentViewTimeStr = "15:00"; 
-
-                        if (Window() != nullptr) {
-                            BTextControl* dateInput = dynamic_cast<BTextControl*>(Window()->FindView("date_input"));
-                            BTextControl* timeInput = dynamic_cast<BTextControl*>(Window()->FindView("time_input"));
-                            
-                            if (dateInput != nullptr && dateInput->Text() != nullptr) {
-                                currentViewDateStr = dateInput->Text();
-                            }
-                            if (timeInput != nullptr && timeInput->Text() != nullptr) {
-                                currentViewTimeStr = timeInput->Text();
-                            }
+                        bool cellIsRedOnScreen = false;
+                        if (cellIndex < 4) {
+                            cellIsRedOnScreen = item->fCellIsScheduledMap[cellIndex];
                         }
 
-                        bool isViewingFutureDay = (currentViewDateStr != todayStr);
+                        if (cellIsRedOnScreen) {
+                            // Find the active schedule list entry matching this show name and channel
+                            gScheduleLocker.Lock();
+                            int32 activeCounter = 0;
+                            for (size_t i = 0; i < gScheduleList.size(); i++) {
+                                if (!gScheduleList[i].processed) {
+                                    bool channelMatch = (gScheduleList[i].channel == targetChannel);
+                                    bool titleMatch   = (gScheduleList[i].showTitle == targetTitle);
 
-                        // =========================================================================
-                        // 24-HOUR NORMALIZATION (MATCHES DRAW LOGIC & AUTO-COMMIT SCHEDULER)
-                        // =========================================================================
-                        std::string normalizedCellTime = "";
-
-                        if (targetTime == "LIVE NOW") {
-                            if (isViewingFutureDay) {
-                                int32 h = 12, m = 0;
-                                if (sscanf(currentViewTimeStr.c_str(), "%d:%d", &h, &m) >= 1) {
-                                    m += (int32)(cellIndex * 30);
-                                    h += m / 60;
-                                    m = m % 60;
-                                    h = h % 24;
-                                    
-                                    char rawBuffer[32];
-                                    snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", h, m);
-                                    normalizedCellTime = rawBuffer;
+                                    if (channelMatch && titleMatch) { 
+                                        matchingActiveIndex = activeCounter;
+                                        break;
+                                    }
+                                    activeCounter++;
                                 }
-                            } else {
-                                char rawBuffer[32];
-                                snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", timeInfo->tm_hour, timeInfo->tm_min);
-                                normalizedCellTime = rawBuffer;
                             }
-                        } 
-                        else if (targetTime == "NEXT") {
-                            time_t nextBlock = now + (30 * 60);
-                            struct tm* nextInfo = localtime(&nextBlock);
-                            char rawBuffer[32];
-                            snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", nextInfo->tm_hour, nextInfo->tm_min);
-                            normalizedCellTime = rawBuffer;
-                        } 
-                        else if (targetTime == "LATER") {
-                            time_t laterBlock = now + (60 * 60);
-                            struct tm* laterInfo = localtime(&laterBlock);
-                            char rawBuffer[32];
-                            snprintf(rawBuffer, sizeof(rawBuffer), "%02d:%02d", laterInfo->tm_hour, laterInfo->tm_min);
-                            normalizedCellTime = rawBuffer;
-                        } 
-                        else {
-                            int hours = 0, minutes = 0;
-                            char ampm[16] = {0};
-                            if (sscanf(targetTime.c_str(), "%d:%d %15s", &hours, &minutes, ampm) >= 2) {
-                                std::string ampmStr(ampm);
-                                if (ampmStr.find("PM") != std::string::npos || ampmStr.find("pm") != std::string::npos) {
-                                    if (hours < 12) hours += 12;
-                                } else if (ampmStr.find("AM") != std::string::npos || ampmStr.find("am") != std::string::npos) {
-                                    if (hours == 12) hours = 0;
-                                }
-                                char normBuffer[32];
-                                snprintf(normBuffer, sizeof(normBuffer), "%02d:%02d", hours, minutes);
-                                normalizedCellTime = normBuffer;
-                            } else {
-                                normalizedCellTime = targetTime; 
-                            }
+                            gScheduleLocker.Unlock();
                         }
-
-                        gScheduleLocker.Lock();
-
-                        int32 activeCounter = 0;
-                        for (size_t i = 0; i < gScheduleList.size(); i++) {
-                            if (!gScheduleList[i].processed) {
-                                bool channelMatch = (gScheduleList[i].channel.find(targetChannel) != std::string::npos);
-                                
-                                bool timeMatch = (gScheduleList[i].startTime == normalizedCellTime);
-
-                                if (channelMatch && timeMatch) { 
-                                    matchingActiveIndex = activeCounter;
-                                    break;
-                                }
-                                activeCounter++;
-                            }
-                        }
-                        gScheduleLocker.Unlock();
 
                         if (matchingActiveIndex != -1) {
                             removeItem = new BMenuItem("Remove Queue", NULL);
@@ -2296,7 +2376,7 @@ public:
                             int32 finalRecordDay = 25;
                             bool automaticallyAdvanceRecordDate = false;
 
-                            // 1. Extract base date directly from the UI view text control
+                            // 1. Extract the active selected date directly from the guide interface view
                             if (Window() != nullptr) {
                                 BTextControl* dateInput = dynamic_cast<BTextControl*>(Window()->FindView("date_input"));
                                 if (dateInput != nullptr && dateInput->Text() != nullptr) {
@@ -2322,45 +2402,42 @@ public:
                                 std::sscanf(internalTimeRaw.String(), "%d:%d", &parsedProgHour, &parsedProgMin);
                             }
 
-                            // If the program starts between 12:00 AM (0) and 4:59 AM (4), 
-                            // it must roll forward to the next calendar date to avoid past epoch bugs
+                            // 3. Roll day context forward if program starts during early morning grid zones
                             if (parsedProgHour >= 0 && parsedProgHour < 5) {
                                 automaticallyAdvanceRecordDate = true;
                                 
                                 std::tm rolloverBox = {0};
                                 rolloverBox.tm_year = finalRecordYear - 1900;
                                 rolloverBox.tm_mon  = finalRecordMonth - 1;
-                                rolloverBox.tm_mday = finalRecordDay + 1; // Explicitly step forward 1 day
+                                rolloverBox.tm_mday = finalRecordDay + 1; // Step forward 1 day
                                 rolloverBox.tm_hour = 12;
                                 rolloverBox.tm_isdst = -1;
                                 
-                                std::time_t normalizedEpoch = std::mktime(&rolloverBox);
-                                if (normalizedEpoch != (std::time_t)-1) {
-                                    std::tm* safeTm = std::localtime(&normalizedEpoch);
+                                time_t normalizedEpoch = std::mktime(&rolloverBox);
+                                if (normalizedEpoch != (time_t)-1) {
+                                    struct tm* safeTm = localtime(&normalizedEpoch);
                                     finalRecordYear = safeTm->tm_year + 1900;
                                     finalRecordMonth = safeTm->tm_mon + 1;
                                     finalRecordDay = safeTm->tm_mday;
                                 }
                             }
-                            // =========================================================================
 
-                            // FIX: Properly declared char array buffer size
+                            // 4. Print clean characters into safe buffer strings
                             char localizedDateBuf[32] = {0};
                             std::snprintf(localizedDateBuf, sizeof(localizedDateBuf), "%04d-%02d-%02d", 
                                           finalRecordYear, finalRecordMonth, finalRecordDay);
 
                             selectionBroadcast.AddString("start_time", targetTimeStr.String());
-                            selectionBroadcast.AddString("computed_target_date", localizedDateBuf);
+                            
+                            // FIXED: Explicitly transmit the string to sync your scheduler window
+                            selectionBroadcast.AddString("start_date", localizedDateBuf);
+                            selectionBroadcast.AddString("date_string", localizedDateBuf); // Backup match target
+                            
                             selectionBroadcast.AddBool("auto_commit_queue", true);
                             selectionBroadcast.AddBool("advance_calendar_day", automaticallyAdvanceRecordDate);
                             
                             fParentShortcutTarget->PostMessage(&selectionBroadcast);
                         }
-
-
-                       
-
-
                         else if (removeItem != nullptr && selectedItem == removeItem) {
                             BMessage removeMsg(MSG_REMOVE_SCHEDULE);
                             removeMsg.AddInt32("list_index", matchingActiveIndex);
@@ -2383,9 +2460,6 @@ public:
                         }
                     }
                     delete contextMenu;
-
-
-
                 }
             }
         }
@@ -3340,25 +3414,25 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
 
                         std::time_t bucketTargetEpoch = std::mktime(&bucketTimeBox);
                         // =========================================================================
-
-                        // Target specifically the problematic midnight show slots to prevent floods
-                        if (titleText.find("Jimmy Kimmel") != std::string::npos || titleText.find("Fallon") != std::string::npos) {
-                            std::tm* debugBucketTm = std::localtime(&bucketTargetEpoch);
-                            std::tm* debugProgStartTm = std::localtime(&progStartEpoch);
-                            std::tm* debugProgEndTm = std::localtime(&progEndEpoch);
-                            
-                            std::printf("[DVR GRID DEBUG] Evaluating Show: %s\n", titleText.c_str());
-                            std::printf("  -> UI Grid Column Bucket: %d\n", bucket);
-                            std::printf("  -> Calculated Grid Column Local Time: %02d:%02d (Day %d)\n", 
-                                        debugBucketTm->tm_hour, debugBucketTm->tm_min, debugBucketTm->tm_mday);
-                            std::printf("  -> Show Data Bounds Local Time: %02d:%02d to %02d:%02d (Day %d)\n", 
-                                        debugProgStartTm->tm_hour, debugProgStartTm->tm_min, 
-                                        debugProgEndTm->tm_hour, debugProgEndTm->tm_min, debugProgStartTm->tm_mday);
-                            std::printf("  -> [EVALUATION] Epoch Check: Grid(%ld) >= Start(%ld) && Grid(%ld) < End(%ld) -> RESULT: %s\n",
-                                        (long)bucketTargetEpoch, (long)progStartEpoch, (long)bucketTargetEpoch, (long)progEndEpoch,
-                                        (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) ? "MATCHED" : "SKIPPED");
-                        }
-
+						if (cfg.debugEnable) {
+	                        // Target specifically the problematic midnight show slots to prevent floods
+	                        if (titleText.find("Jimmy Kimmel") != std::string::npos || titleText.find("Fallon") != std::string::npos) {
+	                            std::tm* debugBucketTm = std::localtime(&bucketTargetEpoch);
+	                            std::tm* debugProgStartTm = std::localtime(&progStartEpoch);
+	                            std::tm* debugProgEndTm = std::localtime(&progEndEpoch);
+	                            
+	                            std::printf("[DVR GRID DEBUG] Evaluating Show: %s\n", titleText.c_str());
+	                            std::printf("  -> UI Grid Column Bucket: %d\n", bucket);
+	                            std::printf("  -> Calculated Grid Column Local Time: %02d:%02d (Day %d)\n", 
+	                                        debugBucketTm->tm_hour, debugBucketTm->tm_min, debugBucketTm->tm_mday);
+	                            std::printf("  -> Show Data Bounds Local Time: %02d:%02d to %02d:%02d (Day %d)\n", 
+	                                        debugProgStartTm->tm_hour, debugProgStartTm->tm_min, 
+	                                        debugProgEndTm->tm_hour, debugProgEndTm->tm_min, debugProgStartTm->tm_mday);
+	                            std::printf("  -> [EVALUATION] Epoch Check: Grid(%ld) >= Start(%ld) && Grid(%ld) < End(%ld) -> RESULT: %s\n",
+	                                        (long)bucketTargetEpoch, (long)progStartEpoch, (long)bucketTargetEpoch, (long)progEndEpoch,
+	                                        (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) ? "MATCHED" : "SKIPPED");
+	                        }
+						}
                         if (bucketTargetEpoch >= progStartEpoch && bucketTargetEpoch < progEndEpoch) {
                             
                             std::time_t displayLocalEpoch = bucketTargetEpoch;
@@ -4029,22 +4103,34 @@ public:
              break;
          }
 
-     case MSG_DATE_SELECTED: {
+      case MSG_DATE_SELECTED: {
          const char* newDateString = nullptr;
          if (message->FindString("date_string", &newDateString) == B_OK) {
+             
+             // 1. Update the Main Scheduler Window's text field directly
              fDateInput->SetText(newDateString);
              FetchAndPopulateChannelList(newDateString);
 
-             BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));             
-             if (realGuideList != nullptr) {
-                 realGuideList->MakeEmpty(); 
-                 realGuideList->Invalidate(); 
-             }
-
+             // =========================================================================
+             // FIXED: DIRECT WINDOW CROSS-POINTER SYNCHRONIZATION VIA FGUIDEWINDOW
+             // =========================================================================
+             // If the Guide Matrix Panel window is currently running open on screen
              if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+                 
+                 // Look for a view named "date_input" inside the guide window frame context
+                 BView* targetedView = fGuideWindow->FindView("date_input");
+                 BTextControl* guideDateControl = dynamic_cast<BTextControl*>(targetedView);
+                 
+                 if (guideDateControl != nullptr) {
+                     // Sync its text box to match the chosen calendar date string
+                     guideDateControl->SetText(newDateString);
+                 }
+                 
+                 // Forward the selection notice message so the guide window triggers its row redraws
                  BMessage refreshMessage(MSG_DATE_SELECTED);
                  fGuideWindow->PostMessage(&refreshMessage);
                  
+                 // Handle timeline timeline header updates natively
                  BView* childHeader = fGuideWindow->FindView("timelineHeader");
                  if (childHeader != nullptr) {
                      BMessage syncHeaderMsg('UCLT');
@@ -4057,6 +4143,13 @@ public:
                  
                  fGuideWindow->Unlock();
              }
+             // =========================================================================
+
+             BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));             
+             if (realGuideList != nullptr) {
+                 realGuideList->MakeEmpty(); 
+                 realGuideList->Invalidate(); 
+             }
 
              std::time_t rawToday = std::time(nullptr);
              std::tm* localToday = std::localtime(&rawToday);
@@ -4064,7 +4157,6 @@ public:
              std::strftime(todayBuf, sizeof(todayBuf), "%Y-%m-%d", localToday);
 
              BStringView* timeHeaderLabel = dynamic_cast<BStringView*>(FindView("cur_time_head")); 
-             
              if (timeHeaderLabel != nullptr) {
                  if (std::string(newDateString) == todayBuf) {
                      timeHeaderLabel->SetText("CURRENT TIME");
@@ -4075,6 +4167,7 @@ public:
          }
          break;
      }
+
 
 		case MSG_CLOCK_UP:
 		case MSG_CLOCK_DOWN: {
@@ -4752,6 +4845,14 @@ public:
         item.channel = fChannelInput->Text();
         item.duration = fSelectedDurationSeconds; 
         item.processed = false;
+
+        // =========================================================================
+        // FIXED: COMPUTE ABSOLUTE EPOCH PARAMETERS NATIVELY TO PREVENT STATE LOSS
+        // =========================================================================
+        // Convert the string representations to integers so matching engines execute safely
+        item.durationSec = std::atoll(item.duration.c_str());
+        item.epochStart  = CalculateEpoch(item.startDate, item.startTime);
+        // =========================================================================
          
         BString extractedTitle;
         if (fChannelListView != nullptr) {
@@ -4845,6 +4946,7 @@ public:
         fStatusLabel->SetText(confMsg.c_str());
         break;
      }
+
 
      case MSG_START_RECORDING: {
      	
