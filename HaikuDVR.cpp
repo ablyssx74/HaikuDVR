@@ -57,7 +57,7 @@
 #include <MessageFilter.h>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.22 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.23 (Haiku OS)";
 }
 
 
@@ -753,8 +753,59 @@ private:
             entry.GetSize(&fileSize);
             totalAccumulatedBytes += fileSize;
 
+            // =========================================================================
+            // METADATA PARSING ENGINE (DVR FILENAME EXTRACTION WITH AM/PM CYCLE)
+            // =========================================================================
+            BString rawName(name);
             BString expectedLabel;
-            expectedLabel << name << " (" << _FormatFileSize(fileSize) << ")";
+            
+            char chNum[32] = {0};
+            int year = 0, month = 0, day = 0, hour = 0, minute = 0;
+            
+            // Scan fixed-width initial structural elements safely
+            if (std::sscanf(rawName.String(), "DVR_Record_Ch_%31[^_]_%d-%d-%d_%d-%d_", 
+                chNum, &year, &month, &day, &hour, &minute) >= 6) {
+                
+                // Construct prefix filter to determine precisely where the title segment starts
+                BString prefixFilter;
+                prefixFilter.SetToFormat("DVR_Record_Ch_%s_%04d-%02d-%02d_%02d-%02d_", 
+                    chNum, year, month, day, hour, minute
+                );
+                
+                BString titleExtractor(rawName);
+                titleExtractor.RemoveFirst(prefixFilter);
+                
+                // Cut off trailing padding duration anchors: e.g., "_1800s_Padded.ts"
+                int32 trailingAnchorIdx = titleExtractor.IFindLast("_");
+                if (trailingAnchorIdx != B_ERROR) {
+                    BString tailCheck = titleExtractor.String() + trailingAnchorIdx;
+                    if (tailCheck.IFindFirst("Padded") != B_ERROR) {
+                        titleExtractor.Truncate(trailingAnchorIdx);
+                        trailingAnchorIdx = titleExtractor.IFindLast("_");
+                        if (trailingAnchorIdx != B_ERROR) {
+                            titleExtractor.Truncate(trailingAnchorIdx);
+                        }
+                    }
+                }
+                
+                // Convert underscores to human-friendly spaces
+                titleExtractor.ReplaceAll("_", " ");
+                
+                // CALCULATE 12-HOUR AM/PM PARAMETERS
+                int32 displayHour = (hour > 12) ? (hour - 12) : ((hour == 0) ? 12 : hour);
+                const char* periodMarker = (hour >= 12) ? "PM" : "AM";
+                
+                // Render fully unified metadata string line layout with AM/PM format
+                expectedLabel.SetToFormat("%s (Ch %s) — %04d-%02d-%02d @ %d:%02d %s (%s)", 
+                    titleExtractor.String(), chNum, year, month, day, 
+                    displayHour, minute, periodMarker,
+                    _FormatFileSize(fileSize).String()
+                );
+            } else {
+                // Safeguard layout representation fallback if token templates are unmatched
+                expectedLabel << name << " (" << _FormatFileSize(fileSize).String() << ")";
+            }
+            // =========================================================================
 
             bool alreadyExists = false;
             int32 itemCount = fRecordingsList->CountItems();
@@ -798,12 +849,10 @@ private:
 
         if (fTotalUsageLabel != nullptr) {
             BString footerLabel;
-            footerLabel << "Total Library Footprint Storage: " << _FormatFileSize(totalAccumulatedBytes);
+            footerLabel << "Total Library Footprint Storage: " << _FormatFileSize(totalAccumulatedBytes).String();
             fTotalUsageLabel->SetText(footerLabel.String());
         }
     }
-
-
 
 };
 
@@ -1222,8 +1271,9 @@ private:
     BRect fTimeUpRect;
     BWindow* fMainAppTarget;
     BString fCachedSelectedTime;
+public:
     BString fCachedSelectedDate;
-
+private:
     bool fHoveringMinus;
     bool fHoveringPlus;
 
@@ -2027,21 +2077,115 @@ public:
             }
             owner->PopState();
 
+  // =========================================================================
+            // H. FIELD STRINGS PLACEMENTS (FIXED VIEWPORT SHIFT ANCHORING)
             // =========================================================================
-            // H. FIELD STRINGS PLACEMENTS (WITH TIME RANGES & SYNOPSIS)
-            // =========================================================================
-            
-            BString endString = prog.endTimeStr;
-            if (endString.IsEmpty()) {
-                time_t estEndEpoch = rawToday + (idx * 30 * 60) + (30 * 60);
-                struct tm* estTm = std::localtime(&estEndEpoch);
-                char estBuf[32] = {0}; 
-                std::strftime(estBuf, sizeof(estBuf), "%I:%M %p", estTm);
-                endString = estBuf;
-                if (endString.StartsWith("0")) { endString.Remove(0, 1); }
-            }
             BString timeRangeStr;
-            timeRangeStr.SetToFormat("%s - %s", displayTimeText.String(), endString.String());
+            
+            // 1. Parse the unchanging structural end time from your struct (e.g., "11:00 PM")
+            int32 endHour = 0;
+            int32 endMinute = 0;
+            std::memset(ampm, 0, sizeof(ampm));
+            
+            if (sscanf(prog.endTimeStr.String(), "%d:%d %15s", &endHour, &endMinute, ampm) >= 2) {
+                BString ampmStr(ampm);
+                if (ampmStr.IFindFirst("PM") != B_ERROR && endHour < 12) {
+                    endHour += 12;
+                } else if (ampmStr.IFindFirst("AM") != B_ERROR && endHour == 12) {
+                    endHour = 0;
+                }
+            } else {
+                sscanf(prog.endTimeStr.String(), "%d:%d", &endHour, &endMinute);
+            }
+
+            // 2. Fetch the absolute true total duration directly from your structural member
+            int32 totalDurationMinutes = prog.durationMinutes; 
+            if (totalDurationMinutes <= 0) {
+                totalDurationMinutes = 30; // Safety fallback
+            }
+
+            // 3. Work BACKWARDS from the absolute end time to calculate the true immutable start time
+            int32 endTotalMinutes = (endHour * 60) + endMinute;
+            int32 startTotalMinutes = endTotalMinutes - totalDurationMinutes;
+            
+            // Track if we crossed midnight to sync with your calendar advance logic
+            bool advanceCalendarDayFlag = false;
+            if (startTotalMinutes < 0) {
+                startTotalMinutes += (24 * 60); // Handle midnight wrapping
+                advanceCalendarDayFlag = true;
+            }
+            
+            // 4. Convert back to clean 12-hour AM/PM parameters for display
+            int32 trueStartHour = (startTotalMinutes / 60) % 24;
+            int32 trueStartMin = startTotalMinutes % 60;
+            const char* startPeriod = (trueStartHour >= 12) ? "PM" : "AM";
+            int32 displayStartHour = (trueStartHour > 12) ? (trueStartHour - 12) : ((trueStartHour == 0) ? 12 : trueStartHour);
+
+            int32 displayEndHour = (endHour > 12) ? (endHour - 12) : ((endHour == 0) ? 12 : endHour);
+            const char* endPeriod = (endHour >= 12) ? "PM" : "AM";
+
+            // DYNAMIC DATE LINK ENGINE: MATCHED SYSTEM REGISTERED NAME
+            BString finalizedRecordDate = "";
+
+            if (owner != nullptr && owner->Window() != nullptr) {
+                // MATCH EXACT CONSTRUCTOR ID: "timelineHeader" instead of "TimelineHeaderView"
+                BView* baseHeader = owner->Window()->FindView("timelineHeader");
+                
+                // Fallback sibling lookup tree search if layout is nested inside container shelves
+                if (baseHeader == nullptr && owner->Parent() != nullptr) {
+                    baseHeader = owner->Parent()->FindView("timelineHeader");
+                }
+
+                if (baseHeader != nullptr) {
+                    TimelineHeaderView* headerView = dynamic_cast<TimelineHeaderView*>(baseHeader);
+                    if (headerView != nullptr && !headerView->fCachedSelectedDate.IsEmpty()) {
+                        finalizedRecordDate = headerView->fCachedSelectedDate;
+                    }
+                }
+            }
+
+            // Fall back cleanly to real-world system clock if selected string is empty
+            if (finalizedRecordDate.IsEmpty()) {
+                std::time_t currentSystemEpoch = std::time(nullptr);
+                std::tm* currentSystemTm = std::localtime(&currentSystemEpoch);
+                char autoSysBuf[32];
+                std::strftime(autoSysBuf, sizeof(autoSysBuf), "%Y-%m-%d", currentSystemTm);
+                finalizedRecordDate = autoSysBuf;
+            }
+            
+            if (advanceCalendarDayFlag) {
+                int parsedYear = 2026, parsedMonth = 6, parsedDay = 25;
+                // Dynamically read whatever date we resolved above rather than hardcoding 2026-06-25
+                if (std::sscanf(finalizedRecordDate.String(), "%d-%d-%d", &parsedYear, &parsedMonth, &parsedDay) == 3) {
+                    std::tm rolloverTimeBox = {0};
+                    rolloverTimeBox.tm_year = parsedYear - 1900;
+                    rolloverTimeBox.tm_mon  = parsedMonth - 1;
+                    rolloverTimeBox.tm_mday = parsedDay + 1; // Bump calendar day forward explicitly
+                    rolloverTimeBox.tm_hour = 12;
+                    rolloverTimeBox.tm_isdst = -1;
+                    
+                    std::time_t normalizedFutureEpoch = std::mktime(&rolloverTimeBox);
+                    if (normalizedFutureEpoch != (std::time_t)-1) {
+                        std::tm* safeFutureTm = std::localtime(&normalizedFutureEpoch);
+                        char rebalancedDateBuf[32]; 
+                        std::strftime(rebalancedDateBuf, sizeof(rebalancedDateBuf), "%Y-%m-%d", safeFutureTm);
+                        finalizedRecordDate = rebalancedDateBuf;
+                    }
+                }
+            }
+
+            // 5. Construct the range string with the matching date string format
+            timeRangeStr.SetToFormat("%d:%02d %s - %d:%02d %s (%s)", 
+                displayStartHour, trueStartMin, startPeriod,
+                displayEndHour, endMinute, endPeriod,
+                finalizedRecordDate.String()
+            );
+
+            // Maintain sliding pen bounds tracking so the text stays on screen when sliding left
+            float visibleLeftX = cellRect.left + 20;
+            if (visibleLeftX < (itemRect.left + kHeaderWidth + 20)) {
+                visibleLeftX = itemRect.left + kHeaderWidth + 20;
+            }
 
             // ISOLATION BLOCK 3: Timeline Metadata Text
             owner->PushState();
@@ -2051,9 +2195,11 @@ public:
             timeFont.SetSize(10.0); 
             owner->SetFont(&timeFont);
             owner->SetHighColor(isScheduled ? rgb_color{255, 140, 140, 255} : rgb_color{140, 140, 140, 255});
-            owner->MovePenTo(cellRect.left + 20, cellRect.top + 28);
+            
+            owner->MovePenTo(visibleLeftX, cellRect.top + 28);
             owner->DrawString(timeRangeStr.String()); 
             owner->PopState();
+
 
             // ISOLATION BLOCK 4: Program Header Title
             owner->PushState();
@@ -2089,6 +2235,8 @@ public:
             // =========================================================================
             // I. EXTRA LAYER FLAGS (RECORD BADGES ACCENT)
             // =========================================================================
+
+
             
             // 
             if (idx < 4) {
@@ -2534,6 +2682,27 @@ private:
 void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loadedChannels, BListView* mainListView) {
 	    if (mainListView == nullptr) return;
 	
+	    // =========================================================================
+	    // INLINE NARRATIVE SCRUBBER METHOD (XML/HTML ENTITY DECODER ENGINE)
+	    // =========================================================================
+	    auto SanitizeTextEngine = [](const char* rawInput) -> BString {
+	        BString cleanedStr(rawInput);
+	        if (cleanedStr.IsEmpty()) return cleanedStr;
+	        
+	        // Decode standard entity character masks back to pristine plain text
+	        cleanedStr.ReplaceAll("&quot;", "\"");
+	        cleanedStr.ReplaceAll("&amp;",  "&");
+	        cleanedStr.ReplaceAll("&apos;", "'");
+	        cleanedStr.ReplaceAll("&#39;",  "'"); // Resolves numeric single quotes
+	        cleanedStr.ReplaceAll("&lt;",   "<");
+	        cleanedStr.ReplaceAll("&gt;",   ">");
+	        
+	        // Strip accidental double-spacing fragments
+	        cleanedStr.ReplaceAll("  ", " ");
+	        return cleanedStr;
+	    };
+	    // =========================================================================
+
 	    for (size_t i = 0; i < loadedChannels.size(); i++) {
 	        const auto& liveChan = loadedChannels[i];
 	        
@@ -2589,13 +2758,14 @@ void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loaded
 	            }
 	        }
 	
+	        // Push the sanitized Now Playing row metadata elements
 	        rowData.programs.push_back({ 
-	            liveChan.nowPlaying.c_str(), 
+	            SanitizeTextEngine(liveChan.nowPlaying.c_str()).String(), // Sanitized Title
 	            finalColumn1Time.String(), 
 	            350.0f, 
 	            liveChan.nowPlayingDurationMinutes,
 	            liveChan.nowPlayingEndTimeStr.c_str(),  
-	            liveChan.nowPlayingDescription.c_str()   
+	            SanitizeTextEngine(liveChan.nowPlayingDescription.c_str()).String() // Sanitized Description
 	        });
 	        
 	        for (const auto& nextShow : liveChan.futureLineup) {
@@ -2608,19 +2778,21 @@ void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loaded
 	                }
 	            }
 	
+	            // Push the sanitized Future Lineup row metadata elements
 	            rowData.programs.push_back({
-	                nextShow.title.c_str(), 
+	                SanitizeTextEngine(nextShow.title.c_str()).String(), // Sanitized Title
 	                nextTimeLabel.String(), 
 	                350.0f, 
 	                nextShow.durationMinutes,
 	                nextShow.endTimeStr.String(),     
-	                nextShow.description.String()      
+	                SanitizeTextEngine(nextShow.description.String()).String() // Sanitized Description
 	            });
 	        }
 	        
 	        fContainerList->AddItem(new GuideListRowItem(rowData, i));
 	    }
 	}
+
 };
 
 
