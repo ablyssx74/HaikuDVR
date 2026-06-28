@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.25 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.26 (Haiku OS)";
 }
 
 
@@ -2637,73 +2637,13 @@ public:
                             gScheduleLocker.Unlock();
                         }
 
-                        // =========================================================================
-                        // HISTORICAL TIME SAFEGUARD: SQL BACKEND LOOKUP FOR PAST SHOWS
-                        // =========================================================================
-                        bool hasAlreadyAired = false;
-                        sqlite3* db = nullptr;
-                        const char* dbPath = "/boot/home/config/settings/HaikuDVR/guide.db";
-                        
-                        if (sqlite3_open(dbPath, &db) == SQLITE_OK) {
-                            const char* sql = "SELECT p.end_epoch FROM programs p "
-                                              "LEFT JOIN channels c ON p.channel_id = c.xml_id "
-                                              "WHERE (c.lcn = ? OR p.channel_id = ?) "
-                                              "  AND lower(p.title) = lower(?) "
-                                              "  AND strftime('%Y-%m-%d', p.start_epoch, 'unixepoch', 'localtime') = ? "
-                                              "ORDER BY p.end_epoch DESC LIMIT 1;";
-                            
-                            sqlite3_stmt* stmt = nullptr;
-                            if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                                
-                                // =========================================================================
-                                // FIXED DATE PARSING: DIRECT WINDOW HIERARCHY ACCESS
-                                // =========================================================================
-                                BString visibleGridDate("2026-06-28"); // Safe current baseline fallback
-                                
-                                if (Window() != nullptr) {
-                                    // Query the timeline header subview directly from the active Guide window frame
-                                    BView* childHeader = Window()->FindView("timelineHeader");
-                                    if (childHeader != nullptr) {
-                                        TimelineHeaderView* headerView = dynamic_cast<TimelineHeaderView*>(childHeader);
-                                        if (headerView != nullptr && !headerView->fCachedSelectedDate.IsEmpty()) {
-                                            visibleGridDate = headerView->fCachedSelectedDate;
-                                        }
-                                    }
-                                }
-                                // =========================================================================
-
-                                sqlite3_bind_text(stmt, 1, targetChannel.c_str(), -1, SQLITE_TRANSIENT);
-                                sqlite3_bind_text(stmt, 2, targetChannel.c_str(), -1, SQLITE_TRANSIENT);
-                                sqlite3_bind_text(stmt, 3, targetTitle.c_str(), -1, SQLITE_TRANSIENT);
-                                sqlite3_bind_text(stmt, 4, visibleGridDate.String(), -1, SQLITE_TRANSIENT);
-                                
-                                if (sqlite3_step(stmt) == SQLITE_ROW) {
-                                    int64 endEpoch = (int64)sqlite3_column_int64(stmt, 0);
-                                    std::time_t currentSysTime = std::time(nullptr);
-                                    
-                                    if (endEpoch < (int64)currentSysTime) {
-                                        hasAlreadyAired = true;
-                                    }
-                                }
-                                sqlite3_finalize(stmt);
-                            }
-                            sqlite3_close(db);
-                        }
-
-                        // CONTEXT MENU COMPOSITION WITH ACTIVE SAFEGUARDS
                         if (matchingActiveIndex != -1) {
-                            BMenuItem* removeItem = new BMenuItem("Remove Queue", NULL);
+                            removeItem = new BMenuItem("Remove Queue", NULL);
                             contextMenu->AddItem(removeItem);
-                        } else if (!hasAlreadyAired) {
-                            BMenuItem* queueItem = new BMenuItem("Add to Queue", NULL);
-                            contextMenu->AddItem(queueItem);
                         } else {
-                            BMenuItem* expiredItem = new BMenuItem("Program Already Aired", NULL);
-                            expiredItem->SetEnabled(false);
-                            contextMenu->AddItem(expiredItem);
+                            queueItem = new BMenuItem("Add to Queue", NULL);
+                            contextMenu->AddItem(queueItem);
                         }
-
-
 
                         contextMenu->AddSeparatorItem();
                         BMenuItem* viewRecsItem = new BMenuItem("Open Recordings", new BMessage(MSG_VIEW_RECORDINGS));
