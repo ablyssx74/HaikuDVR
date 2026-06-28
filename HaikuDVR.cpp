@@ -57,7 +57,7 @@
 #include <MessageFilter.h>
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.23 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.24 (Haiku OS)";
 }
 
 
@@ -5029,6 +5029,11 @@ public:
         
         extractedTitle.Trim();
 
+        // Strip out any legacy manual tag strings entirely if pulled from UI fields
+        extractedTitle.ReplaceAll("Manual_Recording_", "");
+        extractedTitle.ReplaceAll("Manual_Recording", "");
+        extractedTitle.Trim();
+
         BString cleanTitle = extractedTitle;
         cleanTitle.ReplaceAll("/", "-");
         cleanTitle.ReplaceAll(":", "-");
@@ -5036,16 +5041,22 @@ public:
         cleanTitle.ReplaceAll("*", "");
         cleanTitle.ReplaceAll("?", "");
         cleanTitle.ReplaceAll(" ", "_"); 
+        
+        // Squeeze out consecutive duplicate underscores
+        while (cleanTitle.FindFirst("__") != B_ERROR) {
+            cleanTitle.ReplaceAll("__", "_");
+        }
         cleanTitle.Trim();
 
-        if (cleanTitle.IsEmpty() || cleanTitle == "Manual_Recording") {
-            item.showTitle = "Manual_Recording";
+        // =========================================================================
+        // RE-ARCHITECTED TITLE FALLBACK: DROP "MANUAL RECORDING" & KEEP SHOW TITLE
+        // =========================================================================
+        if (cleanTitle.IsEmpty() || cleanTitle == "_") {
+            item.showTitle = "Live_Stream"; // Generic descriptive fallback descriptor
         } else {
-            if (!cleanTitle.StartsWith("Manual_Recording")) {
-                cleanTitle.Prepend("Manual_Recording_");
-            }
-            item.showTitle = cleanTitle.String();
+            item.showTitle = cleanTitle.String(); // Preserves the raw parsed show title directly
         }
+        // =========================================================================
 
         BString channelLabel;
         if (message->FindString("channel_label", &channelLabel) == B_OK) {
@@ -5075,9 +5086,10 @@ public:
 
 
      case MSG_START_RECORDING: {
-     	
          const char* targetChannel = fChannelInput->Text();
-         std::string targetDuration = fSelectedDurationSeconds;
+         
+         // FIXED: Used .c_str() to match std::string object data types natively
+         std::string targetDuration = fSelectedDurationSeconds.c_str();
 
          const char* forcedChannel = nullptr;
          const char* forcedDuration = nullptr;
@@ -5090,89 +5102,114 @@ public:
          config->channel = targetChannel;
          config->duration = targetDuration;
 
-         BString extractedTitle;
-         if (fChannelListView != nullptr) {
-             int32 selectedIndex = fChannelListView->CurrentSelection();
-             if (selectedIndex >= 0) {
-                 ChannelListItem* listItem = (ChannelListItem*)fChannelListView->ItemAt(selectedIndex);
-                 if (listItem != nullptr) {
-                     BString listRowText(listItem->textDisplay.c_str()); // e.g. "2.1 - WSBDT (Now: Channel 2 Action News)"
-                     
-                     int32 nowStart = listRowText.FindFirst("(Now: ");
-                     if (nowStart != B_ERROR) {
-                         int32 titleStart = nowStart + 6;
-                         int32 nowEnd = listRowText.FindFirst(")", titleStart);
-                         
-                         if (nowEnd != B_ERROR) {
-                             listRowText.CopyInto(extractedTitle, titleStart, nowEnd - titleStart);
-                         }
-                     }
-                 }
-             }
-         }
+        ScheduleItem item;
+        item.startDate = fDateInput->Text(); 
+        item.startTime = fTimeInput->Text();
+        
+        item.channel = targetChannel;
+        item.duration = targetDuration; 
+        item.processed = false;
 
-         if (extractedTitle.IsEmpty() && fStatusLabel != nullptr) {
-             BString fullStatus = fStatusLabel->Text();
-             
-             if (!fullStatus.StartsWith("Status:")) {
-                 int32 prefixIndex = fullStatus.FindFirst(" - ");
-                 if (prefixIndex != B_ERROR) {
-                     fullStatus.CopyInto(extractedTitle, prefixIndex + 3, fullStatus.Length());
-                 } else {
-                     extractedTitle = fullStatus;
-                     extractedTitle.ReplaceFirst("Selected Lineup: ", "");
-                 }
+        item.durationSec = std::atoll(item.duration.c_str());
+        item.epochStart  = CalculateEpoch(item.startDate, item.startTime);
 
-                 int32 pipeIndex = extractedTitle.FindFirst("|");
-                 if (pipeIndex != B_ERROR) {
-                     extractedTitle.Truncate(pipeIndex);
-                 }
+        BString extractedTitle;
 
-                 int32 closeBracketIndex = extractedTitle.FindFirst("]");
-                 if (closeBracketIndex != B_ERROR) {
-                     BString temp;
-                     extractedTitle.CopyInto(temp, closeBracketIndex + 1, extractedTitle.Length());
-                     extractedTitle = temp;
-                 }
-             }
-         }
-         
-         extractedTitle.Trim();
+        if (fChannelListView != nullptr) {
+            int32 selectedIndex = fChannelListView->CurrentSelection();
+            if (selectedIndex >= 0) {
+                ChannelListItem* listItem = (ChannelListItem*)fChannelListView->ItemAt(selectedIndex);
+                if (listItem != nullptr) {
+                    BString listRowText(listItem->textDisplay.c_str()); // e.g. "2.1 - WSBDT (Now: Channel 2 Action News)"
+                    
+                    int32 nowStart = listRowText.FindFirst("(Now: ");
+                    if (nowStart != B_ERROR) {
+                        int32 titleStart = nowStart + 6;
+                        int32 nowEnd = listRowText.FindFirst(")", titleStart);
+                        
+                        if (nowEnd != B_ERROR) {
+                            listRowText.CopyInto(extractedTitle, titleStart, nowEnd - titleStart);
+                        }
+                    }
+                }
+            }
+        }
 
+        if (extractedTitle.IsEmpty() && fStatusLabel != nullptr) {
+            BString fullStatus = fStatusLabel->Text();
+            
+            if (!fullStatus.StartsWith("Status:")) {
+                int32 prefixIndex = fullStatus.FindFirst(" - ");
+                if (prefixIndex != B_ERROR) {
+                    fullStatus.CopyInto(extractedTitle, prefixIndex + 3, fullStatus.Length());
+                } else {
+                    extractedTitle = fullStatus;
+                    extractedTitle.ReplaceFirst("Selected Lineup: ", "");
+                }
 
-         BString extractedLabel;
-         if (message->FindString("channel_label", &extractedLabel) == B_OK) {
-             config->channelLabel = extractedLabel.String();
-         } else {
-             config->channelLabel = "Ch_" + config->channel;
-         }
+                int32 pipeIndex = extractedTitle.FindFirst("|");
+                if (pipeIndex != B_ERROR) {
+                    extractedTitle.Truncate(pipeIndex);
+                }
 
-         BString cleanTitle = extractedTitle;
-         cleanTitle.ReplaceAll("/", "-");
-         cleanTitle.ReplaceAll(":", "-");
-         cleanTitle.ReplaceAll("\\", "-");
-         cleanTitle.ReplaceAll("*", "");
-         cleanTitle.ReplaceAll("?", "");
-         cleanTitle.ReplaceAll(" ", "_"); 
-         cleanTitle.Trim();
+                int32 closeBracketIndex = extractedTitle.FindFirst("]");
+                if (closeBracketIndex != B_ERROR) {
+                    BString temp;
+                    extractedTitle.CopyInto(temp, closeBracketIndex + 1, extractedTitle.Length());
+                    extractedTitle = temp;
+                }
+            }
+        }
+        
+        extractedTitle.Trim();
 
-         if (cleanTitle.IsEmpty() || cleanTitle == "Manual_Recording") {
-             config->showTitle = "Manual_Recording";
-         } else {
-             if (!cleanTitle.StartsWith("Manual_Recording")) {
-                 cleanTitle.Prepend("Manual_Recording_");
-             }
-             config->showTitle = cleanTitle.String();
-         }
+        // PERFECT COUPLING CLEANUP: STRIP ALL INTERMEDIATE NOISE TAGS
+        extractedTitle.ReplaceAll("Manual_Recording_", "");
+        extractedTitle.ReplaceAll("Manual_Recording", "");
+        extractedTitle.ReplaceAll("Live_Stream_Available", "");
+        extractedTitle.ReplaceAll("Live_Stream", "");
+        extractedTitle.Trim();
 
-         std::vector<std::string> foundTuners = DiscoverAllTuners();
-         BMenuItem* markedTuner = fTunerMenu->FindMarked();
-         
-         if (markedTuner != nullptr) {
-             config->ip = markedTuner->Label();
-             tunerAcquired = true;
+        BString cleanTitle = extractedTitle;
+        cleanTitle.ReplaceAll("/", "-");
+        cleanTitle.ReplaceAll(":", "-");
+        cleanTitle.ReplaceAll("\\", "-");
+        cleanTitle.ReplaceAll("*", "");
+        cleanTitle.ReplaceAll("?", "");
+        cleanTitle.ReplaceAll(" ", "_"); 
+        
+        // Squeeze out consecutive duplicate underscores
+        while (cleanTitle.FindFirst("__") != B_ERROR) {
+            cleanTitle.ReplaceAll("__", "_");
+        }
+        
+        // Trim leading/trailing underscores that remain after stripping text words
+        cleanTitle.Trim();
+        if (cleanTitle.StartsWith("_")) cleanTitle.Remove(0, 1);
+        if (cleanTitle.EndsWith("_")) cleanTitle.Truncate(cleanTitle.Length() - 1);
+
+        BString extractedLabel;
+        if (message->FindString("channel_label", &extractedLabel) == B_OK) {
+            config->channelLabel = extractedLabel.String();
+        } else {
+            config->channelLabel = "Ch_" + config->channel;
+        }
+
+        // Assign clean parsed title text directly, avoiding "Manual_Recording" completely
+        if (cleanTitle.IsEmpty()) {
+            config->showTitle = "Live_Stream"; 
+        } else {
+            config->showTitle = cleanTitle.String(); 
+        }
+
+        std::vector<std::string> foundTuners = DiscoverAllTuners();
+        BMenuItem* markedTuner = fTunerMenu->FindMarked();
+        
+        if (markedTuner != nullptr) {
+            config->ip = markedTuner->Label();
+            tunerAcquired = true;
          } else if (!foundTuners.empty()) {
-             config->ip = foundTuners[0];
+             config->ip = foundTuners[0]; // Access first indexed entry directly
              tunerAcquired = true;
          }
 
@@ -5196,7 +5233,7 @@ public:
              std::strftime(dateBuffer, sizeof(dateBuffer), "%Y-%m-%d", timeInfo);
              
              char timeBuffer[32];
-             std::strftime(timeBuffer, sizeof(timeBuffer), "%H-%M-%S", timeInfo);
+             std::strftime(timeBuffer, sizeof(timeBuffer), "%H-%M", timeInfo);
 
              config->path = baseDir + "DVR_Record_Ch_" + config->channel + "_" 
                           + dateBuffer + "_" + timeBuffer + "_"
@@ -5219,8 +5256,8 @@ public:
              fStopButton->SetEnabled(false);
          }
          break;
-         
-     }
+    }
+
 
         case MSG_GUIDE_TOGGLE_FULLSCREEN: {
             if (fGuideWindow != nullptr) {
