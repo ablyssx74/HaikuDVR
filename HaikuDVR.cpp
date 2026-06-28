@@ -55,12 +55,20 @@
 #include <iostream>
 #include <sqlite3.h>
 #include <MessageFilter.h>
+#include <InterfaceKit.h>
+#include <SupportKit.h>
+
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.24 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.25 (Haiku OS)";
 }
 
 
+
+
+const uint32 MSG_EXECUTE_SEARCH   			= 'exsr';
+const uint32 MSG_SEARCH_SELECTED		    = 'srsl';
+const uint32 MSG_OPEN_SEARCH_POPUP    		= 'mosp';
 const uint32 MSG_GUIDE_TOGGLE_FULLSCREEN    = 'gtfs';
 const uint32 MSG_TOGGLE_FULLSCREEN 			= 'enfs';
 const uint32 MSG_OPEN_CALENDAR_PANEL		= 'opcl';
@@ -1261,6 +1269,241 @@ int32 ClockSchedulerThread(void* data) {
 
 
 
+
+class SearchResultItem : public BListItem {
+public:
+    BString fTitle;
+    BString fChannel; 
+    BString fStartTime;
+    BString fEndTime;
+    BString fDescription;
+    
+    BString fXmlChannelId;
+    int64   fStartEpoch;
+	int64   fEndEpoch;
+    
+    SearchResultItem(const char* title, const char* chan, const char* start, 
+                     const char* end, const char* desc, const char* xmlId, int64 startEpoch, int64 endEpoch) {
+        fTitle = title;
+        fChannel = chan;
+        fStartTime = start;
+        fEndTime = end;
+        fDescription = desc;
+        fXmlChannelId = xmlId;
+        fStartEpoch = startEpoch;
+        fEndEpoch = endEpoch;
+    }
+
+    virtual void DrawItem(BView* owner, BRect itemRect, bool drawEverything) {
+        if (IsSelected()) {
+            owner->SetHighColor(ui_color(B_MENU_SELECTED_BACKGROUND_COLOR));
+        } else {
+            owner->SetHighColor(ui_color(B_PANEL_BACKGROUND_COLOR));
+        }
+        owner->FillRect(itemRect);
+
+        rgb_color titleColor = IsSelected() ? ui_color(B_MENU_SELECTED_ITEM_TEXT_COLOR) : ui_color(B_DOCUMENT_TEXT_COLOR);
+        rgb_color metaColor = (ui_color(B_PANEL_BACKGROUND_COLOR).red + ui_color(B_PANEL_BACKGROUND_COLOR).green + ui_color(B_PANEL_BACKGROUND_COLOR).blue > 384)
+                              ? rgb_color{100, 100, 100, 255} : rgb_color{170, 170, 170, 255};
+
+        owner->SetHighColor(titleColor);
+        owner->SetFont(be_bold_font);
+        owner->MovePenTo(itemRect.left + 10, itemRect.top + 16);
+        owner->DrawString(fTitle.String());
+
+        owner->SetHighColor(metaColor);
+        owner->SetFont(be_plain_font);
+        owner->MovePenTo(itemRect.left + 10, itemRect.top + 32);
+        
+        if (fStartTime == "via_combined") {
+            owner->DrawString(fChannel.String());
+        } else {
+            BString legacyLine;
+            legacyLine.SetToFormat("Ch %s | %s - %s", fChannel.String(), fStartTime.String(), fEndTime.String());
+            owner->DrawString(legacyLine.String());
+        }
+    }
+
+
+
+    virtual void Update(BView* owner, const BFont* font) {
+        BListItem::Update(owner, font);
+        SetHeight(40.0f); 
+    }
+    
+private:
+    bool is_repository_light_theme() {
+        rgb_color panelColor = ui_color(B_PANEL_BACKGROUND_COLOR);
+        return (panelColor.red + panelColor.green + panelColor.blue) > (128 * 3);
+    }
+};
+
+
+
+
+class ProgramSearchWindow : public BWindow {
+public:
+    ProgramSearchWindow(BWindow* parentMessengerTarget)
+        : BWindow(BRect(150, 150, 650, 550), "Program Guide Search", B_TITLED_WINDOW, 
+                  B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS) 
+    {
+        fParentTarget = parentMessengerTarget;
+        BView* rootPanel = new BView(Bounds(), "searchRoot", B_FOLLOW_ALL, B_WILL_DRAW);
+        rootPanel->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
+        AddChild(rootPanel);
+
+        fSearchBox = new BTextControl(BRect(10, 10, 390, 35), "searchQuery", 
+                                      "Search Title:", "", new BMessage(MSG_EXECUTE_SEARCH));
+        fSearchBox->SetModificationMessage(new BMessage(MSG_EXECUTE_SEARCH)); 
+        rootPanel->AddChild(fSearchBox);
+
+        BRect listFrame(10, 45, Bounds().Width() - 26, Bounds().Height() - 15);
+        fResultsList = new BListView(listFrame, "resultsView", B_SINGLE_SELECTION_LIST, B_FOLLOW_ALL);
+        fResultsList->SetSelectionMessage(new BMessage(MSG_SEARCH_SELECTED));
+        
+        BScrollView* scrollerShelf = new BScrollView("listScroller", fResultsList, 
+                                                    B_FOLLOW_ALL, 0, false, true);
+        rootPanel->AddChild(scrollerShelf);
+
+        fSearchBox->MakeFocus(true);
+
+        CenterOnScreen();
+    }
+
+
+    virtual void MessageReceived(BMessage* message) {
+        switch (message->what) {
+            case MSG_EXECUTE_SEARCH: {
+                _PerformDatabaseQuery(fSearchBox->Text());
+                break;
+            }
+            case MSG_SEARCH_SELECTED: {
+                int32 selectionIdx = fResultsList->CurrentSelection();
+                if (selectionIdx >= 0) {
+                    SearchResultItem* selectedItem = (SearchResultItem*)fResultsList->ItemAt(selectionIdx);
+                    if (selectedItem != nullptr && fParentTarget != nullptr) {
+                        BMessage selectionNotice(MSG_SEARCH_SELECTED);
+                        selectionNotice.AddString("title", selectedItem->fTitle);
+                        selectionNotice.AddString("description", selectedItem->fDescription);
+                        selectionNotice.AddString("channel", selectedItem->fChannel);
+                        selectionNotice.AddString("channel_id", selectedItem->fXmlChannelId);
+                        selectionNotice.AddInt64("start_epoch", selectedItem->fStartEpoch);
+                        selectionNotice.AddInt64("end_epoch", selectedItem->fEndEpoch); 
+                        // =========================================================================
+                        
+                        fParentTarget->PostMessage(&selectionNotice);
+                    }
+                }
+                break;
+            }
+
+            default:
+                BWindow::MessageReceived(message);
+                break;
+        }
+    }
+
+
+private:
+    BWindow*       fParentTarget;
+    BTextControl*  fSearchBox;
+    BListView*     fResultsList;
+
+    void _PerformDatabaseQuery(const char* userQuery) {
+        // Purge old results list heap memory references safely
+        for (int32 i = fResultsList->CountItems() - 1; i >= 0; i--) {
+            delete fResultsList->RemoveItem(i);
+        }
+
+        BString cleanedQuery(userQuery);
+        cleanedQuery.Trim();
+        if (cleanedQuery.Length() < 2) return; 
+
+        sqlite3* db = nullptr;
+        const char* dbPath = "/boot/home/config/settings/HaikuDVR/guide.db";
+        
+        if (sqlite3_open(dbPath, &db) != SQLITE_OK) {
+            if (db) sqlite3_close(db);
+            return;
+        }
+
+        // =========================================================================
+        // UNIFIED SCHEMA JOIN & TIME CONVERSION QUERY (WITH DURATION TRACKERS)
+        // =========================================================================
+        const char* sqlTemplate = 
+            "SELECT p.title, c.lcn, "
+            "       time(p.start_epoch, 'unixepoch', 'localtime') AS start_time, "
+            "       time(p.end_epoch, 'unixepoch', 'localtime') AS end_time, "
+            "       p.desc, "
+            "       strftime('%Y-%m-%d', p.start_epoch, 'unixepoch', 'localtime') AS air_date, "
+            "       p.channel_id, p.start_epoch, p.end_epoch " 
+            "FROM programs p "
+            "LEFT JOIN channels c ON p.channel_id = c.xml_id "
+            "WHERE lower(p.title) LIKE lower(?) "
+            "ORDER BY p.start_epoch ASC LIMIT 100;";
+        
+        sqlite3_stmt* statement = nullptr;
+        int prepareResult = sqlite3_prepare_v2(db, sqlTemplate, -1, &statement, nullptr);
+        
+        if (prepareResult == SQLITE_OK) {
+            BString bindPattern;
+            bindPattern.SetToFormat("%%%s%%", cleanedQuery.String());
+            sqlite3_bind_text(statement, 1, bindPattern.String(), -1, SQLITE_TRANSIENT);
+
+            while (sqlite3_step(statement) == SQLITE_ROW) {
+                const char* title   = (const char*)sqlite3_column_text(statement, 0);
+                const char* lcn     = (const char*)sqlite3_column_text(statement, 1);
+                const char* start   = (const char*)sqlite3_column_text(statement, 2);
+                const char* end     = (const char*)sqlite3_column_text(statement, 3);
+                const char* desc    = (const char*)sqlite3_column_text(statement, 4);
+                const char* airDate = (const char*)sqlite3_column_text(statement, 5);
+                const char* xmlId   = (const char*)sqlite3_column_text(statement, 6);
+                int64 startEpoch    = (int64)sqlite3_column_int64(statement, 7);
+                int64 endEpoch      = (int64)sqlite3_column_int64(statement, 8);
+
+                // Convert SQLite's standard 24-hour time string ("HH:MM:SS") to clean 12-hour AM/PM format
+                BString cleanStart = "--:--", cleanEnd = "--:--";
+                int hStart = 0, mStart = 0, hEnd = 0, mEnd = 0;
+                
+                // Prepend the calendar date cleanly if available to separate repetitive listings
+                BString prefixDate = (airDate != nullptr) ? airDate : "";
+                if (!prefixDate.IsEmpty()) {
+                    prefixDate << " @ ";
+                }
+
+                if (start && std::sscanf(start, "%d:%d", &hStart, &mStart) == 2) {
+                    int dispH = (hStart > 12) ? (hStart - 12) : ((hStart == 0) ? 12 : hStart);
+                    cleanStart.SetToFormat("%s%d:%02d %s", prefixDate.String(), dispH, mStart, (hStart >= 12 ? "PM" : "AM"));
+                }
+                if (end && std::sscanf(end, "%d:%d", &hEnd, &mEnd) == 2) {
+                    int dispH = (hEnd > 12) ? (hEnd - 12) : ((hEnd == 0) ? 12 : hEnd);
+                    cleanEnd.SetToFormat("%d:%02d %s", dispH, mEnd, (hEnd >= 12 ? "PM" : "AM"));
+                }
+
+                // FIXED PACKETS: Pass baseline parameters directly matching SearchResultItem specs perfectly
+                fResultsList->AddItem(new SearchResultItem(
+                    title ? title : "Unknown Title",
+                    lcn   ? lcn   : "??",
+                    cleanStart.String(),
+                    cleanEnd.String(),
+                    desc  ? desc  : "",
+                    xmlId ? xmlId : "",
+                    startEpoch,
+                    endEpoch
+                ));
+            }
+        } else {
+            printf("[DVR Search Debug] SQL Compilation Failed: %s\n", sqlite3_errmsg(db));
+        }
+        
+        sqlite3_finalize(statement);
+        sqlite3_close(db);
+    }
+
+
+};
+
+
 // =========================================================================
 //  HEADER VIEW WITH PERFECTLY CENTERED GLYPHS AND MELLOW HOVER GLOWS
 // =========================================================================
@@ -1270,14 +1513,14 @@ private:
     BRect fTimeDownRect;
     BRect fTimeUpRect;
     BWindow* fMainAppTarget;
-    BString fCachedSelectedTime;
+    BRect fSearchClickRect;
 public:
     BString fCachedSelectedDate;
+    BString fCachedSelectedTime;
 private:
     bool fHoveringMinus;
     bool fHoveringPlus;
 
-    // Helper method to draw a glyph perfectly centered inside a rectangle
     void DrawCenteredGlyph(const char* glyph, BRect rect, BFont* font) {
         float stringWidth = font->StringWidth(glyph);
         
@@ -1309,9 +1552,16 @@ public:
         fTimeDownRect.Set(200.0, 8.0, 222.0, 32.0);
         fTimeUpRect.Set(230.0, 8.0, 252.0, 32.0);
 
-        // CRITICAL FOR HOVER: Tell Haiku to send mouse tracking events even if buttons aren't clicked
+        fDateClickRect.Set(90.0, 0.0, 185.0, frame.Height());
+        fTimeDownRect.Set(200.0, 8.0, 222.0, 32.0);
+        fTimeUpRect.Set(230.0, 8.0, 252.0, 32.0);
+
+        fSearchClickRect.Set(270.0f, 0.0f, 450.0f, frame.Height());
+
         SetEventMask(B_POINTER_EVENTS, 0);
     }
+
+
 
     void MouseMoved(BPoint point, uint32 transit, const BMessage* message) override {
         bool oldHoverMinus = fHoveringMinus;
@@ -1401,8 +1651,8 @@ public:
             SetHighColor(textColor);
         }
         DrawCenteredGlyph("+", fTimeUpRect, &glyphFont);
-
-        // =========================================================================
+		
+   		// =========================================================================
         // TIMELINE RENDERING 
         // =========================================================================
         SetFont(&labelFont);
@@ -1439,7 +1689,6 @@ public:
                 // =========================================================================
                 BString processedSelectedTime = fCachedSelectedTime;
                 
-                // FIXED: Using standard native int allows sscanf to write values safely
                 int selHour = 12, selMin = 0; 
                 
                 if (std::sscanf(processedSelectedTime.String(), "%d:%d", &selHour, &selMin) == 2) {
@@ -1449,53 +1698,29 @@ public:
                     int displayHour = (selHour > 12) ? (selHour - 12) : ((selHour == 0) ? 12 : selHour);
                     processedSelectedTime.SetToFormat("%d:%02d %s", displayHour, selMin, ampmBuf);
                 }
+				
 
-                // =========================================================================
-                // 2. TYPESET UNIFIED DATA STRINGS WITH ALIGNED TABLE COLUMNS
-                // =========================================================================
-                BString timePart1, timePart2;
-                timePart1.SetToFormat("Current Time: %s", cleanLiveTime.String());
-                timePart2.SetToFormat("Selected Time: %s", processedSelectedTime.String());
+                PushState();
+                SetHighColor(rgb_color{255, 255, 255, 255}); 
                 
-                BString datePart1, datePart2;
-                datePart1.SetToFormat("Current Date: %s", liveDateBuf);
-                datePart2.SetToFormat("Selected Date: %s", fCachedSelectedDate.String());
+                BFont searchFont;
+                GetFont(&searchFont);
+                searchFont.SetFace(B_REGULAR_FACE);
+                
+                searchFont.SetSize(13.5f);
+                SetFont(&searchFont);
 
-                float firstColumnWidth = 125.0f;
-                float separatorOffset = currentLeft + 16.0f + firstColumnWidth;
-
-                // =========================================================================
-                // 3. PAINT GRID STRINGS (ALL UNIFIED IN CRISP TEXTURE WHITE)
-                // =========================================================================
-                SetHighColor(textColor); 
-                
-                MovePenTo(currentLeft + 16.0f, bounds.top + 16.0f);
-                DrawString(timePart1.String());
-                
-                MovePenTo(separatorOffset, bounds.top + 16.0f);
-                DrawString("|");
-                
-                MovePenTo(separatorOffset + 14.0f, bounds.top + 16.0f);
-                DrawString(timePart2.String());
-
-                MovePenTo(currentLeft + 16.0f, bounds.top + 31.0f);
-                DrawString(datePart1.String());
-                
-                MovePenTo(separatorOffset, bounds.top + 31.0f);
-                DrawString("|");
-                
-                MovePenTo(separatorOffset + 14.0f, bounds.top + 31.0f);
-                DrawString(datePart2.String());
+                MovePenTo(310.0f, bounds.top + 26.0f);
+                DrawString("🔍 Search Program Guide...");
+                PopState();
 
                 SetFont(&labelFont);
 
-            
             } else {
                 SetHighColor(textColor);
                 MovePenTo(currentLeft + 20, bounds.top + 24);
                 DrawString(timeIntervals[i]);
             }
-
 
             SetHighColor(gridLineColor);
             StrokeLine(BPoint(currentLeft + kCellWidth - 12, bounds.top + 8), 
@@ -1503,17 +1728,15 @@ public:
             
             currentLeft += kCellWidth;
         }
-
+		
         SetHighColor(gridLineColor);
         StrokeLine(BPoint(bounds.left, bounds.bottom), BPoint(bounds.right, bounds.bottom));
     }
 
-
-
     void MouseDown(BPoint point) override {
         if (fMainAppTarget != nullptr) {
             BMessenger targetMessenger(fMainAppTarget);
-
+			BRect bounds = Bounds();
             if (fDateClickRect.Contains(point)) {
                 BPoint dropPoint = ConvertToScreen(BPoint(fDateClickRect.left, fDateClickRect.bottom));
                 CalendarWindow* calWin = new CalendarWindow(dropPoint, targetMessenger);
@@ -1527,17 +1750,23 @@ public:
                 BMessage msg(MSG_CLOCK_UP);
                 targetMessenger.SendMessage(&msg);
             }
+            else if (point.x >= 300.0f && point.x <= 550.0f && 
+                     point.y >= 0.0f && point.y <= bounds.Height()) {
+                BMessage msg(MSG_OPEN_SEARCH_POPUP);
+                targetMessenger.SendMessage(&msg);
+            }
         }
         BView::MouseDown(point);
     }
+
     
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
+        	
  			case 'UCLT': { 
                 const char* newTime = nullptr;
                 const char* newDate = nullptr;
                 
-                // Securely extract the updated strings sent from FetchAndPopulateChannelList
                 if (message->FindString("time", &newTime) == B_OK && newTime != nullptr) {
                     fCachedSelectedTime.SetTo(newTime);
                 }
@@ -1545,7 +1774,6 @@ public:
                     fCachedSelectedDate.SetTo(newDate);
                 }
                 
-                // Immediately force the Haiku app_server to re-render the view
                 Invalidate(); 
                 break;
             }
@@ -1568,7 +1796,21 @@ public:
     const BBitmap* channelIcon;
 
     ChannelListItem(const char* text, const BBitmap* cachedIcon) : BListItem() {
-        textDisplay = text;
+        // =========================================================================
+        // NATIVE QUICK VIEW TEXT SCRUBBER (HTML ENTITY DECODER ENGINE)
+        // =========================================================================
+        // Decodes HTML data strings natively right at the moment of row creation
+        BString scrubbed(text ? text : "");
+        scrubbed.ReplaceAll("&amp;",  "&");
+        scrubbed.ReplaceAll("&quot;", "\"");
+        scrubbed.ReplaceAll("&apos;", "'");
+        scrubbed.ReplaceAll("&#39;",  "'");
+        scrubbed.ReplaceAll("&lt;",   "<");
+        scrubbed.ReplaceAll("&gt;",   ">");
+        
+        textDisplay = scrubbed.String(); // Assign clean plain text to your display string
+        // =========================================================================
+        
         channelIcon = cachedIcon;
     }
 
@@ -1616,6 +1858,7 @@ public:
         owner->DrawString(textDisplay.c_str());
     }
 };
+
 
 
 
@@ -2394,13 +2637,73 @@ public:
                             gScheduleLocker.Unlock();
                         }
 
-                        if (matchingActiveIndex != -1) {
-                            removeItem = new BMenuItem("Remove Queue", NULL);
-                            contextMenu->AddItem(removeItem);
-                        } else {
-                            queueItem = new BMenuItem("Add to Queue", NULL);
-                            contextMenu->AddItem(queueItem);
+                        // =========================================================================
+                        // HISTORICAL TIME SAFEGUARD: SQL BACKEND LOOKUP FOR PAST SHOWS
+                        // =========================================================================
+                        bool hasAlreadyAired = false;
+                        sqlite3* db = nullptr;
+                        const char* dbPath = "/boot/home/config/settings/HaikuDVR/guide.db";
+                        
+                        if (sqlite3_open(dbPath, &db) == SQLITE_OK) {
+                            const char* sql = "SELECT p.end_epoch FROM programs p "
+                                              "LEFT JOIN channels c ON p.channel_id = c.xml_id "
+                                              "WHERE (c.lcn = ? OR p.channel_id = ?) "
+                                              "  AND lower(p.title) = lower(?) "
+                                              "  AND strftime('%Y-%m-%d', p.start_epoch, 'unixepoch', 'localtime') = ? "
+                                              "ORDER BY p.end_epoch DESC LIMIT 1;";
+                            
+                            sqlite3_stmt* stmt = nullptr;
+                            if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                                
+                                // =========================================================================
+                                // FIXED DATE PARSING: DIRECT WINDOW HIERARCHY ACCESS
+                                // =========================================================================
+                                BString visibleGridDate("2026-06-28"); // Safe current baseline fallback
+                                
+                                if (Window() != nullptr) {
+                                    // Query the timeline header subview directly from the active Guide window frame
+                                    BView* childHeader = Window()->FindView("timelineHeader");
+                                    if (childHeader != nullptr) {
+                                        TimelineHeaderView* headerView = dynamic_cast<TimelineHeaderView*>(childHeader);
+                                        if (headerView != nullptr && !headerView->fCachedSelectedDate.IsEmpty()) {
+                                            visibleGridDate = headerView->fCachedSelectedDate;
+                                        }
+                                    }
+                                }
+                                // =========================================================================
+
+                                sqlite3_bind_text(stmt, 1, targetChannel.c_str(), -1, SQLITE_TRANSIENT);
+                                sqlite3_bind_text(stmt, 2, targetChannel.c_str(), -1, SQLITE_TRANSIENT);
+                                sqlite3_bind_text(stmt, 3, targetTitle.c_str(), -1, SQLITE_TRANSIENT);
+                                sqlite3_bind_text(stmt, 4, visibleGridDate.String(), -1, SQLITE_TRANSIENT);
+                                
+                                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                                    int64 endEpoch = (int64)sqlite3_column_int64(stmt, 0);
+                                    std::time_t currentSysTime = std::time(nullptr);
+                                    
+                                    if (endEpoch < (int64)currentSysTime) {
+                                        hasAlreadyAired = true;
+                                    }
+                                }
+                                sqlite3_finalize(stmt);
+                            }
+                            sqlite3_close(db);
                         }
+
+                        // CONTEXT MENU COMPOSITION WITH ACTIVE SAFEGUARDS
+                        if (matchingActiveIndex != -1) {
+                            BMenuItem* removeItem = new BMenuItem("Remove Queue", NULL);
+                            contextMenu->AddItem(removeItem);
+                        } else if (!hasAlreadyAired) {
+                            BMenuItem* queueItem = new BMenuItem("Add to Queue", NULL);
+                            contextMenu->AddItem(queueItem);
+                        } else {
+                            BMenuItem* expiredItem = new BMenuItem("Program Already Aired", NULL);
+                            expiredItem->SetEnabled(false);
+                            contextMenu->AddItem(expiredItem);
+                        }
+
+
 
                         contextMenu->AddSeparatorItem();
                         BMenuItem* viewRecsItem = new BMenuItem("Open Recordings", new BMessage(MSG_VIEW_RECORDINGS));
@@ -2672,10 +2975,11 @@ public:
 
     BWindow* GetMainWindow() const { return fMainAppWindow; }
 
-private:
-    BListView* fContainerList;
+private:    
     BWindow* fMainAppWindow;
+public:
     BListView* fMainChannelListView;
+    BListView* fContainerList;
 
 
 // @Datapusher
@@ -2961,13 +3265,6 @@ bool IsRemoteFileNewer(const std::string& url, const std::string& localPath) {
 }
 
 
-
-
-
-
-// Ensure your compile link flag includes: -lsqlite3
-
-// Ensure your compile link flag includes: -lsqlite3
 
 bool IngestMasterXmlToSqlite(const std::string& masterXmlPath, const std::string& dbPath) {
     sqlite3* db = nullptr;
@@ -3809,12 +4106,28 @@ void RefreshScheduleListView() {
                 
                 std::string shortDate = (item.startDate.length() >= 10) ? item.startDate.substr(5) : item.startDate;
                 
-                std::string entryLabel = shortDate + " @ " + item.startTime + " -> Ch " + item.channel + " (" + durText + ")";
+                // =========================================================================
+                // INLINE STRING FORMATTER: SWAP FILE UNDERSCORES BACK TO SPACES
+                // =========================================================================
+                // Convert file underscores back into beautiful user-friendly spaces on-the-fly!
+                BString readableTitle(item.showTitle.c_str());
+                readableTitle.ReplaceAll("_", " ");
+                
+                if (readableTitle.IsEmpty()) {
+                    readableTitle = "Live Stream";
+                }
+
+                // Appends the clean title string right onto the end of your formatted entry row line
+                std::string entryLabel = shortDate + " @ " + item.startTime + " -> Ch " + 
+                                         item.channel + " (" + durText + ") - " + readableTitle.String();
+                // =========================================================================
+                
                 fScheduleListView->AddItem(new BStringItem(entryLabel.c_str()));
             }
         }
         gScheduleLocker.Unlock();
     }
+
 
 
 
@@ -3963,6 +4276,17 @@ public:
         AddDurationItem("1 Hour",     "3600");
         AddDurationItem("1.5 Hours",  "5400");
         AddDurationItem("2 Hours",    "7200");        
+        
+        // =========================================================================
+        // EXTENDED MOVIE & SPORTING EVENT DURATION OPTIONS
+        // =========================================================================
+        // Appends the missing high-duration tags using your custom helper function
+        AddDurationItem("2.5 Hours",  "9000");
+        AddDurationItem("3 Hours",     "10800");
+        AddDurationItem("3.5 Hours",  "12600");
+        AddDurationItem("4 Hours",     "14400");
+        // =========================================================================
+
         fTunerSelector = new BMenuField(BRect(20, 35, 330, 60), "tuner_field", "Tuner IP:", fTunerMenu);
         fTunerSelector->SetDivider(85.0);
         fChannelInput = new BTextControl(BRect(20, 70, 330, 95), "channel", "Channel:", "5.1", NULL);
@@ -3972,6 +4296,7 @@ public:
         fDurationSelector->SetDivider(85.0); 
         BFont digitalFont(be_fixed_font);
         digitalFont.SetSize(13.0);
+
         rgb_color digitalGreen = { 0, 130, 0, 255 };
         std::time_t now = std::time(nullptr);
         std::tm* localTime = std::localtime(&now);
@@ -4014,8 +4339,12 @@ public:
         BButton* btnOpenGuide = new BButton(BRect(20, 255, 170, 290), "open_guide", "Open Guide", new BMessage(MSG_OPEN_GUIDE));
         BButton* btnOpenRecordings = new BButton(BRect(180, 255, 330, 290), "open_recordings", "Open Recordings", new BMessage(MSG_VIEW_RECORDINGS));
         
-        fScheduleButton = new BButton(BRect(20, 300, 330, 335), "schedule", "Queue Scheduled Show", new BMessage(MSG_ADD_SCHEDULE));
-  
+        BButton* btnSearchGuide = new BButton(BRect(20, 300, 170, 335), "search_guide", "Search Guide", new BMessage(MSG_OPEN_SEARCH_POPUP));
+        
+        // Queue button shifted to the right half (X: 180 to 330)
+        fScheduleButton = new BButton(BRect(180, 300, 330, 335), "schedule", "Queue Show", new BMessage(MSG_ADD_SCHEDULE));
+        // =========================================================================
+
         if (fBrowseButton != nullptr) {
             fBrowseButton->MoveTo(20, 345);
             fBrowseButton->ResizeTo(310, 35);
@@ -4092,6 +4421,7 @@ public:
         view->AddChild(fStopButton);
         view->AddChild(btnOpenGuide);
         view->AddChild(btnOpenRecordings);
+        view->AddChild(btnSearchGuide);
         view->AddChild(fScheduleButton);
         view->AddChild(fBrowseButton);
         view->AddChild(fStatusLabel);
@@ -4421,7 +4751,181 @@ public:
          break;
      }
      
+     
+     
+     
+     
+         case MSG_OPEN_SEARCH_POPUP: {
+                // FIXED: Inside DVRWindow, "this" points directly to the BWindow instance!
+                ProgramSearchWindow* searchEnginePopup = new ProgramSearchWindow(this);
+                searchEnginePopup->Show();
+                break;
+            }
 
+
+
+
+
+           case MSG_SEARCH_SELECTED: {
+            BString foundTitle, foundDesc, targetChannelId, friendlyChannelNum;
+            int64 targetEpoch = 0;
+            
+            if (message->FindString("title", &foundTitle) == B_OK) {
+                // Populates manual text inputs if needed
+            }
+            
+            if (message->FindString("description", &foundDesc) == B_OK) {
+                if (fStatusLabel != nullptr) {
+                    BString statusDisplay;
+                    statusDisplay.SetToFormat("Selected Guide Show: %s | %s", foundTitle.String(), foundDesc.String());
+                    fStatusLabel->SetText(statusDisplay.String());
+                }
+            }
+
+            // INSTANT SNAPPING AND VIEW ALIGNMENT CONTROLLER
+            if (message->FindString("channel_id", &targetChannelId) == B_OK &&
+                message->FindInt64("start_epoch", &targetEpoch) == B_OK &&
+                message->FindString("channel", &friendlyChannelNum) == B_OK) {
+
+                // 1. VERTICAL SCROLL (MAIN WINDOW): Snap list selection to the channel row index
+                if (fChannelListView != nullptr) {
+                    int32 rowCount = fChannelListView->CountItems();
+                    for (int32 i = 0; i < rowCount; i++) {
+                        ChannelListItem* channelRow = (ChannelListItem*)fChannelListView->ItemAt(i);
+                        if (channelRow != nullptr) {
+                            BString checkText(channelRow->textDisplay.c_str());
+                            BString searchMatchPattern;
+                            searchMatchPattern.SetToFormat("%s -", friendlyChannelNum.String());
+
+                            if (checkText.FindFirst(searchMatchPattern) != B_ERROR || checkText.StartsWith(friendlyChannelNum)) {
+                                fChannelListView->Select(i);
+                                fChannelListView->ScrollToSelection();
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 2. HORIZONTAL TIMELINE UPDATE: Sync grid timeline coordinates
+                std::time_t epochTime = (std::time_t)targetEpoch;
+                std::tm* localTimeBox = std::localtime(&epochTime);
+                
+                if (localTimeBox != nullptr) {
+                    char timeBuf[32] = {0};
+                    char dateBuf[32] = {0};
+                    std::strftime(timeBuf, sizeof(timeBuf), "%H:%M", localTimeBox);
+                    std::strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", localTimeBox);
+                    
+                    if (fTimeInput != nullptr) fTimeInput->SetText(timeBuf);
+                    if (fDateInput != nullptr) fDateInput->SetText(dateBuf);
+                    if (fChannelInput != nullptr) fChannelInput->SetText(friendlyChannelNum.String());
+
+                    // DURATION DROPDOWN MANAGER ENGINE
+                    int64 targetEndEpoch = 0;
+                    int32 showMinutes = 30; // Reliable fallback metric bounds
+                    if (message->FindInt64("end_epoch", &targetEndEpoch) == B_OK && targetEndEpoch > targetEpoch) {
+                        showMinutes = (int32)((targetEndEpoch - targetEpoch) / 60);
+                    }
+
+                    if (fDurationMenu != nullptr && showMinutes > 0) {
+                        BString targetMenuLabel;
+                        if (showMinutes < 60) {
+                            targetMenuLabel.SetToFormat("%d Minutes", showMinutes);
+                        } else {
+                            double hoursValue = (double)showMinutes / 60.0;
+                            if (showMinutes % 60 == 0) {
+                                targetMenuLabel.SetToFormat("%.0f Hour%s", hoursValue, (hoursValue > 1.0 ? "s" : ""));
+                            } else {
+                                targetMenuLabel.SetToFormat("%.1f Hours", hoursValue);
+                            }
+                        }
+
+                        BMenuItem* targetMenuItem = fDurationMenu->FindItem(targetMenuLabel.String());
+                        if (targetMenuItem != nullptr) {
+                            targetMenuItem->SetMarked(true);
+                            if (fDurationSelector != nullptr && fDurationSelector->MenuBar() != nullptr) {
+                                BMenuBar* menuBarContainer = fDurationSelector->MenuBar();
+                                if (menuBarContainer->CountItems() > 0) {
+                                    BMenuItem* activeFieldItem = menuBarContainer->ItemAt(0);
+                                    if (activeFieldItem != nullptr) {
+                                        activeFieldItem->SetLabel(targetMenuLabel.String());
+                                    }
+                                }
+                                fDurationSelector->Invalidate();
+                            }
+                        }
+
+                        BString secondsConverter;
+                        secondsConverter.SetToFormat("%d", showMinutes * 60);
+                        fSelectedDurationSeconds = secondsConverter.String();
+                    }
+
+                    // 3. CROSS-WINDOW SATELLITE COUPLING: Synchronize timelines and scroll grids
+                    FetchAndPopulateChannelList(dateBuf);
+
+                    if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+                        RealTVGuideWindow* guideWin = dynamic_cast<RealTVGuideWindow*>(fGuideWindow);
+
+                        BView* childHeader = fGuideWindow->FindView("timelineHeader");
+                        if (childHeader != nullptr) {
+                            TimelineHeaderView* headerView = dynamic_cast<TimelineHeaderView*>(childHeader);
+                            if (headerView != nullptr) {
+                                headerView->fCachedSelectedTime = timeBuf;
+                                headerView->fCachedSelectedDate = dateBuf;
+                            }
+                        }
+
+                        // Rebuild guide database row data cell arrays
+                        BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
+                        fGuideWindow->PostMessage(&refreshGuide);
+                        
+                        if (childHeader != nullptr) {
+                            BMessage syncHeaderMsg('UCLT');
+                            syncHeaderMsg.AddString("time", timeBuf);
+                            syncHeaderMsg.AddString("date", dateBuf);
+                            BMessenger(childHeader).SendMessage(&syncHeaderMsg);
+                        }
+
+                        // Coordinate grid viewport scrolling vertically down to the target channel index row
+                        if (guideWin != nullptr && guideWin->fMainChannelListView != nullptr) {
+                            int32 guideRowCount = guideWin->fMainChannelListView->CountItems();
+                            for (int32 k = 0; k < guideRowCount; k++) {
+                                ChannelListItem* guideRowItem = (ChannelListItem*)guideWin->fMainChannelListView->ItemAt(k);
+                                if (guideRowItem != nullptr) {
+                                    BString checkGuideText(guideRowItem->textDisplay.c_str());
+                                    BString searchMatchPattern;
+                                    searchMatchPattern.SetToFormat("%s -", friendlyChannelNum.String());
+
+                                    if (checkGuideText.FindFirst(searchMatchPattern) != B_ERROR || checkGuideText.StartsWith(friendlyChannelNum)) {
+                                        guideWin->fMainChannelListView->Select(k);
+                                        guideWin->fMainChannelListView->ScrollToSelection();
+                                        
+                                        if (guideWin->fContainerList != nullptr) {
+                                            guideWin->fContainerList->Select(k);
+                                            guideWin->fContainerList->ScrollToSelection();
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (childHeader != nullptr) {
+                            childHeader->Invalidate(); 
+                            if (childHeader->Parent() != nullptr) {
+                                childHeader->Parent()->Invalidate();
+                            }
+                        }
+                        
+                        fGuideWindow->Unlock();
+                    }
+                }
+            }
+            break;
+        }
+
+
+ 
  	
          case MSG_FILTER_ALL:
          case MSG_FILTER_HD:
@@ -4530,7 +5034,8 @@ public:
 	     case MSG_REFRESH_SCHEDULES:
 	         RefreshScheduleListView();
 	         break;
-
+	         
+	         
 
          case MSG_CHANNEL_CLICKED: {
              int32 selection = fChannelListView->CurrentSelection();
@@ -4539,41 +5044,88 @@ public:
                  
                  fChannelInput->SetText(channel.guideNumber.c_str());
                  
-                 std::string guidePreview = "Lineup for " + channel.guideName + ": ";
-                 if (!channel.futureLineup.empty()) {
-                     for (size_t s = 0; s < channel.futureLineup.size(); s++) {
-                         BString cleanTitle(channel.futureLineup[s].title.c_str());
-                         
-                         cleanTitle.ReplaceAll("&amp;", "&");
-                         cleanTitle.ReplaceAll("&lt;", "<");
-                         cleanTitle.ReplaceAll("&gt;", ">");
-                         cleanTitle.ReplaceAll("&quot;", "\"");
-                         cleanTitle.ReplaceAll("&apos;", "'");
+                 // =========================================================================
+                 // SINGLE SELECTED SHOW INFORMATION TRACKER
+                 // =========================================================================
+                 BString cleanTitle(channel.nowPlaying.c_str());
+                 BString cleanDesc(channel.nowPlayingDescription.c_str());
+                 
+                 // Decode HTML/XML escape fragments into pristine plain text characters
+                 auto CleanTextStrings = [](BString& s) {
+                     s.ReplaceAll("&amp;",  "&");
+                     s.ReplaceAll("&quot;", "\"");
+                     s.ReplaceAll("&apos;", "'");
+                     s.ReplaceAll("&#39;",  "'");
+                     s.ReplaceAll("&lt;",   "<");
+                     s.ReplaceAll("&gt;",   ">");
+                     s.Trim();
+                 };
+                 
+                 CleanTextStrings(cleanTitle);
+                 CleanTextStrings(cleanDesc);
 
-                         guidePreview += "[";
-                         guidePreview += channel.futureLineup[s].startTimeStr;
-                         guidePreview += "] ";
-                         guidePreview += cleanTitle.String();
-                                      
-                         if (s < channel.futureLineup.size() - 1) {
-                             guidePreview += "  |  ";
+                 if (cleanTitle.IsEmpty()) {
+                     cleanTitle = "Live Stream / Unknown Program";
+                 }
+                 if (cleanDesc.IsEmpty()) {
+                     cleanDesc = "No further program description text details provided by broadcaster.";
+                 }
+
+                 // Generate a unified layout display string: "Selected: [Until 10:00 PM] Title — Description"
+                 BString finalCleanPreview;
+                 finalCleanPreview.SetToFormat("Selected Channel %s: [Until %s] %s — %s",
+                     channel.guideNumber.c_str(),
+                     channel.nowPlayingEndTimeStr.c_str(),
+                     cleanTitle.String(),
+                     cleanDesc.String()
+                 );
+                 
+                 // =========================================================================
+                 // AUTOMATIC DURATION DROPDOWN UPDATE ENGINE
+                 // =========================================================================
+                 if (fDurationMenu != nullptr) {
+                     // 1. Fall back safely to 30 minutes if the guide data variable is missing
+                     int32 showMinutes = channel.nowPlayingDurationMinutes;
+                     if (showMinutes <= 0) {
+                         showMinutes = 30; 
+                     }
+
+                     // 2. Generate the exact textual menu item string label to search for
+                     BString targetMenuLabel;
+                     if (showMinutes < 60) {
+                         targetMenuLabel.SetToFormat("%d Minutes", showMinutes);
+                     } else {
+                         // Formats clean whole/fractional hour strings dynamically (e.g. 60m -> "1 Hour", 90m -> "1.5 Hours")
+                         double hoursValue = (double)showMinutes / 60.0;
+                         if (showMinutes % 60 == 0) {
+                             targetMenuLabel.SetToFormat("%.0f Hour%s", hoursValue, (hoursValue > 1.0 ? "s" : ""));
+                         } else {
+                             targetMenuLabel.SetToFormat("%.1f Hours", hoursValue);
                          }
                      }
-                 } else {
-                     guidePreview += "No upcoming schedule data available.";
+
+                     // 3. Scan and find the exact BMenuItem matching the string layout
+                     BMenuItem* targetMenuItem = fDurationMenu->FindItem(targetMenuLabel.String());
+                     if (targetMenuItem != nullptr) {
+                         targetMenuItem->SetMarked(true); // Highlights the item inside the menu pop-up container
+                     }
+
+                     // 4. SYNCHRONIZE BACKGROUND RECORDING STATE ARRAYS
+                     // FIXED: Used .String() to match native Haiku BString conventions
+                     BString secondsConverter;
+                     secondsConverter.SetToFormat("%d", showMinutes * 60);
+                     fSelectedDurationSeconds = secondsConverter.String(); // Updates std::string context properties safely
                  }
-                 
-                 BString finalCleanPreview(guidePreview.c_str());
-                 finalCleanPreview.ReplaceAll("&amp;", "&");
+                 // =========================================================================
                  
                  fStatusLabel->SetText(finalCleanPreview.String());
                  fStatusLabel->SetFont(be_bold_font);
-                 
                  fStatusLabel->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
                  fStatusLabel->Invalidate();
              }
              break;
          }
+
 
 
 
@@ -4957,9 +5509,10 @@ public:
    
    
      
-   case MSG_ADD_SCHEDULE: {
+    case MSG_ADD_SCHEDULE: {
         std::string rawTime = fTimeInput->Text();
          
+        // Format missing colon automatically if typed as a raw 4-digit number
         if (rawTime.length() == 4 && rawTime.find(':') == std::string::npos) {
             rawTime.insert(2, ":");
             fTimeInput->SetText(rawTime.c_str());
@@ -4972,14 +5525,13 @@ public:
         item.duration = fSelectedDurationSeconds; 
         item.processed = false;
 
-        // =========================================================================
-        // FIXED: COMPUTE ABSOLUTE EPOCH PARAMETERS NATIVELY TO PREVENT STATE LOSS
-        // =========================================================================
-        // Convert the string representations to integers so matching engines execute safely
+        // Compute absolute timestamps for the recording background worker engine
         item.durationSec = std::atoll(item.duration.c_str());
         item.epochStart  = CalculateEpoch(item.startDate, item.startTime);
+
         // =========================================================================
-         
+        // 1. EXTRACT PROGRAM SHOW TITLE VIA TEXT SLICING HOOKS
+        // =========================================================================
         BString extractedTitle;
         if (fChannelListView != nullptr) {
             int32 selectedIndex = fChannelListView->CurrentSelection();
@@ -5001,6 +5553,7 @@ public:
             }
         }
 
+        // Status bar fallback lookup sequence if nothing was selected in the quick list
         if (extractedTitle.IsEmpty() && fStatusLabel != nullptr) {
             BString fullStatus = fStatusLabel->Text();
             
@@ -5026,7 +5579,17 @@ public:
                 }
             }
         }
-        
+
+        // =========================================================================
+        // 2. SANITIZE STRING CHARACTERS AND BUILD FILE-SAFE LABEL FIELDS
+        // =========================================================================
+        extractedTitle.Trim();
+
+        // Standardize raw XML/HTML escaped character parameters
+        extractedTitle.ReplaceAll("&amp;",  "&");
+        extractedTitle.ReplaceAll("&quot;", "\"");
+        extractedTitle.ReplaceAll("&apos;", "'");
+        extractedTitle.ReplaceAll("&#39;",  "'");
         extractedTitle.Trim();
 
         // Strip out any legacy manual tag strings entirely if pulled from UI fields
@@ -5049,15 +5612,17 @@ public:
         cleanTitle.Trim();
 
         // =========================================================================
-        // RE-ARCHITECTED TITLE FALLBACK: DROP "MANUAL RECORDING" & KEEP SHOW TITLE
+        // 3. SINGLE-FIELD ASSIGNMENT (USING YOUR EXISTING showTitle)
         // =========================================================================
         if (cleanTitle.IsEmpty() || cleanTitle == "_") {
-            item.showTitle = "Live_Stream"; // Generic descriptive fallback descriptor
+            item.showTitle = "Live_Stream"; // Disk filename-safe fallback token
         } else {
-            item.showTitle = cleanTitle.String(); // Preserves the raw parsed show title directly
+            item.showTitle = cleanTitle.String(); // e.g., "American_Ninja_Warrior"
         }
-        // =========================================================================
 
+        // =========================================================================
+        // 4. TUNER MAPPING & METRIC COMMIT PIPELINES
+        // =========================================================================
         BString channelLabel;
         if (message->FindString("channel_label", &channelLabel) == B_OK) {
             item.channelLabel = channelLabel.String();
@@ -5072,6 +5637,7 @@ public:
             item.tunerIp = fSelectedIp;
         }
          
+        // Synchronize and write data safely across threads
         gScheduleLocker.Lock();
         gScheduleList.push_back(item);
         gScheduleLocker.Unlock();
@@ -5082,7 +5648,7 @@ public:
         std::string confMsg = "Queued for " + item.startTime + " (Ch " + item.channel + ")";
         fStatusLabel->SetText(confMsg.c_str());
         break;
-     }
+    }
 
 
      case MSG_START_RECORDING: {
@@ -5710,7 +6276,7 @@ void RealTVGuideWindow::MessageReceived(BMessage* message) {
             break;
         }
 
-            
+
     	
         case MSG_PERIODIC_GUIDE_REFRESH: {
             DVRWindow* mainWindow = dynamic_cast<DVRWindow*>(fMainAppWindow);
