@@ -1,4 +1,4 @@
 service x-vnd.haikuhdhomerun-dvr {
     launch /boot/system/servers/dvr_server
-    legacy
+    legacy    
 }

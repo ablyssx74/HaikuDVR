@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.26 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.28 (Haiku OS)";
 }
 
 
@@ -1750,11 +1750,16 @@ public:
                 BMessage msg(MSG_CLOCK_UP);
                 targetMessenger.SendMessage(&msg);
             }
-            else if (point.x >= 300.0f && point.x <= 550.0f && 
-                     point.y >= 0.0f && point.y <= bounds.Height()) {
-                BMessage msg(MSG_OPEN_SEARCH_POPUP);
-                targetMessenger.SendMessage(&msg);
-            }
+			else if (point.x >= 300.0f && point.x <= 550.0f && 
+			         point.y >= 0.0f && point.y <= bounds.Height()) {
+			    
+			    // Only trigger if the parent window is currently active
+			    if (Window() && Window()->IsActive()) {
+			        BMessage msg(MSG_OPEN_SEARCH_POPUP);
+			        targetMessenger.SendMessage(&msg);
+			    }
+			}
+
         }
         BView::MouseDown(point);
     }
@@ -2320,7 +2325,7 @@ public:
             }
             owner->PopState();
 
-  // =========================================================================
+  			// =========================================================================
             // H. FIELD STRINGS PLACEMENTS (FIXED VIEWPORT SHIFT ANCHORING)
             // =========================================================================
             BString timeRangeStr;
@@ -2606,7 +2611,7 @@ public:
                     BMenuItem* removeItem = nullptr;
                     int32 matchingActiveIndex = -1;
 
-                                         if (cellIndex >= 0 && cellIndex < (int32)item->fData.programs.size()) {
+                   if (cellIndex >= 0 && cellIndex < (int32)item->fData.programs.size()) {
                         std::string targetChannel = cleanNumberOnly.String(); 
                         std::string targetTitle = item->fData.programs[cellIndex].title.String();
 
@@ -3291,7 +3296,7 @@ bool IngestMasterXmlToSqlite(const std::string& masterXmlPath, const std::string
     std::string currentChannelId = "";
     std::string progChanId = "", progStartRaw = "", progEndRaw = "", titleText = "", descText = "";
     bool insideProgramme = false;
-
+    std::time_t current_time = std::time(nullptr);
     while (std::getline(masterStream, line)) {
         // Parse channels
         size_t chanPos = line.find("<channel id=\"");
@@ -3386,6 +3391,11 @@ bool IngestMasterXmlToSqlite(const std::string& masterXmlPath, const std::string
 
                 if (endEp < startEp) endEp += 86400; // Account for overnight date boundary wraps
 
+                // 🎯 THE FILTER PASS: If the show's end time is in the past, skip SQLite execution
+                if (endEp < current_time) {
+                    continue; 
+                }
+
                 if (!progChanId.empty() && !titleText.empty()) {
                     sqlite3_bind_text(progStmt, 1, progChanId.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(progStmt, 2, titleText.c_str(), -1, SQLITE_TRANSIENT);
@@ -3397,6 +3407,7 @@ bool IngestMasterXmlToSqlite(const std::string& masterXmlPath, const std::string
                 }
             }
         }
+
     }
 
     // Close transaction and finalize all prepared statements
@@ -3848,7 +3859,7 @@ void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
 
 
 
-     // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // PASS 3: DIRECT NETWORK LINEUP STREAMING PIPELINE (TESTING PASS)
     // -------------------------------------------------------------------------
     fLoadedChannels.clear(); // Clear local display lists
@@ -6323,6 +6334,8 @@ public:
     }
 
 };
+
+
 
 
 int main() {

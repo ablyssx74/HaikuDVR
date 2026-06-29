@@ -3,10 +3,10 @@ resource app_signature "application/x-vnd.haikuhdhomerun-dvr-gui";
 resource app_version {
     major  = 1,   
     minor  = 0,   
-    middle = 26,   
+    middle = 28,   
     variety = B_APPV_DEVELOPMENT, 
     internal = 0,
-    short_info = "HaikuDVR v1.0.26",
+    short_info = "HaikuDVR v1.0.28",
     long_info = "HaikuDVR - Native GUI Haiku DVR for HDHomeRun Tuners"
 };
 
