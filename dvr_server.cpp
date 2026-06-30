@@ -30,7 +30,7 @@
 #include <sys/types.h>
 #include <algorithm>
 #include <regex>
-
+#include <cctype>
 
 const uint32 MSG_ABORT_SPECIFIC_RECORDING = 'absp';
 
@@ -971,31 +971,47 @@ private:
 
 
 
-std::string CleanFilename(const std::string& rawName) {
-    std::string clean = rawName;
-    
-    // Match prefix: "DVR_Record_Ch_" followed by channel, date, and time patterns
-    // e.g., "DVR_Record_Ch_2.1_2026-06-28_19-30_"
-    std::regex prefixRegex("^DVR_Record_Ch_\\d+\\.\\d+_\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}_");
-    clean = std::regex_replace(clean, prefixRegex, "");
-    
-    // Match suffix: recording duration, padded tag, and file extension
-    // e.g., "_12480s_Padded.ts" or "_7200s_Padded.ts"
-    std::regex suffixRegex("_\\d+s_Padded\\.(ts|mpg)$");
-    clean = std::regex_replace(clean, suffixRegex, "");
-    
-    // Replace remaining underscores with spaces for human readability
-    std::replace(clean.begin(), clean.end(), '_', ' ');
-    
-    return clean;
-}
+	std::string CleanFilename(const std::string& rawName) {
+	    std::string clean = rawName;
+	    
+	    // Match prefix: "DVR_Record_Ch_" followed by channel, date, and time patterns
+	    // e.g., "DVR_Record_Ch_2.1_2026-06-28_19-30_"
+	    std::regex prefixRegex("^DVR_Record_Ch_\\d+\\.\\d+_\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}_");
+	    clean = std::regex_replace(clean, prefixRegex, "");
+	    
+	    // Match suffix: recording duration, padded tag, and file extension
+	    // e.g., "_12480s_Padded.ts" or "_7200s_Padded.ts"
+	    std::regex suffixRegex("_\\d+s_Padded\\.(ts|mpg)$");
+	    clean = std::regex_replace(clean, suffixRegex, "");
+	    
+	    // Replace remaining underscores with spaces for human readability
+	    std::replace(clean.begin(), clean.end(), '_', ' ');
+	    
+	    return clean;
+	}
+	
+	
+	std::string UrlEncodeFilename(const std::string& value) {
+	    std::ostringstream escaped;
+	    escaped << std::hex << std::uppercase;
+	    for (char c : value) {
+	        // Safe unreserved URL characters
+	        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == '~') {
+	            escaped << c;
+	        } else {
+	            // Converts characters like spaces to %20 and single quotes to %27
+	            escaped << '%' << std::setw(2) << std::setfill('0') << (static_cast<int>(c) & 0xFF);
+	        }
+	    }
+	    return escaped.str();
+	}
 
 
 
     void ServeContentDirectory(int clientFd, const std::string& requestStr) {
         if (gFrontendDebugEnable) {
             std::printf("\n==================================================\n");
-            std::printf("[DLNA DEBUG] TV/VLC requested folder data parsing!\n");
+            std::printf("[DLNA DEBUG] Media Client requested folder data parsing!\n");
         }
         
         if (rootDir.empty()) {
@@ -1052,10 +1068,14 @@ std::string CleanFilename(const std::string& rawName) {
                     std::string name(entry->d_name);
                     
                     if (name.find(".ts") != std::string::npos || name.find(".mpg") != std::string::npos) {
-                        std::string streamUrl = "http://" + localIp + ":" + std::to_string(port) + "/video/" + name;
+                        
+                        // FIX: Percent-encode ONLY the filename part of the URL string
+                        std::string encodedName = UrlEncodeFilename(name);
+                        std::string streamUrl = "http://" + localIp + ":" + std::to_string(port) + "/video/" + encodedName;
                         
                         if (gFrontendDebugEnable) {
                             std::printf("  -> MATCH: Listing file inside folder 3: %s\n", name.c_str());
+                            std::printf("     URLEncoded Stream Link: %s\n", streamUrl.c_str());
                             std::fflush(stdout);
                         }
                         
@@ -1066,9 +1086,9 @@ std::string CleanFilename(const std::string& rawName) {
                         std::string dlnaProfile = "http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_TS_HD_NA_ISO;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
 
                         didlBody += "<item id=\"" + std::to_string(trackId++) + "\" parentID=\"3\" restricted=\"1\">"
-                                    "<dc:title>" + prettyName + "</dc:title>" // <-- Uses pretty clean name here
+                                    "<dc:title>" + prettyName + "</dc:title>" 
                                     "<upnp:class>object.item.videoItem.movie</upnp:class>"
-                                    "<res protocolInfo=\"" + dlnaProfile + "\">" + streamUrl + "</res>" // <-- Keeps the real name for the stream URL
+                                    "<res protocolInfo=\"" + dlnaProfile + "\">" + streamUrl + "</res>" 
                                     "</item>";
                         itemsReturned++;
                     }
@@ -1076,6 +1096,7 @@ std::string CleanFilename(const std::string& rawName) {
                 closedir(dir);
             }
         }
+
 
         didlBody += "</DIDL-Lite>";
 
@@ -1109,48 +1130,81 @@ std::string CleanFilename(const std::string& rawName) {
 
 
 
-    void StreamVideoFile(int clientFd, const std::string& req) {
-        size_t pos = req.find("/video/");
-        size_t endPos = req.find(" ", pos);
-        if (pos == std::string::npos || endPos == std::string::npos) return;
-        
-        std::string filename = req.substr(pos + 7, endPos - (pos + 7));
-        std::string fullPath = rootDir + "/" + filename;
-
-        // Open the file with ate (at the end) to read total file size
-        std::ifstream file(fullPath, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            const char* notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-            send(clientFd, notFound, std::strlen(notFound), 0);
-            return;
-        }
-
-        std::streamsize fileSize = file.tellg();
-        std::streamsize startByte = 0;
-        std::streamsize endByte = fileSize - 1;
-        bool isPartial = false;
-
-        // PARSE HTTP RANGE HEADERS: Look for timeline scrubbing requests
-        size_t rangePos = req.find("Range: bytes=");
-        if (rangePos != std::string::npos) {
-            size_t startIdx = rangePos + 13;
-            size_t dashIdx = req.find("-", startIdx);
-            if (dashIdx != std::string::npos) {
-                std::string startStr = req.substr(startIdx, dashIdx - startIdx);
-                if (!startStr.empty()) {
-                    startByte = std::atoll(startStr.c_str());
-                    isPartial = true;
-                }
-                
-                size_t nlnIdx = req.find("\r\n", dashIdx);
-                if (nlnIdx != std::string::npos) {
-                    std::string endStr = req.substr(dashIdx + 1, nlnIdx - (dashIdx + 1));
-                    if (!endStr.empty()) {
-                        endByte = std::atoll(endStr.c_str());
-                    }
-                }
-            }
-        }
+	// Helper utility to convert %27 back to "'" and %20 back to spaces
+	std::string UrlDecodeFilename(const std::string& value) {
+	    std::string result;
+	    result.reserve(value.length());
+	    
+	    for (size_t i = 0; i < value.length(); ++i) {
+	        if (value[i] == '%' && i + 2 < value.length()) {
+	            std::string hexStr = value.substr(i + 1, 2);
+	            char chr = static_cast<char>(std::strtol(hexStr.c_str(), nullptr, 16));
+	            result += chr;
+	            i += 2; 
+	        } else if (value[i] == '+') {
+	            result += ' '; 
+	        } else {
+	            result += value[i];
+	        }
+	    }
+	    return result;
+	}
+	
+	void StreamVideoFile(int clientFd, const std::string& req) {
+	    size_t pos = req.find("/video/");
+	    size_t endPos = req.find(" ", pos);
+	    if (pos == std::string::npos || endPos == std::string::npos) return;
+	    
+	    std::string rawFilename = req.substr(pos + 7, endPos - (pos + 7));
+	    
+	    // FIX: Decode the URL characters before referencing the storage path
+	    std::string filename = UrlDecodeFilename(rawFilename);
+	    std::string fullPath = rootDir + "/" + filename;
+	
+	    if (gFrontendDebugEnable) {
+	        std::printf("[DLNA STREAM] Incoming URI segment: %s\n", rawFilename.c_str());
+	        std::printf("[DLNA STREAM] Reconstructed disk path: %s\n", fullPath.c_str());
+	        std::fflush(stdout);
+	    }
+	
+	    // Open the file with ate (at the end) to read total file size
+	    std::ifstream file(fullPath, std::ios::binary | std::ios::ate);
+	    if (!file.is_open()) {
+	        if (gFrontendDebugEnable) {
+	            std::printf("[DLNA ERROR] File open failed for path: %s\n", fullPath.c_str());
+	            std::fflush(stdout);
+	        }
+	        const char* notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+	        send(clientFd, notFound, std::strlen(notFound), 0);
+	        return;
+	    }
+	
+	    std::streamsize fileSize = file.tellg();
+	    std::streamsize startByte = 0;
+	    std::streamsize endByte = fileSize - 1;
+	    bool isPartial = false;
+	
+	    // PARSE HTTP RANGE HEADERS: Look for timeline scrubbing requests
+	    size_t rangePos = req.find("Range: bytes=");
+	    if (rangePos != std::string::npos) {
+	        size_t startIdx = rangePos + 13;
+	        size_t dashIdx = req.find("-", startIdx);
+	        if (dashIdx != std::string::npos) {
+	            std::string startStr = req.substr(startIdx, dashIdx - startIdx);
+	            if (!startStr.empty()) {
+	                startByte = std::atoll(startStr.c_str());
+	                isPartial = true;
+	            }
+	            
+	            size_t nlnIdx = req.find("\r\n", dashIdx);
+	            if (nlnIdx != std::string::npos) {
+	                std::string endStr = req.substr(dashIdx + 1, nlnIdx - (dashIdx + 1));
+	                if (!endStr.empty()) {
+	                    endByte = std::atoll(endStr.c_str());
+	                }
+	            }
+	        }
+	    }
 
         // Seek the file pointer straight to the requested byte position
         file.seekg(startByte, std::ios::beg);
@@ -1159,8 +1213,10 @@ std::string CleanFilename(const std::string& rawName) {
         // Changed from char header to a 1KB buffer array
         char header[1024] = {0}; 
         if (isPartial) {
-            std::printf("[SEEK SYSTEM] Client scrubbing to offset position: %lld / %lld bytes\n", (long long)startByte, (long long)fileSize);
-            std::fflush(stdout);
+        	if (gFrontendDebugEnable) {
+            	std::printf("[SEEK SYSTEM] Client scrubbing to offset position: %lld / %lld bytes\n", (long long)startByte, (long long)fileSize);
+            	std::fflush(stdout);
+        	}
             
             std::snprintf(header, sizeof(header),
                 "HTTP/1.1 206 Partial Content\r\n"
@@ -1192,6 +1248,7 @@ std::string CleanFilename(const std::string& rawName) {
         char chunk[64 * 1024]; 
         std::streamsize bytesRemaining = contentLength;
 
+        // FIX: Ensured atomic loop check and proper tracking of partial network writes
         while (bytesRemaining > 0 && file.good() && atomic_get(&gStopService) == 0) {
             std::streamsize toRead = sizeof(chunk);
             if (toRead > bytesRemaining) toRead = bytesRemaining;
@@ -1200,14 +1257,28 @@ std::string CleanFilename(const std::string& rawName) {
             std::streamsize bytesRead = file.gcount();
             if (bytesRead <= 0) break;
 
-            ssize_t sent = send(clientFd, chunk, bytesRead, 0);
-            if (sent < 0) break; // Player skipped forward or closed the window
-
-            bytesRemaining -= sent;
+            // FIX: Nested loop to ensure the ENTIRE read block is fully pushed to the network socket
+            std::streamsize bytesSentTotal = 0;
+            while (bytesSentTotal < bytesRead && atomic_get(&gStopService) == 0) {
+                ssize_t sent = send(clientFd, chunk + bytesSentTotal, bytesRead - bytesSentTotal, 0);
+                if (sent < 0) {
+                    // Client disconnected, closed the window, or skipped away
+                    bytesRemaining = 0; 
+                    break;
+                }
+                bytesSentTotal += sent;
+                bytesRemaining -= sent;
+            }
+            
+            if (bytesRemaining <= 0) break;
         }
         file.close();
+        
+        if (gFrontendDebugEnable) {
+            std::printf("[DLNA STREAM] Finished streaming media block to Client. Socket cleanly closing.\n");
+            std::fflush(stdout);
+        }
     }
-
 };
 
 
@@ -1216,10 +1287,8 @@ std::string CleanFilename(const std::string& rawName) {
 int32 ServiceSchedulerLoop(void* data) {    
     while (atomic_get(&gStopService) == 0) {
         snooze(5000000); 
-        LoadSchedulesFromDisk();
-        
+        LoadSchedulesFromDisk(); 
 
-        
         std::time_t now = std::time(nullptr);
         std::time_t nextMinTime = now + 60; 
         
@@ -1357,7 +1426,7 @@ public:
         
         std::string ip = GetHaikuLocalIpAddress(); 
         
-        // 🎯 THE PORT AUTO-FALLBACK: Start at 8080, increment if busy
+        // THE PORT AUTO-FALLBACK: Start at 8080, increment if busy
         int port = 8080;
         while (port < 8090) {
             int testFd = socket(AF_INET, SOCK_STREAM, 0);
