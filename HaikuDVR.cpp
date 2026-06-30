@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.29 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.30 (Haiku OS)";
 }
 
 
@@ -4120,7 +4120,7 @@ public:
             300000000LL, -1); 
 
 
-        new BMessageRunner(BMessenger(this), new BMessage('TICK'), 60000000LL, -1);
+        //@delete new BMessageRunner(BMessenger(this), new BMessage('TICK'), 60000000LL, -1);
 
 
         fSelectedDirectory = gGlobalSaveDirectory;
@@ -5904,11 +5904,28 @@ public:
             } 
             
             if (isViewingToday) {
-                struct tm* localTimeInfo = localtime(&currentTime);
-                int systemAbsoluteMinutes = (localTimeInfo->tm_hour * 60) + localTimeInfo->tm_min;
+                // =========================================================================
+                // FIX: CALCULATE ABSOLUTE MINUTES FROM ACTIVE VIEW TIME, NOT THE SYSTEM CLOCK
+                // =========================================================================
+                int systemAbsoluteMinutes = 0;
+                if (fTimeInput != nullptr) {
+                    std::string timeStr = fTimeInput->Text();
+                    size_t colonPos = timeStr.find(':');
+                    if (colonPos != std::string::npos) {
+                        int hours = std::atoi(timeStr.substr(0, colonPos).c_str());
+                        int minutes = std::atoi(timeStr.substr(colonPos + 1).c_str());
+                        systemAbsoluteMinutes = (hours * 60) + minutes;
+                    }
+                } else {
+                    // Fallback to old behavior if widget is missing
+                    struct tm* localTimeInfo = localtime(&currentTime);
+                    systemAbsoluteMinutes = (localTimeInfo->tm_hour * 60) + localTimeInfo->tm_min;
+                }
+                // =========================================================================
 
                 for (size_t i = 0; i < fLoadedChannels.size(); i++) {
                     auto& channel = fLoadedChannels[i];
+
                     
                     while (!channel.futureLineup.empty()) {
                         const auto& nextShow = channel.futureLineup.front();
@@ -6079,7 +6096,7 @@ public:
 		            }
 		            break;
 		        }
-		        
+		        /* @delete
 		        case 'TICK': { 		         
 		            if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
 		                BView* childHeader = fGuideWindow->FindView("timelineHeader");
@@ -6090,7 +6107,7 @@ public:
 		            }
 		            break;
 		        }
-
+				*/
 		
 		       case MSG_SET_PLAYER_MPV: {
 		            cfg.defaultPlayer = "MPV";
