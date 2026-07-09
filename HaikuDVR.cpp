@@ -60,12 +60,12 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.30 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.31 (Haiku OS)";
 }
 
 
 
-
+const uint32 MSG_CLOCK_TICK_5MIN 			= 'clt5'; 
 const uint32 MSG_EXECUTE_SEARCH   			= 'exsr';
 const uint32 MSG_SEARCH_SELECTED		    = 'srsl';
 const uint32 MSG_OPEN_SEARCH_POPUP    		= 'mosp';
@@ -4112,12 +4112,15 @@ public:
         if (updateThread >= 0) {
             resume_thread(updateThread);
         }
-        
-        // Refresh every 5 minutes       
-        fLastNetworkSyncTime = 0; 
-        fRefreshRunner = new BMessageRunner(BMessenger(this), 
-            new BMessage(MSG_PERIODIC_GUIDE_REFRESH), 
-            300000000LL, -1); 
+
+
+		fLastNetworkSyncTime = 0; 
+		// 300,000,000 microseconds = 5 minutes
+		fRefreshRunner = new BMessageRunner(BMessenger(this), 
+		    new BMessage(MSG_PERIODIC_GUIDE_REFRESH), 
+		    300000000LL, -1); 
+		
+
 
 
         //@delete new BMessageRunner(BMessenger(this), new BMessage('TICK'), 60000000LL, -1);
@@ -4575,7 +4578,7 @@ public:
          break;
      }
 
-
+/*
 		case MSG_CLOCK_UP:
 		case MSG_CLOCK_DOWN: {
 		    std::string timeStr = fTimeInput->Text();
@@ -4628,7 +4631,7 @@ public:
 		    }
 		    break;
 		}
-
+*/
 
 
 		  case B_COLORS_UPDATED: {
@@ -5886,7 +5889,6 @@ public:
 
         case MSG_PERIODIC_GUIDE_REFRESH: {
             time_t currentTime = real_time_clock();
-            
             BString activeDateWidgetText = fDateInput->Text();
             std::time_t rawToday = std::time(nullptr);
             std::tm* localToday = std::localtime(&rawToday);
@@ -5895,71 +5897,79 @@ public:
             
             bool isViewingToday = (activeDateWidgetText.IsEmpty() || activeDateWidgetText == todayBuf);
 
+            // 1. Keep your network guard intact right here during the periodic loop
             if (fLastNetworkSyncTime == 0 || (currentTime - fLastNetworkSyncTime) >= 86400) {
                 if (isViewingToday) {
-                    FetchAndPopulateChannelList(); 
+                    FetchAndPopulateChannelList(activeDateWidgetText); 
                 }
                 fLastNetworkSyncTime = currentTime;
                 if (cfg.debugEnable) printf("[EPG SYNC] Master EPG reloaded from network.\n");
             } 
-            
-            if (isViewingToday) {
-                // =========================================================================
-                // FIX: CALCULATE ABSOLUTE MINUTES FROM ACTIVE VIEW TIME, NOT THE SYSTEM CLOCK
-                // =========================================================================
-                int systemAbsoluteMinutes = 0;
-                if (fTimeInput != nullptr) {
-                    std::string timeStr = fTimeInput->Text();
-                    size_t colonPos = timeStr.find(':');
-                    if (colonPos != std::string::npos) {
-                        int hours = std::atoi(timeStr.substr(0, colonPos).c_str());
-                        int minutes = std::atoi(timeStr.substr(colonPos + 1).c_str());
-                        systemAbsoluteMinutes = (hours * 60) + minutes;
-                    }
+
+            // 2. Safely trigger the 5-minute UI increment 
+            BMessage fakeTick(MSG_CLOCK_TICK_5MIN);
+            this->PostMessage(&fakeTick);
+            break;
+        }
+
+        case MSG_CLOCK_TICK_5MIN:
+        case MSG_CLOCK_UP:
+        case MSG_CLOCK_DOWN: {
+            std::string timeStr = fTimeInput->Text();
+            size_t colonPos = timeStr.find(':');
+            if (colonPos != std::string::npos) {
+                int hours = std::atoi(timeStr.substr(0, colonPos).c_str());
+                int minutes = std::atoi(timeStr.substr(colonPos + 1).c_str());
+                
+                if (message->what == MSG_CLOCK_TICK_5MIN) {
+                    minutes += 5;   
+                } else if (message->what == MSG_CLOCK_UP) {
+                    minutes += 30;  
                 } else {
-                    // Fallback to old behavior if widget is missing
-                    struct tm* localTimeInfo = localtime(&currentTime);
-                    systemAbsoluteMinutes = (localTimeInfo->tm_hour * 60) + localTimeInfo->tm_min;
+                    minutes -= 30;  
                 }
-                // =========================================================================
-
-                for (size_t i = 0; i < fLoadedChannels.size(); i++) {
-                    auto& channel = fLoadedChannels[i];
-
+                
+                if (minutes >= 60) { hours += minutes / 60; minutes = minutes % 60; }
+                if (minutes < 0) { minutes = 60 + minutes; hours--; } 
+                if (hours >= 24) { hours = hours % 24; }
+                if (hours < 0) { hours = 23; }
+                
+                char updatedTimeBuffer[16];
+                sprintf(updatedTimeBuffer, "%02d:%02d", hours, minutes);
+                fTimeInput->SetText(updatedTimeBuffer);
+        
+                // 3. Since MSG_PERIODIC_GUIDE_REFRESH already handled the network above,
+                // we can pass the string to safely update local arrays or handle manual buttons
+                if (fDateInput != nullptr) {
+                    FetchAndPopulateChannelList(fDateInput->Text());
+                }
+        
+                BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));
+                if (realGuideList != nullptr) {
+                    realGuideList->MakeEmpty();
+                    realGuideList->Invalidate();
+                }
+        
+                if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+                    BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
+                    fGuideWindow->PostMessage(&refreshGuide);
                     
-                    while (!channel.futureLineup.empty()) {
-                        const auto& nextShow = channel.futureLineup.front();
-                        
-                        int showHour = 0, showMin = 0;
-                        char ampm[16] = {0};
-                        if (sscanf(nextShow.startTimeStr.c_str(), "%d:%d %15s", &showHour, &showMin, ampm) >= 2) {
-                            std::string aStr(ampm);
-                            if (aStr.find("PM") != std::string::npos || aStr.find("pm") != std::string::npos) {
-                                if (showHour < 12) showHour += 12;
-                            } else if (aStr.find("AM") != std::string::npos || aStr.find("am") != std::string::npos) {
-                                if (showHour == 12) showHour = 0;
-                            }
-                            
-                            int showStartAbsoluteMinutes = (showHour * 60) + showMin;
-                            
-                            if (systemAbsoluteMinutes >= showStartAbsoluteMinutes) {
-                                channel.nowPlaying = nextShow.title; 
-                                channel.futureLineup.erase(channel.futureLineup.begin()); 
-                                continue;
-                            }
+                    BView* childHeader = fGuideWindow->FindView("timelineHeader");
+                    if (childHeader != nullptr) {
+                        BMessage syncHeaderMsg('UCLT');
+                        syncHeaderMsg.AddString("time", updatedTimeBuffer);
+                        if (fDateInput != nullptr && fDateInput->Text() != nullptr) {
+                            syncHeaderMsg.AddString("date", fDateInput->Text());
                         }
-                        break; 
+                        BMessenger(childHeader).SendMessage(&syncHeaderMsg);
                     }
+                    fGuideWindow->Unlock();
                 }
-            }
-
-            RefreshScheduleListView();        
-            if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
-                fGuideWindow->PostMessage(MSG_PERIODIC_GUIDE_REFRESH);
-                fGuideWindow->Unlock();
             }
             break;
         }
+
+
 
 
 		case MSG_VIEW_RECORDINGS: {
@@ -6246,36 +6256,44 @@ void RealTVGuideWindow::MessageReceived(BMessage* message) {
 
 
     	
-        case MSG_PERIODIC_GUIDE_REFRESH: {
-            DVRWindow* mainWindow = dynamic_cast<DVRWindow*>(fMainAppWindow);
-            
-            if (mainWindow != nullptr) {
-                float currentXScroll = 0.0f;
-                float currentYScroll = 0.0f;
-                
-                if (fContainerList != nullptr) {
-                    currentXScroll = fContainerList->Bounds().left;
-                    currentYScroll = fContainerList->Bounds().top;
-                }
+			case MSG_PERIODIC_GUIDE_REFRESH: {
+			    DVRWindow* mainWindow = dynamic_cast<DVRWindow*>(fMainAppWindow);
+			    
+			    if (mainWindow != nullptr) {
+			        float currentXScroll = 0.0f;
+			        float currentYScroll = 0.0f;
+			        
+			        if (fContainerList != nullptr) {
+			            currentXScroll = fContainerList->Bounds().left;
+			            currentYScroll = fContainerList->Bounds().top;
+			        }
+			
+			        // Clear out old items safely
+			        int32 itemCount = fContainerList->CountItems();
+			        for (int32 i = itemCount - 1; i >= 0; i--) {
+			            BListItem* item = fContainerList->RemoveItem(i);
+			            delete item;
+			        }
+			
+			        // FIX: Explicitly lock the Main Window before touching its vector!
+			        std::vector<ChannelGuideItem> localCopy;
+			        if (mainWindow->Lock()) {
+			            localCopy = mainWindow->GetLoadedChannels(); // Makes a thread-safe snapshot copy
+			            mainWindow->Unlock();
+			        }
+			
+			        // Build using the safe local copy, not the live moving cross-thread reference
+			        _BuildGuideRowsFromLiveChannels(localCopy, fMainChannelListView);
+			
+			        if (fContainerList != nullptr) {
+			            fContainerList->ScrollTo(currentXScroll, currentYScroll);
+			        }
+			
+			        fContainerList->Invalidate();
+			    }
+			    break;
+			}
 
-                int32 itemCount = fContainerList->CountItems();
-                for (int32 i = itemCount - 1; i >= 0; i--) {
-                    BListItem* item = fContainerList->RemoveItem(i);
-                    delete item;
-                }
-
-                const std::vector<ChannelGuideItem>& freshChannels = mainWindow->GetLoadedChannels();
-
-                _BuildGuideRowsFromLiveChannels(freshChannels, fMainChannelListView);
-
-                if (fContainerList != nullptr) {
-                    fContainerList->ScrollTo(currentXScroll, currentYScroll);
-                }
-
-                fContainerList->Invalidate();
-            }
-            break;
-        }
         default:
             BWindow::MessageReceived(message);
             break;
