@@ -4578,61 +4578,6 @@ public:
          break;
      }
 
-/*
-		case MSG_CLOCK_UP:
-		case MSG_CLOCK_DOWN: {
-		    std::string timeStr = fTimeInput->Text();
-		    size_t colonPos = timeStr.find(':');
-		    if (colonPos != std::string::npos) {
-		        int hours = std::atoi(timeStr.substr(0, colonPos).c_str());
-		        int minutes = std::atoi(timeStr.substr(colonPos + 1).c_str());
-		        
-		        if (message->what == MSG_CLOCK_UP) {
-		            minutes += 30;
-		        } else {
-		            minutes -= 30;
-		        }
-		        
-		        if (minutes >= 60) { minutes = 0; hours++; }
-		        if (minutes < 0) { minutes = 30; hours--; } 
-		        if (hours >= 24) { hours = 0; }
-		        if (hours < 0) { hours = 23; }
-		        
-		        char updatedTimeBuffer[16];
-		        sprintf(updatedTimeBuffer, "%02d:%02d", hours, minutes);
-		        fTimeInput->SetText(updatedTimeBuffer);
-		
-		        if (fDateInput != nullptr) {
-		            FetchAndPopulateChannelList(fDateInput->Text());
-		        }
-		
-		        BListView* realGuideList = dynamic_cast<BListView*>(FindView("guide_list_view"));
-		        if (realGuideList != nullptr) {
-		            realGuideList->MakeEmpty();
-		            realGuideList->Invalidate();
-		        }
-		
-		        if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
-		            BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
-		            fGuideWindow->PostMessage(&refreshGuide);
-		            
-		            BView* childHeader = fGuideWindow->FindView("timelineHeader");
-		            if (childHeader != nullptr) {
-		                BMessage syncHeaderMsg('UCLT');
-		                syncHeaderMsg.AddString("time", updatedTimeBuffer);
-		                if (fDateInput != nullptr && fDateInput->Text() != nullptr) {
-		                    syncHeaderMsg.AddString("date", fDateInput->Text());
-		                }
-		                BMessenger(childHeader).SendMessage(&syncHeaderMsg);
-		            }
-		            
-		            fGuideWindow->Unlock();
-		        }
-		    }
-		    break;
-		}
-*/
-
 
 		  case B_COLORS_UPDATED: {
 		      rgb_color panelBg = ui_color(B_PANEL_BACKGROUND_COLOR);	      
