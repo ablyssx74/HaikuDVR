@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.31 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.32 (Haiku OS)";
 }
 
 
@@ -137,8 +137,8 @@ void ensure_config_dir() {
 
 struct AppConfig {
     bool showUpdateNotifications = true;
-    bool debugEnable = true; 
-    bool fullscreenEnable = true;
+    bool debugEnable = false; 
+    bool fullscreenEnable = false;
     std::string defaultPlayer; 
 };
 
@@ -282,8 +282,8 @@ void LoadSchedulesFromDisk() {
         if (jIn.is_object()) {
             gGlobalSaveDirectory        = jIn.value("save_directory", "/boot/home");
             cfg.showUpdateNotifications = jIn.value("show_update_notifications", true);
-            cfg.debugEnable             = jIn.value("debug_enable", true);
-            cfg.fullscreenEnable 		= jIn.value("enable_fullscreen", true);
+            cfg.debugEnable             = jIn.value("debug_enable", false);
+            cfg.fullscreenEnable 		= jIn.value("enable_fullscreen", false);
             cfg.defaultPlayer           = jIn.value("default_player", "mpv"); 
             
             if (jIn.contains("schedules") && jIn["schedules"].is_array()) {
@@ -309,8 +309,8 @@ void LoadSchedulesFromDisk() {
         }
         else if (jIn.is_array()) {
             cfg.showUpdateNotifications = true;
-            cfg.debugEnable             = true;
-            cfg.fullscreenEnable		= true;
+            cfg.debugEnable             = false;
+            cfg.fullscreenEnable		= false;
             cfg.defaultPlayer           = "MPV"; 
             
             gScheduleList.clear();
@@ -3117,6 +3117,12 @@ private:
         }
         
         int count = hdhomerun_discover_find_devices_v2(ds, 0, HDHOMERUN_DEVICE_TYPE_TUNER, HDHOMERUN_DEVICE_ID_WILDCARD, result_list, 64);
+      
+        if (count <= 0) {
+            hdhomerun_discover_destroy(ds);
+            return tuners; 
+        }
+      
         for (int i = 0; i < count; i++) {
             uint32_t ip = result_list[i].ip_addr;
             char ip_str[32];            
@@ -4214,17 +4220,41 @@ public:
 
 		BView* view = new BView(Bounds(), "MainView", B_FOLLOW_ALL, B_WILL_DRAW);
 		
-        view->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));        
-        fTunerMenu = new BPopUpMenu("Select Tuner");
-        std::vector<std::string> foundTuners = DiscoverAllTuners();
-        fSelectedIp = foundTuners[0];        
-        for (size_t i = 0; i < foundTuners.size(); i++) {
-            BMessage* msg = new BMessage(MSG_TUNER_SELECTED);
-            msg->AddString("ip", foundTuners[i].c_str());
-            BMenuItem* item = new BMenuItem(foundTuners[i].c_str(), msg);
-            if (foundTuners[i] == fSelectedIp) item->SetMarked(true);
-            fTunerMenu->AddItem(item);
-        }        
+        view->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));  
+        
+              
+		fTunerMenu = new BPopUpMenu("Select Tuner");
+		std::vector<std::string> foundTuners = DiscoverAllTuners();
+		
+		if (foundTuners.empty()) {
+		    // 1. Safe fallback for the selected IP string
+		    fSelectedIp = ""; 
+		    
+		    // 2. Add a disabled visual placeholder to the menu
+		    BMenuItem* disabledItem = new BMenuItem("No Tuners Found", nullptr);
+		    disabledItem->SetEnabled(false);
+		    fTunerMenu->AddItem(disabledItem);
+		    
+		    // 3. Disable the record button later in your constructor if needed
+		    // fRecordButton->SetEnabled(false);
+		
+		} else {
+		    // 4. Safe to access index 0 because we verified the vector isn't empty
+		    fSelectedIp = foundTuners[0];        
+		    
+		    for (size_t i = 0; i < foundTuners.size(); i++) {
+		        BMessage* msg = new BMessage(MSG_TUNER_SELECTED);
+		        msg->AddString("ip", foundTuners[i].c_str());
+		        
+		        BMenuItem* item = new BMenuItem(foundTuners[i].c_str(), msg);
+		        if (foundTuners[i] == fSelectedIp) {
+		            item->SetMarked(true);
+		        }
+		        fTunerMenu->AddItem(item);
+		    }
+		}
+
+       
         fDurationMenu = new BPopUpMenu("Select Duration");
         AddDurationItem("30 Minutes", "1800", true);  
         AddDurationItem("1 Hour",     "3600");
