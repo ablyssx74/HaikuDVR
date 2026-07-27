@@ -60,9 +60,8 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.32 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.33 (Haiku OS)";
 }
-
 
 
 const uint32 MSG_CLOCK_TICK_5MIN 			= 'clt5'; 
@@ -121,8 +120,6 @@ const uint32 MSG_TOGGLE_NOTIFICATIONS       = 'ntfg';
 const uint32 MSG_TOGGLE_DEBUG               = 'dbug';
 
 
-
-
 using json = nlohmann::json;
 const char* kSettingsFilePath = "/boot/home/config/settings/HaikuDVR_schedules.json";
 
@@ -143,7 +140,6 @@ struct AppConfig {
 };
 
 AppConfig cfg; 
-
 
 int32 gCancelRecording = 0;
 int32 gStopScheduler = 0;
@@ -171,7 +167,7 @@ struct ScheduleItem {
     int64       durationSec;   // Length in integer seconds
     std::string duration;      // Human-readable serialization string ("10800")
     std::string channel;
-    std::string channelLabel;  // FIX: Add this missing member variable!
+    std::string channelLabel;  
     std::string tunerIp;
     std::string showTitle;
     bool        processed;
@@ -235,9 +231,9 @@ void SaveSchedulesToDisk() {
                 {"date", item.startDate}, 
                 {"time", item.startTime},
                 {"channel", item.channel},
-                {"channel_label", item.channelLabel}, // Added to preserve UI labels
+                {"channel_label", item.channelLabel}, // Preserve UI labels
                 {"duration", item.duration},
-                {"processed", item.processed},       // Added to track state safely
+                {"processed", item.processed},       // Track state safely
                 {"tuner_ip", item.tunerIp},
                 {"show_title", item.showTitle}
             });
@@ -577,8 +573,6 @@ public:
     }
 
 
-
-
     bool QuitRequested() override {
         if (fMainAppWindow != nullptr) {
             fMainAppWindow->PostMessage(MSG_RECORDINGS_CLOSED);
@@ -727,16 +721,17 @@ private:
             unit++;
         }
         
-        BString result;
-        result.SetToFormat("%.2f %s", size, units[unit]);
-        return result;
+    BString result;
+    result.SetToFormat("%.2f %s", size, units[unit]);
+    return result;
     }
-	BStringView* fTotalUsageLabel;
-    BListView* fRecordingsList;
-    BWindow*   fMainAppWindow;
-    BString    fRecordingDir;
-	BButton*   fRefreshButton;
-	 BMessageRunner* fPulseTimer; 
+    
+	BStringView* 	fTotalUsageLabel;
+    BListView* 		fRecordingsList;
+    BWindow*   		fMainAppWindow;
+    BString    		fRecordingDir;
+	BButton*   		fRefreshButton;
+	BMessageRunner* fPulseTimer; 
 	 
     void _ScanAndParseDirectory() {
         off_t totalAccumulatedBytes = 0;
@@ -865,9 +860,6 @@ private:
 };
 
 
-
-
-
 size_t StorageWriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
 struct AsyncIconDownloadConfig {
     BMessenger windowMessenger;
@@ -972,8 +964,8 @@ int32 SerialIconDownloaderThread(void* data) {
 
 
 enum {
-    MSG_PREV_MONTH = 'PRVM',
-    MSG_NEXT_MONTH = 'NXTM',
+    MSG_PREV_MONTH    = 'PRVM',
+    MSG_NEXT_MONTH    = 'NXTM',
     MSG_CANCEL_WINDOW = 'CNCL'
 };
 
@@ -1065,7 +1057,7 @@ class CalendarWindow : public BWindow {
                 int32 month = d.Month();
                 int32 year = d.Year();
                 
-                // FIXED: Force day parameter to 1 to guarantee a valid date construction
+                // Force day parameter to 1 to guarantee a valid date construction
                 if (month == 1) {
                     fCalendar->SetDate(BPrivate::BDate(year - 1, 12, 1));
                 } else {
@@ -1079,7 +1071,7 @@ class CalendarWindow : public BWindow {
                 int32 month = d.Month();
                 int32 year = d.Year();
                 
-                // FIXED: Force day parameter to 1 to guarantee a valid date construction
+                // Force day parameter to 1 to guarantee a valid date construction
                 if (month == 12) {
                     fCalendar->SetDate(BPrivate::BDate(year + 1, 1, 1));
                 } else {
@@ -1480,7 +1472,7 @@ private:
                     cleanEnd.SetToFormat("%d:%02d %s", dispH, mEnd, (hEnd >= 12 ? "PM" : "AM"));
                 }
 
-                // FIXED PACKETS: Pass baseline parameters directly matching SearchResultItem specs perfectly
+                // Pass baseline parameters directly matching SearchResultItem specs perfectly
                 fResultsList->AddItem(new SearchResultItem(
                     title ? title : "Unknown Title",
                     lcn   ? lcn   : "??",
@@ -1499,7 +1491,6 @@ private:
         sqlite3_finalize(statement);
         sqlite3_close(db);
     }
-
 
 };
 
@@ -1560,8 +1551,6 @@ public:
 
         SetEventMask(B_POINTER_EVENTS, 0);
     }
-
-
 
     void MouseMoved(BPoint point, uint32 transit, const BMessage* message) override {
         bool oldHoverMinus = fHoveringMinus;
@@ -2219,11 +2208,11 @@ public:
             cellTm.tm_min  = minutes;
 
             // =========================================================================
-            //  CRITICAL FE: MATRIX DRAWER DATE ROLLOVER ENGINE
+            //  MATRIX DRAWER DATE ROLLOVER ENGINE
             // =========================================================================
             // Read the main view's base hour control value to evaluate late night grids
             int baseWindowHour = 12;
-            if (owner != nullptr && owner->Window() != nullptr) { // FIX: Use owner->Window() instead of Window()
+            if (owner != nullptr && owner->Window() != nullptr) { // Use owner->Window() instead of Window()
                 BTextControl* timeInput = dynamic_cast<BTextControl*>(owner->Window()->FindView("time_input"));
                 if (timeInput != nullptr && timeInput->Text() != nullptr) {
                     int parsedH = 12, parsedM = 0;
@@ -2251,7 +2240,7 @@ public:
                     // Check exact channel match ("11.1" == "11.1")
                     bool channelMatch = (gScheduleList[i].channel == targetChannel);
                     
-                    // FIX: Validate the program text name matches the scheduled title 
+                    // Validate the program text name matches the scheduled title 
                     // This prevents long recordings from bleeding into different television shows!
                     bool titleMatch = (gScheduleList[i].showTitle == prog.title.String());
                     
@@ -2277,7 +2266,7 @@ public:
                     // =========================================================================
 
 
-                    // FIX: Requires all three parameters to align perfectly
+                    // Requires all three parameters to align perfectly
                     if (channelMatch && titleMatch && timeMatch) {
                         isScheduled = true;
                         break;
@@ -2292,8 +2281,7 @@ public:
             rgb_color normalCellBg    = { 26, 26, 26, 255 };      
             rgb_color standardBorder  = { 45, 45, 45, 255 };      
             rgb_color scheduledBgColor = { 75, 20, 20, 255 };     
-            rgb_color borderRed        = { 220, 40, 40, 255 };    
-            
+            rgb_color borderRed        = { 220, 40, 40, 255 };                
             rgb_color glowBorderColor = { 0, 210, 210, 255 };     
             rgb_color glowInnerColor  = { 12, 45, 45, 255 };      
 
@@ -2448,7 +2436,6 @@ public:
             owner->DrawString(timeRangeStr.String()); 
             owner->PopState();
 
-
             // ISOLATION BLOCK 4: Program Header Title
             owner->PushState();
             BFont titleFont;
@@ -2484,9 +2471,6 @@ public:
             // I. EXTRA LAYER FLAGS (RECORD BADGES ACCENT)
             // =========================================================================
 
-
-            
-            // 
             if (idx < 4) {
                 fCellIsScheduledMap[idx] = isScheduled;
             }
@@ -2516,9 +2500,6 @@ public:
         owner->SetHighColor(gridLineColor);
         owner->StrokeLine(BPoint(itemRect.left, itemRect.bottom), BPoint(itemRect.right, itemRect.bottom));
     }
-
-
-
     
 };
 
@@ -2616,7 +2597,7 @@ public:
                         std::string targetTitle = item->fData.programs[cellIndex].title.String();
 
                         // =========================================================================
-                        // FIXED: READ THE RED RENDERING FLAG DIRECTLY (NO MORE MATH DRIFT)
+                        // READ THE RED RENDERING FLAG DIRECTLY (NO MORE MATH DRIFT)
                         // =========================================================================
                         bool cellIsRedOnScreen = false;
                         if (cellIndex < 4) {
@@ -2670,9 +2651,6 @@ public:
 
                     BPoint screenPoint = ConvertToScreen(point) + BPoint(2, 2);
                     BMenuItem* selectedItem = contextMenu->Go(screenPoint, false, true, false);
-
-
-
                     
                     if (selectedItem != nullptr && fParentShortcutTarget != nullptr) {
                         if (selectedItem == playItem) {
@@ -2885,8 +2863,6 @@ public:
             // Re-center window safely on display relative to the main workspace layout frame
             CenterOnScreen();
         }
-
-
         
         fMainAppWindow = mainAppWindow;
         fMainChannelListView = mainChannelListView;
@@ -2900,7 +2876,6 @@ public:
         
 		BScrollView* scrollWrapper = new BScrollView("guideScroll", fContainerList, 0, false, true);        
 		AddShortcut(B_ESCAPE, 0, new BMessage(B_QUIT_REQUESTED));
-
 
         BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
             .SetInsets(0, 0, 0, 0)
@@ -2917,7 +2892,6 @@ public:
 	}
 	
 	void MessageReceived(BMessage* message) override;
-
     BWindow* GetMainWindow() const { return fMainAppWindow; }
 
 private:    
@@ -2925,122 +2899,121 @@ private:
 public:
     BListView* fMainChannelListView;
     BListView* fContainerList;
-
-
-// @Datapusher
-void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loadedChannels, BListView* mainListView) {
-	    if (mainListView == nullptr) return;
+    
+	// @Datapusher
+	void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loadedChannels, BListView* mainListView) {
+		    if (mainListView == nullptr) return;
+		
+		    // =========================================================================
+		    // INLINE NARRATIVE SCRUBBER METHOD (XML/HTML ENTITY DECODER ENGINE)
+		    // =========================================================================
+		    auto SanitizeTextEngine = [](const char* rawInput) -> BString {
+		        BString cleanedStr(rawInput);
+		        if (cleanedStr.IsEmpty()) return cleanedStr;
+		        
+		        // Decode standard entity character masks back to pristine plain text
+		        cleanedStr.ReplaceAll("&quot;", "\"");
+		        cleanedStr.ReplaceAll("&amp;",  "&");
+		        cleanedStr.ReplaceAll("&apos;", "'");
+		        cleanedStr.ReplaceAll("&#39;",  "'"); // Resolves numeric single quotes
+		        cleanedStr.ReplaceAll("&lt;",   "<");
+		        cleanedStr.ReplaceAll("&gt;",   ">");
+		        
+		        // Strip accidental double-spacing fragments
+		        cleanedStr.ReplaceAll("  ", " ");
+		        return cleanedStr;
+		    };
+		    // =========================================================================
 	
-	    // =========================================================================
-	    // INLINE NARRATIVE SCRUBBER METHOD (XML/HTML ENTITY DECODER ENGINE)
-	    // =========================================================================
-	    auto SanitizeTextEngine = [](const char* rawInput) -> BString {
-	        BString cleanedStr(rawInput);
-	        if (cleanedStr.IsEmpty()) return cleanedStr;
-	        
-	        // Decode standard entity character masks back to pristine plain text
-	        cleanedStr.ReplaceAll("&quot;", "\"");
-	        cleanedStr.ReplaceAll("&amp;",  "&");
-	        cleanedStr.ReplaceAll("&apos;", "'");
-	        cleanedStr.ReplaceAll("&#39;",  "'"); // Resolves numeric single quotes
-	        cleanedStr.ReplaceAll("&lt;",   "<");
-	        cleanedStr.ReplaceAll("&gt;",   ">");
-	        
-	        // Strip accidental double-spacing fragments
-	        cleanedStr.ReplaceAll("  ", " ");
-	        return cleanedStr;
-	    };
-	    // =========================================================================
-
-	    for (size_t i = 0; i < loadedChannels.size(); i++) {
-	        const auto& liveChan = loadedChannels[i];
-	        
-	        ChannelListItem* channelItem = (ChannelListItem*)mainListView->ItemAt(i);
-	        const BBitmap* associatedIcon = (channelItem != nullptr) ? channelItem->channelIcon : nullptr;
-	        
-	        GuideRowModel rowData;
-	        rowData.channelLabel << liveChan.guideNumber.c_str() << " - " << liveChan.guideName.c_str();
-	        rowData.channelIcon = associatedIcon;
-	        
-	        BString finalColumn1Time = "7:00 PM";
-	
-	        if (!liveChan.futureLineup.empty()) {
-	            BString column2Time = liveChan.futureLineup[0].startTimeStr.c_str();
-	            
-	            int h = 0, m = 0;
-	            char ampm[16] = {0};
-	
-	            bool parsed = false;
-	            if (sscanf(column2Time.String(), "%d:%d %15s", &h, &m, ampm) >= 2) {
-	                parsed = true;
-	            } else if (sscanf(column2Time.String(), "%d:%d%15s", &h, &m, ampm) >= 2) {
-	                parsed = true;
-	            } else if (sscanf(column2Time.String(), "%d:%d", &h, &m) == 2) {
-	                strcpy(ampm, (h >= 12) ? "PM" : "AM");
-	                if (h > 12) h -= 12;
-	                if (h == 0) h = 12;
-	                parsed = true;
-	            }
-	
-	            if (parsed) {
-	                std::string ampmStr(ampm);
-	                int32 militaryHour = h;
-	                
-	                if ((ampmStr.find("PM") != std::string::npos || ampmStr.find("pm") != std::string::npos) && h < 12) {
-	                    militaryHour += 12;
-	                } else if ((ampmStr.find("AM") != std::string::npos || ampmStr.find("am") != std::string::npos) && h == 12) {
-	                    militaryHour = 0;
-	                }
-	
-	                int32 totalMinutes = (militaryHour * 60) + m - 30;
-	                if (totalMinutes < 0) {
-	                    totalMinutes += (24 * 60);
-	                }
-	
-	                int32 calculatedHour = totalMinutes / 60;
-	                int32 calculatedMin = totalMinutes % 60;
-	                const char* periodMarker = (calculatedHour >= 12) ? "PM" : "AM";
-	                
-	                int32 displayHour = (calculatedHour > 12) ? (calculatedHour - 12) : ((calculatedHour == 0) ? 12 : calculatedHour);
-	                
-	                finalColumn1Time.SetToFormat("%d:%02d %s", displayHour, calculatedMin, periodMarker);
-	            }
-	        }
-	
-	        // Push the sanitized Now Playing row metadata elements
-	        rowData.programs.push_back({ 
-	            SanitizeTextEngine(liveChan.nowPlaying.c_str()).String(), // Sanitized Title
-	            finalColumn1Time.String(), 
-	            350.0f, 
-	            liveChan.nowPlayingDurationMinutes,
-	            liveChan.nowPlayingEndTimeStr.c_str(),  
-	            SanitizeTextEngine(liveChan.nowPlayingDescription.c_str()).String() // Sanitized Description
-	        });
-	        
-	        for (const auto& nextShow : liveChan.futureLineup) {
-	            BString nextTimeLabel = nextShow.startTimeStr.c_str();
-	            
-	            int hNext = 0, mNext = 0;
-	            if (nextTimeLabel.FindFirst("PM") == B_ERROR && nextTimeLabel.FindFirst("AM") == B_ERROR) {
-	                if (sscanf(nextTimeLabel.String(), "%d:%d", &hNext, &mNext) == 2) {
-	                    nextTimeLabel.SetToFormat("%d:%02d %s", (hNext > 12 ? hNext - 12 : (hNext == 0 ? 12 : hNext)), mNext, (hNext >= 12 ? "PM" : "AM"));
-	                }
-	            }
-	
-	            // Push the sanitized Future Lineup row metadata elements
-	            rowData.programs.push_back({
-	                SanitizeTextEngine(nextShow.title.c_str()).String(), // Sanitized Title
-	                nextTimeLabel.String(), 
-	                350.0f, 
-	                nextShow.durationMinutes,
-	                nextShow.endTimeStr.String(),     
-	                SanitizeTextEngine(nextShow.description.String()).String() // Sanitized Description
-	            });
-	        }
-	        
-	        fContainerList->AddItem(new GuideListRowItem(rowData, i));
-	    }
-	}
+		    for (size_t i = 0; i < loadedChannels.size(); i++) {
+		        const auto& liveChan = loadedChannels[i];
+		        
+		        ChannelListItem* channelItem = (ChannelListItem*)mainListView->ItemAt(i);
+		        const BBitmap* associatedIcon = (channelItem != nullptr) ? channelItem->channelIcon : nullptr;
+		        
+		        GuideRowModel rowData;
+		        rowData.channelLabel << liveChan.guideNumber.c_str() << " - " << liveChan.guideName.c_str();
+		        rowData.channelIcon = associatedIcon;
+		        
+		        BString finalColumn1Time = "7:00 PM";
+		
+		        if (!liveChan.futureLineup.empty()) {
+		            BString column2Time = liveChan.futureLineup[0].startTimeStr.c_str();
+		            
+		            int h = 0, m = 0;
+		            char ampm[16] = {0};
+		
+		            bool parsed = false;
+		            if (sscanf(column2Time.String(), "%d:%d %15s", &h, &m, ampm) >= 2) {
+		                parsed = true;
+		            } else if (sscanf(column2Time.String(), "%d:%d%15s", &h, &m, ampm) >= 2) {
+		                parsed = true;
+		            } else if (sscanf(column2Time.String(), "%d:%d", &h, &m) == 2) {
+		                strcpy(ampm, (h >= 12) ? "PM" : "AM");
+		                if (h > 12) h -= 12;
+		                if (h == 0) h = 12;
+		                parsed = true;
+		            }
+		
+		            if (parsed) {
+		                std::string ampmStr(ampm);
+		                int32 militaryHour = h;
+		                
+		                if ((ampmStr.find("PM") != std::string::npos || ampmStr.find("pm") != std::string::npos) && h < 12) {
+		                    militaryHour += 12;
+		                } else if ((ampmStr.find("AM") != std::string::npos || ampmStr.find("am") != std::string::npos) && h == 12) {
+		                    militaryHour = 0;
+		                }
+		
+		                int32 totalMinutes = (militaryHour * 60) + m - 30;
+		                if (totalMinutes < 0) {
+		                    totalMinutes += (24 * 60);
+		                }
+		
+		                int32 calculatedHour = totalMinutes / 60;
+		                int32 calculatedMin = totalMinutes % 60;
+		                const char* periodMarker = (calculatedHour >= 12) ? "PM" : "AM";
+		                
+		                int32 displayHour = (calculatedHour > 12) ? (calculatedHour - 12) : ((calculatedHour == 0) ? 12 : calculatedHour);
+		                
+		                finalColumn1Time.SetToFormat("%d:%02d %s", displayHour, calculatedMin, periodMarker);
+		            }
+		        }
+		
+		        // Push the sanitized Now Playing row metadata elements
+		        rowData.programs.push_back({ 
+		            SanitizeTextEngine(liveChan.nowPlaying.c_str()).String(), // Sanitized Title
+		            finalColumn1Time.String(), 
+		            350.0f, 
+		            liveChan.nowPlayingDurationMinutes,
+		            liveChan.nowPlayingEndTimeStr.c_str(),  
+		            SanitizeTextEngine(liveChan.nowPlayingDescription.c_str()).String() // Sanitized Description
+		        });
+		        
+		        for (const auto& nextShow : liveChan.futureLineup) {
+		            BString nextTimeLabel = nextShow.startTimeStr.c_str();
+		            
+		            int hNext = 0, mNext = 0;
+		            if (nextTimeLabel.FindFirst("PM") == B_ERROR && nextTimeLabel.FindFirst("AM") == B_ERROR) {
+		                if (sscanf(nextTimeLabel.String(), "%d:%d", &hNext, &mNext) == 2) {
+		                    nextTimeLabel.SetToFormat("%d:%02d %s", (hNext > 12 ? hNext - 12 : (hNext == 0 ? 12 : hNext)), mNext, (hNext >= 12 ? "PM" : "AM"));
+		                }
+		            }
+		
+		            // Push the sanitized Future Lineup row metadata elements
+		            rowData.programs.push_back({
+		                SanitizeTextEngine(nextShow.title.c_str()).String(), // Sanitized Title
+		                nextTimeLabel.String(), 
+		                350.0f, 
+		                nextShow.durationMinutes,
+		                nextShow.endTimeStr.String(),     
+		                SanitizeTextEngine(nextShow.description.String()).String() // Sanitized Description
+		            });
+		        }
+		        
+		        fContainerList->AddItem(new GuideListRowItem(rowData, i));
+		    }
+		}
 
 };
 
@@ -3049,65 +3022,60 @@ void _BuildGuideRowsFromLiveChannels(const std::vector<ChannelGuideItem>& loaded
 
 class DVRWindow : public BWindow {
 
-private:
-    std::map<std::string, ChannelGuideItem> cloudGuideMap;
-    std::map<std::string, std::string> xmlIdToChannelNumMap; 
-    std::map<std::string, std::string> cloudIconMap;
-
-	std::string fCachedGuidePayload; 
-	BMenuItem *fPlayerMpvItem, *fPlayerMediaItem, *fPlayerHtvItem, *fPlayerVlcItem;
-   	BWindow* fRecordingsBrowser = nullptr;
-	BWindow* fGuideWindow = nullptr; 
-    std::vector<BBitmap*> fIconCache;
-	BStringView* fBackendStatusLabel;
-	BButton*     fRestartBackendButton;
-	BButton* fDateBrowseButton;     
-	int32 fCountdownSecondsRemaining; 
-	BStringView* fCountdownLabel;     
-	std::string fSelectedDirectory;
-	BFilePanel* fFolderPanel;      
-	BStringView* fPathDisplayLabel; 
-	BButton* fBrowseButton;       
-	BMenuItem* fNotifyOnItem;
-	BMenuItem* fNotifyOffItem;
-	BMenuItem* fDebugOnItem;
-	BMenuItem* fDebugOffItem;
-	BMenuItem* fFullscreenOnItem;
-	BMenuItem* fFullscreenOffItem;
-	BMessageRunner* fRefreshRunner;
-	time_t   fLastNetworkSyncTime; 
-					
+private:					
 	enum ChannelFilter {
 	    FILTER_ALL,
 	    FILTER_HD,
 	    FILTER_SD
 	};
-
+    std::map<std::string, ChannelGuideItem> cloudGuideMap;
+    std::map<std::string, std::string> xmlIdToChannelNumMap; 
+    std::map<std::string, std::string> cloudIconMap;
+	std::string fCachedGuidePayload; 
+	BMenuItem *fPlayerMpvItem, *fPlayerMediaItem, *fPlayerHtvItem, *fPlayerVlcItem;
+   	BWindow* fRecordingsBrowser = nullptr;
+	BWindow* fGuideWindow = nullptr; 
+    std::vector<BBitmap*> fIconCache;
+	BStringView*  fBackendStatusLabel;
+	BButton*      fRestartBackendButton;
+	BButton* 	  fDateBrowseButton;     
+	int32 		  fCountdownSecondsRemaining; 
+	BStringView*  fCountdownLabel;     
+	std::string   fSelectedDirectory;
+	BFilePanel*   fFolderPanel;      
+	BStringView*  fPathDisplayLabel; 
+	BButton* 	  fBrowseButton;       
+	BMenuItem* 	  fNotifyOnItem;
+	BMenuItem* 	  fNotifyOffItem;
+	BMenuItem* 	  fDebugOnItem;
+	BMenuItem* 	  fDebugOffItem;
+	BMenuItem* 	  fFullscreenOnItem;
+	BMenuItem* 	  fFullscreenOffItem;
+	BMessageRunner* fRefreshRunner;
+	time_t   	  fLastNetworkSyncTime; 
 	ChannelFilter fCurrentFilter;
 	BTextControl* fDateInput; 
-    BMenuField* fTunerSelector;
-    BPopUpMenu* fTunerMenu;
+    BMenuField*   fTunerSelector;
+    BPopUpMenu*   fTunerMenu;
     BTextControl* fChannelInput;
-    BMenuField* fDurationSelector; 
-    BPopUpMenu* fDurationMenu;
+    BMenuField*   fDurationSelector; 
+    BPopUpMenu*   fDurationMenu;
     BTextControl* fTimeInput; 
-    BButton* fRecordButton;
-    BButton* fStopButton;
-    BButton* fScheduleButton; 
-    BStringView* fStatusLabel;    
-    BListView* fChannelListView;
-    BScrollView* fChannelScrollView;
+    BButton* 	  fRecordButton;
+    BButton* 	  fStopButton;
+    BButton* 	  fScheduleButton; 
+    BStringView*  fStatusLabel;    
+    BListView*    fChannelListView;
+    BScrollView*  fChannelScrollView;
     std::vector<ChannelGuideItem> fLoadedChannels;    
     ScheduleListView* fScheduleListView;
-    BScrollView* fScheduleScrollView;
-    BStringView* fScheduleHeading;
-
-    std::string fSelectedIp;
-    std::string fSelectedDurationSeconds; 
-    thread_id fActiveThread;
-    thread_id fSchedulerThread;
-    BMessenger* fSchedulerMessenger;
-
+    BScrollView*  fScheduleScrollView;
+    BStringView*  fScheduleHeading;
+    std::string   fSelectedIp;
+    std::string   fSelectedDurationSeconds; 
+    thread_id     fActiveThread;
+    thread_id     fSchedulerThread;
+    BMessenger*   fSchedulerMessenger;
     std::vector<std::string> DiscoverAllTuners() {
         std::vector<std::string> tuners;
         struct hdhomerun_discover_device_t result_list[64];
@@ -3135,905 +3103,898 @@ private:
 
 
 
-
-
-
-bool IsRemoteFileNewer(const std::string& url, const std::string& localPath) {
-    if (cfg.debugEnable) std::printf("[DVR DEBUG] Checking local time-window cache status...\n");
-
-    struct stat attrib;
-    if (stat(localPath.c_str(), &attrib) != 0) {
-        if (cfg.debugEnable) std::printf("[DVR DEBUG] Local XML file missing. Forcing download.\n");
-        return true; 
-    }
-
-    std::string cacheControlPath = localPath + ".cache";
-    std::ifstream cacheIn(cacheControlPath);
-    uint32 savedSyncTime = 0;
-    
-    if (cacheIn.is_open()) {
-        cacheIn >> savedSyncTime;
-        cacheIn.close();
-    }
-
-    // Set a 3-day expiration window for the master payload database
-    uint32 cacheExpirationWindow = 259200; 
-    uint32 currentTime = real_time_clock();
-
-    if (savedSyncTime > 0 && (currentTime - savedSyncTime) < cacheExpirationWindow) {
-        if (cfg.debugEnable) {
-            uint32 remainingTime = cacheExpirationWindow - (currentTime - savedSyncTime);
-            std::printf("[DVR DEBUG] SUCCESS: Master cache is %u secs old (Expires in %u mins). Skipping network.\n", 
-                        (currentTime - savedSyncTime), remainingTime / 60);
-        }
-        return false; 
-    }
-
-    if (cfg.debugEnable) std::printf("[DVR DEBUG] Cache window expired or invalid for master payload. Ready to sync with server.\n");
-
-    // =========================================================================
-    //  AUTOMATED CACHE PURGE ENGINE (REMOVES EXPIRED DAILY CHUNK FILES)
-    // =========================================================================
-    std::printf("[DVR PURGE] Running storage sweep routine on expired XML chunks...\n");
-    
-    // Get today's date formatted as an integer integer key (e.g., 20260624)
-    std::time_t rawToday = std::time(nullptr);
-    std::tm* localToday = std::localtime(&rawToday);
-    char todayBuf[16];
-    std::strftime(todayBuf, sizeof(todayBuf), "%Y%m%d", localToday);
-    long todayIntKey = std::atol(todayBuf);
-
-    std::string configDirectoryPath = "/boot/home/config/settings/HaikuDVR";
-    DIR* dir = opendir(configDirectoryPath.c_str());
-    if (dir != nullptr) {
-        struct dirent* entry;
-        uint32 deletedFilesCount = 0;
-
-        while ((entry = readdir(dir)) != nullptr) {
-            std::string filename(entry->d_name);
-            
-            if (filename.rfind("guide_", 0) == 0 && filename.length() == 18) { 
-                std::string datePart = filename.substr(6, 8);
-                
-                if (datePart.find_first_not_of("0123456789") == std::string::npos) {
-                    long fileDateIntKey = std::atol(datePart.c_str());
-                    
-                    if (fileDateIntKey < todayIntKey) {
-                        std::string fullPathToDelete = configDirectoryPath + "/" + filename;
-                        if (unlink(fullPathToDelete.c_str()) == 0) {
-                            deletedFilesCount++;
-                        }
-                    }
-                }
-            }
-        }
-        closedir(dir);
-        std::printf("[DVR PURGE] Storage sweep complete. Purged %u obsolete history file chunks.\n", deletedFilesCount);
-    }
-    // =========================================================================
-
-    return true;
-}
-
-
-
-bool IngestMasterXmlToSqlite(const std::string& masterXmlPath, const std::string& dbPath) {
-    sqlite3* db = nullptr;
-    if (sqlite3_open(dbPath.c_str(), &db) != SQLITE_OK) {
-        std::printf("[DVR DB ERROR] Failed to open database.\n");
-        return false;
-    }
-
-    // 1. Establish the database structures and performance options
-    sqlite3_exec(db, "PRAGMA synchronous = NORMAL;", nullptr, nullptr, nullptr);
-    sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
-    sqlite3_exec(db, "PRAGMA cache_size = -8000;", nullptr, nullptr, nullptr); 
-    
-    const char* schema = 
-        "CREATE TABLE IF NOT EXISTS channels (xml_id TEXT PRIMARY KEY, lcn TEXT, icon_url TEXT);"
-        "CREATE TABLE IF NOT EXISTS programs (channel_id TEXT, title TEXT, desc TEXT, start_epoch INTEGER, end_epoch INTEGER);"
-        "CREATE INDEX IF NOT EXISTS idx_channels_lcn_lookup ON channels (lcn, xml_id, icon_url);"
-        "CREATE INDEX IF NOT EXISTS idx_programs_timeline_covering ON programs (start_epoch, end_epoch, channel_id, title, [desc]);";
-    
-    if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) {
-        sqlite3_close(db);
-        return false;
-    }
-
-    // Clear old guide schedules to prepare for fresh data injection
-    sqlite3_exec(db, "DELETE FROM programs;", nullptr, nullptr, nullptr);
-
-    std::ifstream masterStream(masterXmlPath.c_str());
-    if (!masterStream.is_open()) {
-        sqlite3_close(db);
-        return false;
-    }
-
-    auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
-        if (rawXmlTime.length() < 14) return 0;
-        int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
-        std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
-        std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
-        std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
-        std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
-        std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
-        std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
-
-        std::tm tmTime = {0};
-        tmTime.tm_year  = y - 1900;
-        tmTime.tm_mon   = mo - 1;
-        tmTime.tm_mday  = d;
-        tmTime.tm_hour  = h;
-        tmTime.tm_min   = m;
-        tmTime.tm_sec   = s;
-        tmTime.tm_isdst = -1;
-
-        std::time_t utcEpoch = timegm(&tmTime);
-        if (utcEpoch == (std::time_t)-1) return 0;
-        
-        long providerOffsetSeconds = 0;
-        size_t spacePos = rawXmlTime.find(' ');
-        if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
-            int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
-            int oh = 0, om = 0;
-            std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
-            std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
-            providerOffsetSeconds = sign * ((oh * 3600) + (om * 60));
-        }
-        return utcEpoch - providerOffsetSeconds;
-    };
-
-    // Prepare separate compiled statements for independent, high-performance insertion/updates
-    sqlite3_stmt* chanInitStmt = nullptr;
-    sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO channels (xml_id) VALUES (?);", -1, &chanInitStmt, nullptr);
-
-    sqlite3_stmt* chanLcnStmt = nullptr;
-    sqlite3_prepare_v2(db, "UPDATE channels SET lcn = ? WHERE xml_id = ?;", -1, &chanLcnStmt, nullptr);
-
-    sqlite3_stmt* chanIconStmt = nullptr;
-    sqlite3_prepare_v2(db, "UPDATE channels SET icon_url = ? WHERE xml_id = ?;", -1, &chanIconStmt, nullptr);
-
-    sqlite3_stmt* progStmt = nullptr;
-    sqlite3_prepare_v2(db, "INSERT INTO programs VALUES (?, ?, ?, ?, ?);", -1, &progStmt, nullptr);
-
-    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
-
-    std::string line;
-    std::string currentChannelId = "";
-    std::string progChanId = "", progStartRaw = "", progEndRaw = "", titleText = "", descText = "";
-    bool insideProgramme = false;
-    std::time_t current_time = std::time(nullptr);
-    while (std::getline(masterStream, line)) {
-        // Parse channels
-        size_t chanPos = line.find("<channel id=\"");
-        if (chanPos != std::string::npos) {
-            size_t startIdx = chanPos + 13;
-            size_t endIdx = line.find("\"", startIdx);
-            if (endIdx != std::string::npos) {
-                currentChannelId = line.substr(startIdx, endIdx - startIdx);
-                
-                // Initialize the channel entry safely without touching old records
-                sqlite3_bind_text(chanInitStmt, 1, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_step(chanInitStmt);
-                sqlite3_reset(chanInitStmt);
-            }
-            continue;
-        }
-
-        size_t lcnPos = line.find("<lcn>");
-        if (lcnPos != std::string::npos && !currentChannelId.empty()) {
-            size_t endIdx = line.find("</lcn>");
-            if (endIdx != std::string::npos) {
-                std::string lcnVal = line.substr(lcnPos + 5, endIdx - (lcnPos + 5));
-                
-                // Update LCN cleanly
-                sqlite3_bind_text(chanLcnStmt, 1, lcnVal.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(chanLcnStmt, 2, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_step(chanLcnStmt);
-                sqlite3_reset(chanLcnStmt);
-            }
-            continue;
-        }
-
-        size_t iconPos = line.find("<icon src=\"");
-        if (iconPos != std::string::npos && !currentChannelId.empty()) {
-            size_t endIdx = line.find("\"", iconPos + 11);
-            if (endIdx != std::string::npos) {
-                std::string iconUrl = line.substr(iconPos + 11, endIdx - (iconPos + 11));
-                
-                // Update Icon URL cleanly without disturbing the LCN value
-                sqlite3_bind_text(chanIconStmt, 1, iconUrl.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(chanIconStmt, 2, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_step(chanIconStmt);
-                sqlite3_reset(chanIconStmt);
-            }
-            currentChannelId = "";
-            continue;
-        }
-
-
-
-     // Parse program blocks securely
-        size_t progPos = line.find("<programme start=\"");
-        if (progPos != std::string::npos) {
-            insideProgramme = true;
-            titleText = ""; descText = "";
-            
-            size_t sEnd = line.find("\"", progPos + 18);
-            if (sEnd != std::string::npos) progStartRaw = line.substr(progPos + 18, sEnd - (progPos + 18));
-
-            size_t stopPos = line.find("stop=\"");
-            if (stopPos != std::string::npos) {
-                size_t eEnd = line.find("\"", stopPos + 6);
-                if (eEnd != std::string::npos) progEndRaw = line.substr(stopPos + 6, eEnd - (stopPos + 6));
-            }
-
-            size_t chanAttrPos = line.find("channel=\"");
-            if (chanAttrPos != std::string::npos) {
-                size_t cEnd = line.find("\"", chanAttrPos + 9);
-                if (cEnd != std::string::npos) progChanId = line.substr(chanAttrPos + 9, cEnd - (chanAttrPos + 9));
-            }
-            continue;
-        }
-
-        if (insideProgramme) {
-            size_t titlePos = line.find("<title");
-            if (titlePos != std::string::npos) {
-                size_t valStart = line.find(">", titlePos) + 1;
-                size_t valEnd = line.find("</title>", valStart);
-                if (valEnd != std::string::npos) titleText = line.substr(valStart, valEnd - valStart);
-            }
-            size_t descPos = line.find("<desc");
-            if (descPos != std::string::npos) {
-                size_t valStart = line.find(">", descPos) + 1;
-                size_t valEnd = line.find("</desc>", valStart);
-                if (valEnd != std::string::npos) descText = line.substr(valStart, valEnd - valStart);
-            }
-
-            if (line.find("</programme>") != std::string::npos) {
-                insideProgramme = false;
-                std::time_t startEp = parseXmlTimeToEpoch(progStartRaw);
-                std::time_t endEp   = parseXmlTimeToEpoch(progEndRaw);
-
-                if (endEp < startEp) endEp += 86400; // Account for overnight date boundary wraps
-
-                // 🎯 THE FILTER PASS: If the show's end time is in the past, skip SQLite execution
-                if (endEp < current_time) {
-                    continue; 
-                }
-
-                if (!progChanId.empty() && !titleText.empty()) {
-                    sqlite3_bind_text(progStmt, 1, progChanId.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(progStmt, 2, titleText.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(progStmt, 3, descText.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(progStmt, 4, static_cast<sqlite3_int64>(startEp));
-                    sqlite3_bind_int64(progStmt, 5, static_cast<sqlite3_int64>(endEp));
-                    sqlite3_step(progStmt);
-                    sqlite3_reset(progStmt);
-                }
-            }
-        }
-
-    }
-
-    // Close transaction and finalize all prepared statements
-    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
-    
-    // FIXED: Finalize all three distinct channel statement resources
-    sqlite3_finalize(chanInitStmt);
-    sqlite3_finalize(chanLcnStmt);
-    sqlite3_finalize(chanIconStmt);
-    sqlite3_finalize(progStmt);
-
-    // Run internal structural analysis optimization before releasing file lock
-    sqlite3_exec(db, "PRAGMA optimize;", nullptr, nullptr, nullptr);
-
-    sqlite3_close(db);
-    masterStream.close();
-    return true;
-}
-
-
-// =========================================================================
-//  DATABASE GRID ROUTINE: QUERIES SQLITE FOR THE 4-BUCKET TIMELINE WINDOW
-// =========================================================================
-void PopulateGridFromDatabase(const std::string& dbPath, int targetYear, int targetMonth, int targetDay, int targetHour, int targetMin) {
-    sqlite3* db = nullptr;
-    if (sqlite3_open(dbPath.c_str(), &db) != SQLITE_OK) {
-        if (cfg.debugEnable)  std::printf("[DVR DB DEBUG] FATAL: Cannot open database file at %s\n", dbPath.c_str());
-        return;
-    }
-
-    // =========================================================================
-    // DIAGNOSTIC CHECK: PRINT ACTIVE TABLES AND PROBE RAW STORAGE DATA
-    // =========================================================================
-   if (cfg.debugEnable)  std::printf("[DVR DB DEBUG] --- CURRENT DATABASE TABLE CATALOG ---\n");
-    sqlite3_stmt* masterQuery = nullptr;
-    const char* catalogSql = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
-    
-    if (sqlite3_prepare_v2(db, catalogSql, -1, &masterQuery, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(masterQuery) == SQLITE_ROW) {
-            if (cfg.debugEnable)  std::printf("  -> Found Table: %s\n", (const char*)sqlite3_column_text(masterQuery, 0));
-        }
-        sqlite3_finalize(masterQuery);
-    }
-    if (cfg.debugEnable) std::printf("[DVR DB DEBUG] ----------------------------------------\n");
-
-    // NEW DATA PROBE: Pull the first 3 rows from the programs table to see if description data exists
-   if (cfg.debugEnable)  std::printf("[DVR DATA PROBE] Reading raw rows from 'programs' table...\n");
-    sqlite3_stmt* probeStmt = nullptr;
-    const char* probeSql = "SELECT channel_id, title, [desc] FROM programs LIMIT 3;";
-    
-    if (sqlite3_prepare_v2(db, probeSql, -1, &probeStmt, nullptr) == SQLITE_OK) {
-        int rowIdx = 0;
-        while (sqlite3_step(probeStmt) == SQLITE_ROW) {
-            rowIdx++;
-            const char* chId  = (const char*)sqlite3_column_text(probeStmt, 0);
-            const char* title = (const char*)sqlite3_column_text(probeStmt, 1);
-            const char* rawDesc = (const char*)sqlite3_column_text(probeStmt, 2);
-            std::string desc  = rawDesc ? rawDesc : "[NULL POINTER]";
-          if (cfg.debugEnable) {  
-            std::printf("  -> Row %d | Ch: %s | Title: %s\n", rowIdx, chId ? chId : "", title ? title : "");
-            std::printf("     Description: '%s'\n", desc.empty() ? "[EMPTY STRING]" : desc.c_str());
-          }
-        }
-        if (rowIdx == 0) {
-           if (cfg.debugEnable)  std::printf("  -> [WARNING]: The 'programs' table is completely empty!\n");
-        }
-        sqlite3_finalize(probeStmt);
-    } else {
-       if (cfg.debugEnable)  std::printf("  -> [ERROR]: Query preparation failed for data probe! Table might be structurally corrupt.\n");
-    }
-   if (cfg.debugEnable) std::printf("[DVR DATA PROBE] ----------------------------------------\n");
-    // ===========
-
-    cloudGuideMap.clear();
-    xmlIdToChannelNumMap.clear();
-    cloudIconMap.clear();
-
-    // 1. Rebuild basic station and tuner asset mappings from SQLite
-    sqlite3_stmt* chanQuery = nullptr;
-    const char* chanSql = "SELECT xml_id, lcn, icon_url FROM channels WHERE lcn IS NOT NULL;";
-    
-    if (sqlite3_prepare_v2(db, chanSql, -1, &chanQuery, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(chanQuery) == SQLITE_ROW) {
-            std::string xmlId  = (const char*)sqlite3_column_text(chanQuery, 0);
-            std::string chNum  = (const char*)sqlite3_column_text(chanQuery, 1);
-            const char* iconUrl = (const char*)sqlite3_column_text(chanQuery, 2);
-
-            xmlIdToChannelNumMap[xmlId] = chNum;
-            if (iconUrl) {
-                cloudIconMap[chNum] = iconUrl;
-            }
-
-            if (cloudGuideMap.find(chNum) == cloudGuideMap.end()) {
-                ChannelGuideItem item;
-                item.guideNumber = chNum;
-                item.nowPlaying  = "To Be Announced";
-                item.nowPlayingDurationMinutes = 30;
-                cloudGuideMap[chNum] = item;
-            }
-        }
-        sqlite3_finalize(chanQuery);
-    }
-
-    // 2. Loop through your 4 layout grid buckets sequentially
-    for (int32 bucket = 0; bucket < 4; bucket++) {
-        
-        std::tm bucketTimeBox = {0};
-        bucketTimeBox.tm_year = targetYear - 1900;
-        bucketTimeBox.tm_mon  = targetMonth - 1;
-        bucketTimeBox.tm_mday = targetDay;
-        bucketTimeBox.tm_hour = targetHour;
-        bucketTimeBox.tm_min  = targetMin + (bucket * 30); 
-        bucketTimeBox.tm_sec  = 0;
-        bucketTimeBox.tm_isdst = -1;
-
-        std::time_t bucketTargetEpoch = std::mktime(&bucketTimeBox);
-        std::time_t cellEndEpoch      = bucketTargetEpoch + 1800; 
-
-        // ESCAPED QUERY: Ensure square brackets isolate the reserved descriptor keyword
-        const char* progSql = 
-            "SELECT channel_id, title, [desc], start_epoch, end_epoch FROM programs "
-            "WHERE start_epoch < ? AND end_epoch > ?;";
-
-        sqlite3_stmt* progQuery = nullptr;
-        int prepareResult = sqlite3_prepare_v2(db, progSql, -1, &progQuery, nullptr);
-        
-        if (prepareResult == SQLITE_OK) {
-            sqlite3_bind_int64(progQuery, 1, cellEndEpoch);
-            sqlite3_bind_int64(progQuery, 2, bucketTargetEpoch);
-
-                     while (sqlite3_step(progQuery) == SQLITE_ROW) {
-                std::string xmlId        = (const char*)sqlite3_column_text(progQuery, 0);
-                std::string titleText    = (const char*)sqlite3_column_text(progQuery, 1);
-                const char* rawDesc      = (const char*)sqlite3_column_text(progQuery, 2);
-                std::string descText     = rawDesc ? rawDesc : "";
-                std::time_t progStart    = static_cast<std::time_t>(sqlite3_column_int64(progQuery, 3));
-                std::time_t progEnd      = static_cast<std::time_t>(sqlite3_column_int64(progQuery, 4));
-
-                std::string associatedChNum = xmlIdToChannelNumMap[xmlId];
-                if (associatedChNum.empty()) {
-                    if (cfg.debugEnable) {
-                        std::printf("[DVR GRID ERROR] Skipping row: XML ID '%s' has no mapped logical channel number.\n", xmlId.c_str());
-                    }
-                    continue;
-                }
-
-                auto& activeItem = cloudGuideMap[associatedChNum];
-
-                // =========================================================================
-                // 🔍 DEBUG TRACE A: DISPLAY ROW PAYLOAD FRESH OUT OF SQLITE
-                // =========================================================================
-                if (cfg.debugEnable && (titleText.find("Fallon") != std::string::npos || titleText.find("Kimmel") != std::string::npos)) {
-                    std::printf("[DVR GRID TRACE] SQL row read -> Ch: %s | Title: %s | Desc Length: %lu | Characters: '%s'\n", 
-                                associatedChNum.c_str(), titleText.c_str(), (unsigned long)descText.length(), 
-                                (descText.length() > 30 ? descText.substr(0, 30).c_str() : descText.c_str()));
-                }
-                // =========================================================================
-
-                std::tm displayTime = {}, endTm = {};
-                localtime_r(&bucketTargetEpoch, &displayTime);
-                localtime_r(&progEnd, &endTm);
-                
-                char timeBuf[32], endBuf[32];
-                std::strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", &displayTime);
-                std::strftime(endBuf, sizeof(endBuf), "%I:%M %p", &endTm);
-
-                BString formattedTimeStr(timeBuf), formattedEndTimeStr(endBuf);
-                if (formattedTimeStr.StartsWith("0")) formattedTimeStr.Remove(0, 1);
-                if (formattedEndTimeStr.StartsWith("0")) formattedEndTimeStr.Remove(0, 1);
-
-                if (bucket == 0) {
-                    activeItem.nowPlaying = titleText;
-                    activeItem.nowPlayingDurationMinutes = (int32)((progEnd - progStart) / 60);
-                    activeItem.nowPlayingEndTimeStr = formattedEndTimeStr.String();
-                    
-                    // FIX 1: Convert std::string to const char* using .c_str()
-                    activeItem.nowPlayingDescription = descText.c_str(); 
-                } else {
-                    if (activeItem.futureLineup.size() < static_cast<size_t>(bucket)) {
-                        activeItem.futureLineup.resize(bucket);
-                    }
-
-                    if (!activeItem.futureLineup[bucket - 1].title.empty() && 
-                        activeItem.futureLineup[bucket - 1].title != "To Be Announced") {
-                        
-                        if (activeItem.futureLineup[bucket - 1].description.IsEmpty()) {
-                            // FIX 2: Convert std::string to const char* using .c_str()
-                            activeItem.futureLineup[bucket - 1].description = descText.c_str();
-                        }
-                        continue; 
-                    }
-
-                    UpcomingShowItem futureShow;
-                    futureShow.title = titleText;
-                    futureShow.durationMinutes = (int32)((progEnd - progStart) / 60);
-                    futureShow.startTimeStr = formattedTimeStr.String();
-                    futureShow.endTimeStr = formattedEndTimeStr.String();
-                    
-                    // FIX 3: Convert std::string to const char* using .c_str()
-                    futureShow.description = descText.c_str(); 
-
-                    activeItem.futureLineup[bucket - 1] = futureShow;
-               
-
-                    
-                    // =========================================================================
-                    // 🔍 DEBUG TRACE D: VERIFY FUTURE LINEUP MATRIX ASSIGNMENT
-                    // =========================================================================
-                    if (cfg.debugEnable && (titleText.find("Fallon") != std::string::npos || titleText.find("Kimmel") != std::string::npos)) {
-                        std::printf("[DVR GRID TRACE] Assigned Bucket %d sub-show info payload description target.\n", bucket);
-                    }
-                    // =========================================================================
-                }
-            }
-
-            sqlite3_finalize(progQuery);
-        } else {
-            if (cfg.debugEnable) std::printf("[DVR DB DEBUG] Bucket %d SQL Statement Prepare Failed! Error code: %d\n", bucket, prepareResult);
-        }
-
-        // Pad unassigned column buckets with generic placeholders to prevent runtime indexing errors
-        for (auto& [chNum, activeItem] : cloudGuideMap) {
-            if (bucket > 0) {
-                if (activeItem.futureLineup.size() < static_cast<size_t>(bucket)) {
-                    activeItem.futureLineup.resize(bucket);
-                }
-                if (activeItem.futureLineup[bucket - 1].title.empty()) {
-                    activeItem.futureLineup[bucket - 1].title = "To Be Announced";
-                    activeItem.futureLineup[bucket - 1].durationMinutes = 30;
-                }
-            }
-        }
-    }
-
-    sqlite3_close(db);
-}
+	bool IsRemoteFileNewer(const std::string& url, const std::string& localPath) {
+	    if (cfg.debugEnable) std::printf("[DVR DEBUG] Checking local time-window cache status...\n");
+	
+	    struct stat attrib;
+	    if (stat(localPath.c_str(), &attrib) != 0) {
+	        if (cfg.debugEnable) std::printf("[DVR DEBUG] Local XML file missing. Forcing download.\n");
+	        return true; 
+	    }
+	
+	    std::string cacheControlPath = localPath + ".cache";
+	    std::ifstream cacheIn(cacheControlPath);
+	    uint32 savedSyncTime = 0;
+	    
+	    if (cacheIn.is_open()) {
+	        cacheIn >> savedSyncTime;
+	        cacheIn.close();
+	    }
+	
+	    // Set a 3-day expiration window for the master payload database
+	    uint32 cacheExpirationWindow = 259200; 
+	    uint32 currentTime = real_time_clock();
+	
+	    if (savedSyncTime > 0 && (currentTime - savedSyncTime) < cacheExpirationWindow) {
+	        if (cfg.debugEnable) {
+	            uint32 remainingTime = cacheExpirationWindow - (currentTime - savedSyncTime);
+	            std::printf("[DVR DEBUG] SUCCESS: Master cache is %u secs old (Expires in %u mins). Skipping network.\n", 
+	                        (currentTime - savedSyncTime), remainingTime / 60);
+	        }
+	        return false; 
+	    }
+	
+	    if (cfg.debugEnable) std::printf("[DVR DEBUG] Cache window expired or invalid for master payload. Ready to sync with server.\n");
+	
+	    // =========================================================================
+	    //  AUTOMATED CACHE PURGE ENGINE (REMOVES EXPIRED DAILY CHUNK FILES)
+	    // =========================================================================
+	    std::printf("[DVR PURGE] Running storage sweep routine on expired XML chunks...\n");
+	    
+	    // Get today's date formatted as an integer integer key (e.g., 20260624)
+	    std::time_t rawToday = std::time(nullptr);
+	    std::tm* localToday = std::localtime(&rawToday);
+	    char todayBuf[16];
+	    std::strftime(todayBuf, sizeof(todayBuf), "%Y%m%d", localToday);
+	    long todayIntKey = std::atol(todayBuf);
+	
+	    std::string configDirectoryPath = "/boot/home/config/settings/HaikuDVR";
+	    DIR* dir = opendir(configDirectoryPath.c_str());
+	    if (dir != nullptr) {
+	        struct dirent* entry;
+	        uint32 deletedFilesCount = 0;
+	
+	        while ((entry = readdir(dir)) != nullptr) {
+	            std::string filename(entry->d_name);
+	            
+	            if (filename.rfind("guide_", 0) == 0 && filename.length() == 18) { 
+	                std::string datePart = filename.substr(6, 8);
+	                
+	                if (datePart.find_first_not_of("0123456789") == std::string::npos) {
+	                    long fileDateIntKey = std::atol(datePart.c_str());
+	                    
+	                    if (fileDateIntKey < todayIntKey) {
+	                        std::string fullPathToDelete = configDirectoryPath + "/" + filename;
+	                        if (unlink(fullPathToDelete.c_str()) == 0) {
+	                            deletedFilesCount++;
+	                        }
+	                    }
+	                }
+	            }
+	        }
+	        closedir(dir);
+	        std::printf("[DVR PURGE] Storage sweep complete. Purged %u obsolete history file chunks.\n", deletedFilesCount);
+	    }
+	    // =========================================================================
+	
+	    return true;
+	}
+
+
+
+	bool IngestMasterXmlToSqlite(const std::string& masterXmlPath, const std::string& dbPath) {
+	    sqlite3* db = nullptr;
+	    if (sqlite3_open(dbPath.c_str(), &db) != SQLITE_OK) {
+	        std::printf("[DVR DB ERROR] Failed to open database.\n");
+	        return false;
+	    }
+	
+	    // 1. Establish the database structures and performance options
+	    sqlite3_exec(db, "PRAGMA synchronous = NORMAL;", nullptr, nullptr, nullptr);
+	    sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
+	    sqlite3_exec(db, "PRAGMA cache_size = -8000;", nullptr, nullptr, nullptr); 
+	    
+	    const char* schema = 
+	        "CREATE TABLE IF NOT EXISTS channels (xml_id TEXT PRIMARY KEY, lcn TEXT, icon_url TEXT);"
+	        "CREATE TABLE IF NOT EXISTS programs (channel_id TEXT, title TEXT, desc TEXT, start_epoch INTEGER, end_epoch INTEGER);"
+	        "CREATE INDEX IF NOT EXISTS idx_channels_lcn_lookup ON channels (lcn, xml_id, icon_url);"
+	        "CREATE INDEX IF NOT EXISTS idx_programs_timeline_covering ON programs (start_epoch, end_epoch, channel_id, title, [desc]);";
+	    
+	    if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) {
+	        sqlite3_close(db);
+	        return false;
+	    }
+	
+	    // Clear old guide schedules to prepare for fresh data injection
+	    sqlite3_exec(db, "DELETE FROM programs;", nullptr, nullptr, nullptr);
+	
+	    std::ifstream masterStream(masterXmlPath.c_str());
+	    if (!masterStream.is_open()) {
+	        sqlite3_close(db);
+	        return false;
+	    }
+	
+	    auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
+	        if (rawXmlTime.length() < 14) return 0;
+	        int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
+	        std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
+	        std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
+	        std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
+	        std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
+	        std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
+	        std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
+	
+	        std::tm tmTime = {0};
+	        tmTime.tm_year  = y - 1900;
+	        tmTime.tm_mon   = mo - 1;
+	        tmTime.tm_mday  = d;
+	        tmTime.tm_hour  = h;
+	        tmTime.tm_min   = m;
+	        tmTime.tm_sec   = s;
+	        tmTime.tm_isdst = -1;
+	
+	        std::time_t utcEpoch = timegm(&tmTime);
+	        if (utcEpoch == (std::time_t)-1) return 0;
+	        
+	        long providerOffsetSeconds = 0;
+	        size_t spacePos = rawXmlTime.find(' ');
+	        if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
+	            int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
+	            int oh = 0, om = 0;
+	            std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
+	            std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
+	            providerOffsetSeconds = sign * ((oh * 3600) + (om * 60));
+	        }
+	        return utcEpoch - providerOffsetSeconds;
+	    };
+	
+	    // Prepare separate compiled statements for independent, high-performance insertion/updates
+	    sqlite3_stmt* chanInitStmt = nullptr;
+	    sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO channels (xml_id) VALUES (?);", -1, &chanInitStmt, nullptr);
+	
+	    sqlite3_stmt* chanLcnStmt = nullptr;
+	    sqlite3_prepare_v2(db, "UPDATE channels SET lcn = ? WHERE xml_id = ?;", -1, &chanLcnStmt, nullptr);
+	
+	    sqlite3_stmt* chanIconStmt = nullptr;
+	    sqlite3_prepare_v2(db, "UPDATE channels SET icon_url = ? WHERE xml_id = ?;", -1, &chanIconStmt, nullptr);
+	
+	    sqlite3_stmt* progStmt = nullptr;
+	    sqlite3_prepare_v2(db, "INSERT INTO programs VALUES (?, ?, ?, ?, ?);", -1, &progStmt, nullptr);
+	
+	    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+	
+	    std::string line;
+	    std::string currentChannelId = "";
+	    std::string progChanId = "", progStartRaw = "", progEndRaw = "", titleText = "", descText = "";
+	    bool insideProgramme = false;
+	    std::time_t current_time = std::time(nullptr);
+	    while (std::getline(masterStream, line)) {
+	        // Parse channels
+	        size_t chanPos = line.find("<channel id=\"");
+	        if (chanPos != std::string::npos) {
+	            size_t startIdx = chanPos + 13;
+	            size_t endIdx = line.find("\"", startIdx);
+	            if (endIdx != std::string::npos) {
+	                currentChannelId = line.substr(startIdx, endIdx - startIdx);
+	                
+	                // Initialize the channel entry safely without touching old records
+	                sqlite3_bind_text(chanInitStmt, 1, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
+	                sqlite3_step(chanInitStmt);
+	                sqlite3_reset(chanInitStmt);
+	            }
+	            continue;
+	        }
+	
+	        size_t lcnPos = line.find("<lcn>");
+	        if (lcnPos != std::string::npos && !currentChannelId.empty()) {
+	            size_t endIdx = line.find("</lcn>");
+	            if (endIdx != std::string::npos) {
+	                std::string lcnVal = line.substr(lcnPos + 5, endIdx - (lcnPos + 5));
+	                
+	                // Update LCN cleanly
+	                sqlite3_bind_text(chanLcnStmt, 1, lcnVal.c_str(), -1, SQLITE_TRANSIENT);
+	                sqlite3_bind_text(chanLcnStmt, 2, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
+	                sqlite3_step(chanLcnStmt);
+	                sqlite3_reset(chanLcnStmt);
+	            }
+	            continue;
+	        }
+	
+	        size_t iconPos = line.find("<icon src=\"");
+	        if (iconPos != std::string::npos && !currentChannelId.empty()) {
+	            size_t endIdx = line.find("\"", iconPos + 11);
+	            if (endIdx != std::string::npos) {
+	                std::string iconUrl = line.substr(iconPos + 11, endIdx - (iconPos + 11));
+	                
+	                // Update Icon URL cleanly without disturbing the LCN value
+	                sqlite3_bind_text(chanIconStmt, 1, iconUrl.c_str(), -1, SQLITE_TRANSIENT);
+	                sqlite3_bind_text(chanIconStmt, 2, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
+	                sqlite3_step(chanIconStmt);
+	                sqlite3_reset(chanIconStmt);
+	            }
+	            currentChannelId = "";
+	            continue;
+	        }
+	
+	
+	
+	     // Parse program blocks securely
+	        size_t progPos = line.find("<programme start=\"");
+	        if (progPos != std::string::npos) {
+	            insideProgramme = true;
+	            titleText = ""; descText = "";
+	            
+	            size_t sEnd = line.find("\"", progPos + 18);
+	            if (sEnd != std::string::npos) progStartRaw = line.substr(progPos + 18, sEnd - (progPos + 18));
+	
+	            size_t stopPos = line.find("stop=\"");
+	            if (stopPos != std::string::npos) {
+	                size_t eEnd = line.find("\"", stopPos + 6);
+	                if (eEnd != std::string::npos) progEndRaw = line.substr(stopPos + 6, eEnd - (stopPos + 6));
+	            }
+	
+	            size_t chanAttrPos = line.find("channel=\"");
+	            if (chanAttrPos != std::string::npos) {
+	                size_t cEnd = line.find("\"", chanAttrPos + 9);
+	                if (cEnd != std::string::npos) progChanId = line.substr(chanAttrPos + 9, cEnd - (chanAttrPos + 9));
+	            }
+	            continue;
+	        }
+	
+	        if (insideProgramme) {
+	            size_t titlePos = line.find("<title");
+	            if (titlePos != std::string::npos) {
+	                size_t valStart = line.find(">", titlePos) + 1;
+	                size_t valEnd = line.find("</title>", valStart);
+	                if (valEnd != std::string::npos) titleText = line.substr(valStart, valEnd - valStart);
+	            }
+	            size_t descPos = line.find("<desc");
+	            if (descPos != std::string::npos) {
+	                size_t valStart = line.find(">", descPos) + 1;
+	                size_t valEnd = line.find("</desc>", valStart);
+	                if (valEnd != std::string::npos) descText = line.substr(valStart, valEnd - valStart);
+	            }
+	
+	            if (line.find("</programme>") != std::string::npos) {
+	                insideProgramme = false;
+	                std::time_t startEp = parseXmlTimeToEpoch(progStartRaw);
+	                std::time_t endEp   = parseXmlTimeToEpoch(progEndRaw);
+	
+	                if (endEp < startEp) endEp += 86400; // Account for overnight date boundary wraps
+	
+	                // THE FILTER PASS: If the show's end time is in the past, skip SQLite execution
+	                if (endEp < current_time) {
+	                    continue; 
+	                }
+	
+	                if (!progChanId.empty() && !titleText.empty()) {
+	                    sqlite3_bind_text(progStmt, 1, progChanId.c_str(), -1, SQLITE_TRANSIENT);
+	                    sqlite3_bind_text(progStmt, 2, titleText.c_str(), -1, SQLITE_TRANSIENT);
+	                    sqlite3_bind_text(progStmt, 3, descText.c_str(), -1, SQLITE_TRANSIENT);
+	                    sqlite3_bind_int64(progStmt, 4, static_cast<sqlite3_int64>(startEp));
+	                    sqlite3_bind_int64(progStmt, 5, static_cast<sqlite3_int64>(endEp));
+	                    sqlite3_step(progStmt);
+	                    sqlite3_reset(progStmt);
+	                }
+	            }
+	        }
+	
+	    }
+	
+	    // Close transaction and finalize all prepared statements
+	    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
+	    
+	    // Finalize all three distinct channel statement resources
+	    sqlite3_finalize(chanInitStmt);
+	    sqlite3_finalize(chanLcnStmt);
+	    sqlite3_finalize(chanIconStmt);
+	    sqlite3_finalize(progStmt);
+	
+	    // Run internal structural analysis optimization before releasing file lock
+	    sqlite3_exec(db, "PRAGMA optimize;", nullptr, nullptr, nullptr);
+	
+	    sqlite3_close(db);
+	    masterStream.close();
+	    return true;
+	}
+
+
+	// =========================================================================
+	//  DATABASE GRID ROUTINE: QUERIES SQLITE FOR THE 4-BUCKET TIMELINE WINDOW
+	// =========================================================================
+	void PopulateGridFromDatabase(const std::string& dbPath, int targetYear, int targetMonth, int targetDay, int targetHour, int targetMin) {
+	    sqlite3* db = nullptr;
+	    if (sqlite3_open(dbPath.c_str(), &db) != SQLITE_OK) {
+	        if (cfg.debugEnable)  std::printf("[DVR DB DEBUG] FATAL: Cannot open database file at %s\n", dbPath.c_str());
+	        return;
+	    }
+	
+	    // =========================================================================
+	    // DIAGNOSTIC CHECK: PRINT ACTIVE TABLES AND PROBE RAW STORAGE DATA
+	    // =========================================================================
+	   if (cfg.debugEnable)  std::printf("[DVR DB DEBUG] --- CURRENT DATABASE TABLE CATALOG ---\n");
+	    sqlite3_stmt* masterQuery = nullptr;
+	    const char* catalogSql = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
+	    
+	    if (sqlite3_prepare_v2(db, catalogSql, -1, &masterQuery, nullptr) == SQLITE_OK) {
+	        while (sqlite3_step(masterQuery) == SQLITE_ROW) {
+	            if (cfg.debugEnable)  std::printf("  -> Found Table: %s\n", (const char*)sqlite3_column_text(masterQuery, 0));
+	        }
+	        sqlite3_finalize(masterQuery);
+	    }
+	    if (cfg.debugEnable) std::printf("[DVR DB DEBUG] ----------------------------------------\n");
+	
+	    // NEW DATA PROBE: Pull the first 3 rows from the programs table to see if description data exists
+	   if (cfg.debugEnable)  std::printf("[DVR DATA PROBE] Reading raw rows from 'programs' table...\n");
+	    sqlite3_stmt* probeStmt = nullptr;
+	    const char* probeSql = "SELECT channel_id, title, [desc] FROM programs LIMIT 3;";
+	    
+	    if (sqlite3_prepare_v2(db, probeSql, -1, &probeStmt, nullptr) == SQLITE_OK) {
+	        int rowIdx = 0;
+	        while (sqlite3_step(probeStmt) == SQLITE_ROW) {
+	            rowIdx++;
+	            const char* chId  = (const char*)sqlite3_column_text(probeStmt, 0);
+	            const char* title = (const char*)sqlite3_column_text(probeStmt, 1);
+	            const char* rawDesc = (const char*)sqlite3_column_text(probeStmt, 2);
+	            std::string desc  = rawDesc ? rawDesc : "[NULL POINTER]";
+	          if (cfg.debugEnable) {  
+	            std::printf("  -> Row %d | Ch: %s | Title: %s\n", rowIdx, chId ? chId : "", title ? title : "");
+	            std::printf("     Description: '%s'\n", desc.empty() ? "[EMPTY STRING]" : desc.c_str());
+	          }
+	        }
+	        if (rowIdx == 0) {
+	           if (cfg.debugEnable)  std::printf("  -> [WARNING]: The 'programs' table is completely empty!\n");
+	        }
+	        sqlite3_finalize(probeStmt);
+	    } else {
+	       if (cfg.debugEnable)  std::printf("  -> [ERROR]: Query preparation failed for data probe! Table might be structurally corrupt.\n");
+	    }
+	   if (cfg.debugEnable) std::printf("[DVR DATA PROBE] ----------------------------------------\n");
+	
+	    cloudGuideMap.clear();
+	    xmlIdToChannelNumMap.clear();
+	    cloudIconMap.clear();
+	
+	    // Rebuild basic station and tuner asset mappings from SQLite
+	    sqlite3_stmt* chanQuery = nullptr;
+	    const char* chanSql = "SELECT xml_id, lcn, icon_url FROM channels WHERE lcn IS NOT NULL;";
+	    
+	    if (sqlite3_prepare_v2(db, chanSql, -1, &chanQuery, nullptr) == SQLITE_OK) {
+	        while (sqlite3_step(chanQuery) == SQLITE_ROW) {
+	            std::string xmlId  = (const char*)sqlite3_column_text(chanQuery, 0);
+	            std::string chNum  = (const char*)sqlite3_column_text(chanQuery, 1);
+	            const char* iconUrl = (const char*)sqlite3_column_text(chanQuery, 2);
+	
+	            xmlIdToChannelNumMap[xmlId] = chNum;
+	            if (iconUrl) {
+	                cloudIconMap[chNum] = iconUrl;
+	            }
+	
+	            if (cloudGuideMap.find(chNum) == cloudGuideMap.end()) {
+	                ChannelGuideItem item;
+	                item.guideNumber = chNum;
+	                item.nowPlaying  = "To Be Announced";
+	                item.nowPlayingDurationMinutes = 30;
+	                cloudGuideMap[chNum] = item;
+	            }
+	        }
+	        sqlite3_finalize(chanQuery);
+	    }
+	
+	    // Loop through your 4 layout grid buckets sequentially
+	    for (int32 bucket = 0; bucket < 4; bucket++) {
+	        
+	        std::tm bucketTimeBox = {0};
+	        bucketTimeBox.tm_year = targetYear - 1900;
+	        bucketTimeBox.tm_mon  = targetMonth - 1;
+	        bucketTimeBox.tm_mday = targetDay;
+	        bucketTimeBox.tm_hour = targetHour;
+	        bucketTimeBox.tm_min  = targetMin + (bucket * 30); 
+	        bucketTimeBox.tm_sec  = 0;
+	        bucketTimeBox.tm_isdst = -1;
+	
+	        std::time_t bucketTargetEpoch = std::mktime(&bucketTimeBox);
+	        std::time_t cellEndEpoch      = bucketTargetEpoch + 1800; 
+	
+	        // ESCAPED QUERY: Ensure square brackets isolate the reserved descriptor keyword
+	        const char* progSql = 
+	            "SELECT channel_id, title, [desc], start_epoch, end_epoch FROM programs "
+	            "WHERE start_epoch < ? AND end_epoch > ?;";
+	
+	        sqlite3_stmt* progQuery = nullptr;
+	        int prepareResult = sqlite3_prepare_v2(db, progSql, -1, &progQuery, nullptr);
+	        
+	        if (prepareResult == SQLITE_OK) {
+	            sqlite3_bind_int64(progQuery, 1, cellEndEpoch);
+	            sqlite3_bind_int64(progQuery, 2, bucketTargetEpoch);
+	
+	                     while (sqlite3_step(progQuery) == SQLITE_ROW) {
+	                std::string xmlId        = (const char*)sqlite3_column_text(progQuery, 0);
+	                std::string titleText    = (const char*)sqlite3_column_text(progQuery, 1);
+	                const char* rawDesc      = (const char*)sqlite3_column_text(progQuery, 2);
+	                std::string descText     = rawDesc ? rawDesc : "";
+	                std::time_t progStart    = static_cast<std::time_t>(sqlite3_column_int64(progQuery, 3));
+	                std::time_t progEnd      = static_cast<std::time_t>(sqlite3_column_int64(progQuery, 4));
+	
+	                std::string associatedChNum = xmlIdToChannelNumMap[xmlId];
+	                if (associatedChNum.empty()) {
+	                    if (cfg.debugEnable) {
+	                        std::printf("[DVR GRID ERROR] Skipping row: XML ID '%s' has no mapped logical channel number.\n", xmlId.c_str());
+	                    }
+	                    continue;
+	                }
+	
+	                auto& activeItem = cloudGuideMap[associatedChNum];
+	
+	                // =========================================================================
+	                // DEBUG TRACE A: DISPLAY ROW PAYLOAD FRESH OUT OF SQLITE
+	                // =========================================================================
+	                if (cfg.debugEnable && (titleText.find("Fallon") != std::string::npos || titleText.find("Kimmel") != std::string::npos)) {
+	                    std::printf("[DVR GRID TRACE] SQL row read -> Ch: %s | Title: %s | Desc Length: %lu | Characters: '%s'\n", 
+	                                associatedChNum.c_str(), titleText.c_str(), (unsigned long)descText.length(), 
+	                                (descText.length() > 30 ? descText.substr(0, 30).c_str() : descText.c_str()));
+	                }
+	                // =========================================================================
+	
+	                std::tm displayTime = {}, endTm = {};
+	                localtime_r(&bucketTargetEpoch, &displayTime);
+	                localtime_r(&progEnd, &endTm);
+	                
+	                char timeBuf[32], endBuf[32];
+	                std::strftime(timeBuf, sizeof(timeBuf), "%I:%M %p", &displayTime);
+	                std::strftime(endBuf, sizeof(endBuf), "%I:%M %p", &endTm);
+	
+	                BString formattedTimeStr(timeBuf), formattedEndTimeStr(endBuf);
+	                if (formattedTimeStr.StartsWith("0")) formattedTimeStr.Remove(0, 1);
+	                if (formattedEndTimeStr.StartsWith("0")) formattedEndTimeStr.Remove(0, 1);
+	
+	                if (bucket == 0) {
+	                    activeItem.nowPlaying = titleText;
+	                    activeItem.nowPlayingDurationMinutes = (int32)((progEnd - progStart) / 60);
+	                    activeItem.nowPlayingEndTimeStr = formattedEndTimeStr.String();
+	                    
+	                    // Convert std::string to const char* using .c_str()
+	                    activeItem.nowPlayingDescription = descText.c_str(); 
+	                } else {
+	                    if (activeItem.futureLineup.size() < static_cast<size_t>(bucket)) {
+	                        activeItem.futureLineup.resize(bucket);
+	                    }
+	
+	                    if (!activeItem.futureLineup[bucket - 1].title.empty() && 
+	                        activeItem.futureLineup[bucket - 1].title != "To Be Announced") {
+	                        
+	                        if (activeItem.futureLineup[bucket - 1].description.IsEmpty()) {
+	                            // FIX 2: Convert std::string to const char* using .c_str()
+	                            activeItem.futureLineup[bucket - 1].description = descText.c_str();
+	                        }
+	                        continue; 
+	                    }
+	
+	                    UpcomingShowItem futureShow;
+	                    futureShow.title = titleText;
+	                    futureShow.durationMinutes = (int32)((progEnd - progStart) / 60);
+	                    futureShow.startTimeStr = formattedTimeStr.String();
+	                    futureShow.endTimeStr = formattedEndTimeStr.String();
+	                    
+	                    // Convert std::string to const char* using .c_str()
+	                    futureShow.description = descText.c_str(); 
+	
+	                    activeItem.futureLineup[bucket - 1] = futureShow;
+	               
+	
+	                    
+	                    // =========================================================================
+	                    // 🔍 DEBUG TRACE D: VERIFY FUTURE LINEUP MATRIX ASSIGNMENT
+	                    // =========================================================================
+	                    if (cfg.debugEnable && (titleText.find("Fallon") != std::string::npos || titleText.find("Kimmel") != std::string::npos)) {
+	                        std::printf("[DVR GRID TRACE] Assigned Bucket %d sub-show info payload description target.\n", bucket);
+	                    }
+	                    // =========================================================================
+	                }
+	            }
+	
+	            sqlite3_finalize(progQuery);
+	        } else {
+	            if (cfg.debugEnable) std::printf("[DVR DB DEBUG] Bucket %d SQL Statement Prepare Failed! Error code: %d\n", bucket, prepareResult);
+	        }
+	
+	        // Pad unassigned column buckets with generic placeholders to prevent runtime indexing errors
+	        for (auto& [chNum, activeItem] : cloudGuideMap) {
+	            if (bucket > 0) {
+	                if (activeItem.futureLineup.size() < static_cast<size_t>(bucket)) {
+	                    activeItem.futureLineup.resize(bucket);
+	                }
+	                if (activeItem.futureLineup[bucket - 1].title.empty()) {
+	                    activeItem.futureLineup[bucket - 1].title = "To Be Announced";
+	                    activeItem.futureLineup[bucket - 1].durationMinutes = 30;
+	                }
+	            }
+	        }
+	    }
+	
+	    sqlite3_close(db);
+	}
 
                 
 
 
 
-void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
-
-    fChannelListView->MakeEmpty();
-    fLoadedChannels.clear();
-
-    std::string targetDateOnly = (targetDateStr != nullptr && std::strlen(targetDateStr) > 0) ? targetDateStr : "";
-    if (targetDateOnly.empty()) {
-        std::time_t rawToday = std::time(nullptr);
-        std::tm* localToday = std::localtime(&rawToday);
-        char todayBuf[32];
-        std::strftime(todayBuf, sizeof(todayBuf), "%Y-%m-%d", localToday);
-        targetDateOnly = todayBuf;
-    }
-
-    std::string cleanTargetDate = targetDateOnly;
-    cleanTargetDate.erase(std::remove(cleanTargetDate.begin(), cleanTargetDate.end(), '-'), cleanTargetDate.end());
-
-    int targetYear = 2026, targetMonth = 6, targetDay = 21;
-    std::sscanf(targetDateOnly.c_str(), "%d-%d-%d", &targetYear, &targetMonth, &targetDay);
-
-    int targetHour = 12, targetMin = 0;
-    if (fTimeInput != nullptr && fTimeInput->Text() != nullptr) {
-        int parsedHour = 12, parsedMin = 0;
-        BString rawTimeText(fTimeInput->Text());
-        if (std::sscanf(rawTimeText.String(), "%d:%d", &parsedHour, &parsedMin) >= 1) {
-            targetHour = parsedHour;
-            targetMin = parsedMin;
-            
-            // =========================================================================
-            //  FIXED: 24-HOUR MILITARY TIME ENFORCEMENT
-            // =========================================================================
-            bool hasPM = (rawTimeText.IFindFirst("PM") != B_ERROR);
-            bool hasAM = (rawTimeText.IFindFirst("AM") != B_ERROR);
-
-            if (hasPM && targetHour < 12) {
-                targetHour += 12;
-            } else if (hasAM && targetHour == 12) {
-                targetHour = 0;
-            } else if (!hasAM && !hasPM) {
-                // If no explicit AM or PM flag exists in the raw input string:
-                if (targetHour >= 1 && targetHour <= 4) {
-                    // Assume 1 through 4 implies afternoon hours (1 PM - 4 PM)
-                    targetHour += 12;
-                }
-                // Prime morning slots (5 through 11) are left alone as AM values
-            }
-            // =========================================================================
-        }
-    }
-
-    if (targetMin < 30) {
-        targetMin = 0;
-    } else {
-        targetMin = 30;
-    }
-
-    // =========================================================================
-    //  CONFIGURATION CORRECTION: SEPARATE MASTER CACHE FROM THE TARGET CHUNK
-    // =========================================================================
-
-    std::string xmlCachePath = "/boot/home/config/settings/HaikuDVR/guide.xml"; 
-    std::string masterXmlPath = "/boot/home/config/settings/HaikuDVR/guide_master.xml"; 
-    std::string targetChunkPath = "/boot/home/config/settings/HaikuDVR/guide_" + cleanTargetDate + ".xml"; 
-
-    // =========================================================================
-    // THREAD-SAFE HEADER SYNC PASS (PREVENTS DEADLOCKS SYSTEM-WIDE)
-    // =========================================================================
-    BView* headerView = FindView("timelineHeader");
-    if (headerView != nullptr) {
-        BMessage syncHeaderMsg('UCLT');
-        
-        if (fTimeInput != nullptr && fTimeInput->Text() != nullptr) {
-            syncHeaderMsg.AddString("time", fTimeInput->Text());
-        }
-        
-        syncHeaderMsg.AddString("date", targetDateOnly.c_str());        
-        BMessenger(headerView).SendMessage(&syncHeaderMsg);
-    }
-
-    // =========================================================================
-
-    std::vector<std::string> tuners = DiscoverAllTuners();
-    if (tuners.empty()) {
-        fStatusLabel->SetText("Status: Guide Error - No active tuners discovered.");
-        return;
-    }
-    std::string targetIp = fSelectedIp.empty() ? tuners[0] : fSelectedIp;
-
-    // Check master file status on disk
-    struct stat masterStat;
-    bool masterMissing = (stat(masterXmlPath.c_str(), &masterStat) != 0);
-
-    // Check if the specific daily target chunk file is missing
-    std::ifstream checkChunk(targetChunkPath.c_str());
-    bool dailyChunkMissing = !checkChunk.good();
-    if (checkChunk.is_open()) {
-        checkChunk.close();
-    }
-
-    std::string xmltvUrlDummy = "https://hdhomerun.com";
-    bool masterCacheExpired = IsRemoteFileNewer(xmltvUrlDummy, masterXmlPath);
-
-    bool needNetworkFetch = fCachedGuidePayload.empty() || fLastNetworkSyncTime == 0 || dailyChunkMissing || masterMissing || masterCacheExpired;
-    
-    // =========================================================================
-    //  PRESERVATION ON LOCAL CACHE MATCH
-    // =========================================================================
-    if (!needNetworkFetch) {
-        fCachedGuidePayload = "LOADED";
-        if (fLastNetworkSyncTime == 0) {
-            fLastNetworkSyncTime = masterStat.st_mtime;
-        }
-    }
-    // =========================================================================
-
-    if (needNetworkFetch) {
-        std::string discoveryUrl = "http://" + targetIp + "/discover.json";
-        std::string discoverPayload;
-        CURL* curl = curl_easy_init();
-        if (curl) {
-            curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 HaikuDVR/1.0");
-            curl_easy_setopt(curl, CURLOPT_URL, discoveryUrl.c_str());
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NetworkStringCallback);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &discoverPayload);
-            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
-            if (curl_easy_perform(curl) != CURLE_OK) {
-                fStatusLabel->SetText("Status: Local tuner discovery failed.");
-            }
-            curl_easy_cleanup(curl);
-        }
-
-        std::string deviceAuthToken = "";
-        try {
-            auto jDisc = json::parse(discoverPayload);
-            if (jDisc.is_object() && jDisc.contains("DeviceAuth")) {
-                deviceAuthToken = jDisc["DeviceAuth"].get<std::string>();
-            }
-        } catch (...) {}
-
-        if (!deviceAuthToken.empty()) {          
-            std::string xmltvUrl = "https://api.hdhomerun.com/api/xmltv?DeviceAuth=" + deviceAuthToken;
-       
-            if (!masterCacheExpired) {
-                fLastNetworkSyncTime = real_time_clock();
-                fCachedGuidePayload = "LOADED";
-                needNetworkFetch = false; 
-            } else {
-                needNetworkFetch = true;
-            }
-
-            if (needNetworkFetch) {
-                FILE* xmlFilePtr = std::fopen(masterXmlPath.c_str(), "wb");
-                curl = curl_easy_init();
-                if (curl && xmlFilePtr) {
-                    curl_easy_setopt(curl, CURLOPT_URL, xmltvUrl.c_str());
-                    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 HaikuDVR/1.0");
-                    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, xmlFilePtr);
-                    curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
-                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L); 
-                    
-                    CURLcode res = curl_easy_perform(curl);
-                    
-                    if (res == CURLE_OK) {
-                        uint32 syncTimestamp = real_time_clock();
-                        fLastNetworkSyncTime = syncTimestamp;
-                        fCachedGuidePayload = "LOADED";
-                        
-                        std::string cacheControlPath = masterXmlPath + ".cache"; 
-                        std::ofstream cacheOut(cacheControlPath);
-                        if (cacheOut.is_open()) {
-                            cacheOut << syncTimestamp << "\n";
-                            cacheOut.close();
-                            if (cfg.debugEnable) std::printf("[DVR DEBUG] Saved fresh sync timestamp token: %u\n", syncTimestamp);
-                        }
-                    }
-
-                    curl_easy_cleanup(curl);
-                    std::fclose(xmlFilePtr);
-    
-                    if (res != CURLE_OK) {
-                        fStatusLabel->SetText("Status: Cloud XMLTV download failed.");
-                        return;
-                    }
-                } else if (xmlFilePtr) {
-                    std::fclose(xmlFilePtr);
-                }
-            }
-        }
-    }
-
-    // =========================================================================
-    //  🎯 SQLITE DB SYNC: AUTO-INGEST & POPULATE BACKEND DATA STRUCTURES
-    // =========================================================================
-    std::string dbPath = "/boot/home/config/settings/HaikuDVR/guide.db";
-
-    struct stat dbStat;
-    bool dbIsEmpty = (stat(dbPath.c_str(), &dbStat) != 0 || dbStat.st_size == 0);
-
-    // If the database doesn't exist, or if we just pulled down a fresh masterXml chunk, sync it
-    if (dbIsEmpty || needNetworkFetch) {
-        if (cfg.debugEnable) std::printf("[DVR DB] SQLite database empty or master XML was updated. Synchronizing storage records...\n");
-        IngestMasterXmlToSqlite(masterXmlPath, dbPath);
-    }
-
-    // Fire the high-performance database grid lookup utility pass
-    PopulateGridFromDatabase(dbPath, targetYear, targetMonth, targetDay, targetHour, targetMin);
-
-
-
-    // -------------------------------------------------------------------------
-    // PASS 3: DIRECT NETWORK LINEUP STREAMING PIPELINE (TESTING PASS)
-    // -------------------------------------------------------------------------
-    fLoadedChannels.clear(); // Clear local display lists
-    
-    std::string lineupUrl = "http://" + targetIp + "/lineup.json";
-    std::string lineupPayload = ""; // Clear string tracking allocations in RAM
-    
-    if (cfg.debugEnable) std::printf("[DVR TEST] Directly streaming tuner lineup from: %s\n", lineupUrl.c_str());
-
-    CURL* curlLineup = curl_easy_init();
-    if (curlLineup) {
-        curl_easy_setopt(curlLineup, CURLOPT_URL, lineupUrl.c_str());
-        curl_easy_setopt(curlLineup, CURLOPT_USERAGENT, "Mozilla/5.0 HaikuDVRFrontend/1.0");
-        
-        // Use your working StringWriteCallback to append bytes straight into RAM
-        curl_easy_setopt(curlLineup, CURLOPT_WRITEFUNCTION, NetworkStringCallback);
-        curl_easy_setopt(curlLineup, CURLOPT_WRITEDATA, &lineupPayload);
-        
-        curl_easy_setopt(curlLineup, CURLOPT_TIMEOUT, 4L); 
-        CURLcode res = curl_easy_perform(curlLineup);
-        curl_easy_cleanup(curlLineup);
-
-        if (res != CURLE_OK) {
-            std::printf("[DVR TEST ERROR] Network stream failed! Curl Code: %d\n", res);
-        }
-    }
-
-    try {
-        // Parse the live payload directly out of system RAM
-        auto jLineup = json::parse(lineupPayload);
-        
-        if (jLineup.is_array()) {
-            if (cfg.debugEnable) std::printf("[DVR TEST] Successfully parsed %lu live network channel rows.\n", (unsigned long)jLineup.size());
-            
-            for (const auto& channelEntry : jLineup) {
-                std::string chNum = channelEntry.value("GuideNumber", "0.0");
-                
-                int isRealHD = channelEntry.value("HD", 0);
-                if (fCurrentFilter == FILTER_HD && isRealHD == 0) continue;
-                if (fCurrentFilter == FILTER_SD && isRealHD == 1) continue;
-
-                ChannelGuideItem finalItem;
-                
-                // Read from your current SQLite-populated map structures seamlessly
-                if (cloudGuideMap.find(chNum) != cloudGuideMap.end()) {
-                    finalItem = cloudGuideMap[chNum];
-                    if (finalItem.guideName.empty()) {
-                        finalItem.guideName = channelEntry.value("GuideName", "Unknown");
-                    }
-                } else {
-                    // Safe database-mismatch fallback: Keep the network channel visible
-                    finalItem.guideNumber = chNum;
-                    finalItem.guideName   = channelEntry.value("GuideName", "Unknown");
-                    finalItem.nowPlaying  = "To Be Announced";
-                    finalItem.nowPlayingDurationMinutes = 30;
-                }
-
-                int32 activeListRowIndex = (int32)fLoadedChannels.size();
-                fLoadedChannels.push_back(finalItem);
-
-                // Isolate image assets from the raw JSON payload
-                std::string downloadUrl = "";
-                if (channelEntry.contains("ImageURL")) {
-                    downloadUrl = channelEntry["ImageURL"].get<std::string>();
-                } else if (cloudIconMap.find(chNum) != cloudIconMap.end()) {
-                    downloadUrl = cloudIconMap[chNum];
-                }
-
-                if (!downloadUrl.empty()) {
-                    std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + finalItem.guideName + ".png";
-                    
-                    std::ifstream checkFile(iconPath.c_str());
-                    bool fileExistsOnDisk = checkFile.good();
-                    checkFile.close();
-
-                    if (!fileExistsOnDisk) {
-                        gIconQueueLocker.Lock();
-                        DownloadQueueItem job = { iconPath, downloadUrl, activeListRowIndex };
-                        gIconDownloadQueue.push_back(job);
-                        gIconQueueLocker.Unlock();
-                    }
-                }
-            }
-        }
-    } catch (...) {
-        fStatusLabel->SetText("Status: Local tuner lineup filter network processing failed.");
-        std::printf("[DVR TEST ERROR] JSON exception caught parsing live tuner payload string.\n");
-    }
-
- 
- 
- 
-
-     // -------------------------------------------------------------------------
-    // PASS 4: POPULATE RENDERING LIST LAYER AND INITIALIZE ASSETS
-    // -------------------------------------------------------------------------
-    for (size_t i = 0; i < fIconCache.size(); i++) {
-        delete fIconCache[i];
-    }
-    fIconCache.clear();
-
-    for (size_t i = 0; i < fLoadedChannels.size(); i++) {
-        const auto& item = fLoadedChannels[i];
-
-        std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + item.guideName + ".png";
-        
-        std::ifstream checkFile(iconPath.c_str());
-        bool fileExistsOnDisk = checkFile.good();
-        checkFile.close();
-
-        if (!fileExistsOnDisk && cloudIconMap.find(item.guideNumber) != cloudIconMap.end()) {
-            std::string downloadUrl = cloudIconMap[item.guideNumber];
-            gIconQueueLocker.Lock();
-            DownloadQueueItem job = { iconPath, downloadUrl, -1 };
-            gIconDownloadQueue.push_back(job);
-            gIconQueueLocker.Unlock();
-        }
-
-        BBitmap* activeIcon = BTranslationUtils::GetBitmap(iconPath.c_str());
-        if (activeIcon != nullptr) {
-            if (activeIcon->IsValid()) {
-                fIconCache.push_back(activeIcon);
-            } else {
-                delete activeIcon;
-                activeIcon = nullptr;
-            }
-        }
-
-        std::string timeContextLabel = "Now: ";
-        if (targetDateStr != nullptr && std::strlen(targetDateStr) > 0) {
-            std::string rawDate(targetDateStr);
-            // Formats long strings like "2026-06-24" into a scannable "06-24" UI prefix
-            std::string shortDate = (rawDate.length() >= 10) ? rawDate.substr(5) : rawDate;
-            timeContextLabel = "On " + shortDate + ": ";
-        }
-
-        std::string displayLabel = item.guideNumber + " - " + item.guideName + " (" + timeContextLabel + item.nowPlaying + ") ";
-        
-        fChannelListView->AddItem(new ChannelListItem(displayLabel.c_str(), activeIcon));
-    }
-    std::fflush(stdout); 
-
-    // Initialize Messenger targeting the current window instance handler securely
-    if (gIconWindowMessenger == nullptr) {
-        gIconWindowMessenger = new BMessenger(this);
-    }
-
-    // Safely verify and spawn the low priority background icon loader thread
-    if (atomic_get(&gIconThreadRunning) == 0) {
-        gIconQueueLocker.Lock();
-        bool queueHasWork = !gIconDownloadQueue.empty();
-        gIconQueueLocker.Unlock();
-
-        if (queueHasWork) {
-            thread_id downloader = spawn_thread(SerialIconDownloaderThread, "SerialIconWorker", B_LOW_PRIORITY, NULL);
-            if (downloader >= B_OK) {
-                resume_thread(downloader);
-            }
-        }
-    }
-    
-    // Set a final status label message reflecting the chunk compilation context
-    std::string successStatus = "Status: Loaded guide data for " + targetDateOnly;
-    fStatusLabel->SetText(successStatus.c_str());
-}
+	void FetchAndPopulateChannelList(const char* targetDateStr = nullptr) {
+	
+	    fChannelListView->MakeEmpty();
+	    fLoadedChannels.clear();
+	
+	    std::string targetDateOnly = (targetDateStr != nullptr && std::strlen(targetDateStr) > 0) ? targetDateStr : "";
+	    if (targetDateOnly.empty()) {
+	        std::time_t rawToday = std::time(nullptr);
+	        std::tm* localToday = std::localtime(&rawToday);
+	        char todayBuf[32];
+	        std::strftime(todayBuf, sizeof(todayBuf), "%Y-%m-%d", localToday);
+	        targetDateOnly = todayBuf;
+	    }
+	
+	    std::string cleanTargetDate = targetDateOnly;
+	    cleanTargetDate.erase(std::remove(cleanTargetDate.begin(), cleanTargetDate.end(), '-'), cleanTargetDate.end());
+	
+	    int targetYear = 2026, targetMonth = 6, targetDay = 21;
+	    std::sscanf(targetDateOnly.c_str(), "%d-%d-%d", &targetYear, &targetMonth, &targetDay);
+	
+	    int targetHour = 12, targetMin = 0;
+	    if (fTimeInput != nullptr && fTimeInput->Text() != nullptr) {
+	        int parsedHour = 12, parsedMin = 0;
+	        BString rawTimeText(fTimeInput->Text());
+	        if (std::sscanf(rawTimeText.String(), "%d:%d", &parsedHour, &parsedMin) >= 1) {
+	            targetHour = parsedHour;
+	            targetMin = parsedMin;
+	            
+	            // =========================================================================
+	            //  FIXED: 24-HOUR MILITARY TIME ENFORCEMENT
+	            // =========================================================================
+	            bool hasPM = (rawTimeText.IFindFirst("PM") != B_ERROR);
+	            bool hasAM = (rawTimeText.IFindFirst("AM") != B_ERROR);
+	
+	            if (hasPM && targetHour < 12) {
+	                targetHour += 12;
+	            } else if (hasAM && targetHour == 12) {
+	                targetHour = 0;
+	            } else if (!hasAM && !hasPM) {
+	                // If no explicit AM or PM flag exists in the raw input string:
+	                if (targetHour >= 1 && targetHour <= 4) {
+	                    // Assume 1 through 4 implies afternoon hours (1 PM - 4 PM)
+	                    targetHour += 12;
+	                }
+	                // Prime morning slots (5 through 11) are left alone as AM values
+	            }
+	            // =========================================================================
+	        }
+	    }
+	
+	    if (targetMin < 30) {
+	        targetMin = 0;
+	    } else {
+	        targetMin = 30;
+	    }
+	
+	    // =========================================================================
+	    //  CONFIGURATION CORRECTION: SEPARATE MASTER CACHE FROM THE TARGET CHUNK
+	    // =========================================================================
+	
+	    std::string xmlCachePath = "/boot/home/config/settings/HaikuDVR/guide.xml"; 
+	    std::string masterXmlPath = "/boot/home/config/settings/HaikuDVR/guide_master.xml"; 
+	    std::string targetChunkPath = "/boot/home/config/settings/HaikuDVR/guide_" + cleanTargetDate + ".xml"; 
+	
+	    // =========================================================================
+	    // THREAD-SAFE HEADER SYNC PASS (PREVENTS DEADLOCKS SYSTEM-WIDE)
+	    // =========================================================================
+	    BView* headerView = FindView("timelineHeader");
+	    if (headerView != nullptr) {
+	        BMessage syncHeaderMsg('UCLT');
+	        
+	        if (fTimeInput != nullptr && fTimeInput->Text() != nullptr) {
+	            syncHeaderMsg.AddString("time", fTimeInput->Text());
+	        }
+	        
+	        syncHeaderMsg.AddString("date", targetDateOnly.c_str());        
+	        BMessenger(headerView).SendMessage(&syncHeaderMsg);
+	    }
+	
+	    // =========================================================================
+	
+	    std::vector<std::string> tuners = DiscoverAllTuners();
+	    if (tuners.empty()) {
+	        fStatusLabel->SetText("Status: Guide Error - No active tuners discovered.");
+	        return;
+	    }
+	    std::string targetIp = fSelectedIp.empty() ? tuners[0] : fSelectedIp;
+	
+	    // Check master file status on disk
+	    struct stat masterStat;
+	    bool masterMissing = (stat(masterXmlPath.c_str(), &masterStat) != 0);
+	
+	    // Check if the specific daily target chunk file is missing
+	    std::ifstream checkChunk(targetChunkPath.c_str());
+	    bool dailyChunkMissing = !checkChunk.good();
+	    if (checkChunk.is_open()) {
+	        checkChunk.close();
+	    }
+	
+	    std::string xmltvUrlDummy = "https://hdhomerun.com";
+	    bool masterCacheExpired = IsRemoteFileNewer(xmltvUrlDummy, masterXmlPath);
+	
+	    bool needNetworkFetch = fCachedGuidePayload.empty() || fLastNetworkSyncTime == 0 || dailyChunkMissing || masterMissing || masterCacheExpired;
+	    
+	    // =========================================================================
+	    //  PRESERVATION ON LOCAL CACHE MATCH
+	    // =========================================================================
+	    if (!needNetworkFetch) {
+	        fCachedGuidePayload = "LOADED";
+	        if (fLastNetworkSyncTime == 0) {
+	            fLastNetworkSyncTime = masterStat.st_mtime;
+	        }
+	    }
+	    // =========================================================================
+	
+	    if (needNetworkFetch) {
+	        std::string discoveryUrl = "http://" + targetIp + "/discover.json";
+	        std::string discoverPayload;
+	        CURL* curl = curl_easy_init();
+	        if (curl) {
+	            curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 HaikuDVR/1.0");
+	            curl_easy_setopt(curl, CURLOPT_URL, discoveryUrl.c_str());
+	            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NetworkStringCallback);
+	            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &discoverPayload);
+	            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+	            if (curl_easy_perform(curl) != CURLE_OK) {
+	                fStatusLabel->SetText("Status: Local tuner discovery failed.");
+	            }
+	            curl_easy_cleanup(curl);
+	        }
+	
+	        std::string deviceAuthToken = "";
+	        try {
+	            auto jDisc = json::parse(discoverPayload);
+	            if (jDisc.is_object() && jDisc.contains("DeviceAuth")) {
+	                deviceAuthToken = jDisc["DeviceAuth"].get<std::string>();
+	            }
+	        } catch (...) {}
+	
+	        if (!deviceAuthToken.empty()) {          
+	            std::string xmltvUrl = "https://api.hdhomerun.com/api/xmltv?DeviceAuth=" + deviceAuthToken;
+	       
+	            if (!masterCacheExpired) {
+	                fLastNetworkSyncTime = real_time_clock();
+	                fCachedGuidePayload = "LOADED";
+	                needNetworkFetch = false; 
+	            } else {
+	                needNetworkFetch = true;
+	            }
+	
+	            if (needNetworkFetch) {
+	                FILE* xmlFilePtr = std::fopen(masterXmlPath.c_str(), "wb");
+	                curl = curl_easy_init();
+	                if (curl && xmlFilePtr) {
+	                    curl_easy_setopt(curl, CURLOPT_URL, xmltvUrl.c_str());
+	                    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 HaikuDVR/1.0");
+	                    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+	                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, xmlFilePtr);
+	                    curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+	                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L); 
+	                    
+	                    CURLcode res = curl_easy_perform(curl);
+	                    
+	                    if (res == CURLE_OK) {
+	                        uint32 syncTimestamp = real_time_clock();
+	                        fLastNetworkSyncTime = syncTimestamp;
+	                        fCachedGuidePayload = "LOADED";
+	                        
+	                        std::string cacheControlPath = masterXmlPath + ".cache"; 
+	                        std::ofstream cacheOut(cacheControlPath);
+	                        if (cacheOut.is_open()) {
+	                            cacheOut << syncTimestamp << "\n";
+	                            cacheOut.close();
+	                            if (cfg.debugEnable) std::printf("[DVR DEBUG] Saved fresh sync timestamp token: %u\n", syncTimestamp);
+	                        }
+	                    }
+	
+	                    curl_easy_cleanup(curl);
+	                    std::fclose(xmlFilePtr);
+	    
+	                    if (res != CURLE_OK) {
+	                        fStatusLabel->SetText("Status: Cloud XMLTV download failed.");
+	                        return;
+	                    }
+	                } else if (xmlFilePtr) {
+	                    std::fclose(xmlFilePtr);
+	                }
+	            }
+	        }
+	    }
+	
+	    // =========================================================================
+	    //  🎯 SQLITE DB SYNC: AUTO-INGEST & POPULATE BACKEND DATA STRUCTURES
+	    // =========================================================================
+	    std::string dbPath = "/boot/home/config/settings/HaikuDVR/guide.db";
+	
+	    struct stat dbStat;
+	    bool dbIsEmpty = (stat(dbPath.c_str(), &dbStat) != 0 || dbStat.st_size == 0);
+	
+	    // If the database doesn't exist, or if we just pulled down a fresh masterXml chunk, sync it
+	    if (dbIsEmpty || needNetworkFetch) {
+	        if (cfg.debugEnable) std::printf("[DVR DB] SQLite database empty or master XML was updated. Synchronizing storage records...\n");
+	        IngestMasterXmlToSqlite(masterXmlPath, dbPath);
+	    }
+	
+	    // Fire the high-performance database grid lookup utility pass
+	    PopulateGridFromDatabase(dbPath, targetYear, targetMonth, targetDay, targetHour, targetMin);
+	
+	
+	
+	    // -------------------------------------------------------------------------
+	    // PASS 3: DIRECT NETWORK LINEUP STREAMING PIPELINE (TESTING PASS)
+	    // -------------------------------------------------------------------------
+	    fLoadedChannels.clear(); // Clear local display lists
+	    
+	    std::string lineupUrl = "http://" + targetIp + "/lineup.json";
+	    std::string lineupPayload = ""; // Clear string tracking allocations in RAM
+	    
+	    if (cfg.debugEnable) std::printf("[DVR TEST] Directly streaming tuner lineup from: %s\n", lineupUrl.c_str());
+	
+	    CURL* curlLineup = curl_easy_init();
+	    if (curlLineup) {
+	        curl_easy_setopt(curlLineup, CURLOPT_URL, lineupUrl.c_str());
+	        curl_easy_setopt(curlLineup, CURLOPT_USERAGENT, "Mozilla/5.0 HaikuDVRFrontend/1.0");
+	        
+	        // Use your working StringWriteCallback to append bytes straight into RAM
+	        curl_easy_setopt(curlLineup, CURLOPT_WRITEFUNCTION, NetworkStringCallback);
+	        curl_easy_setopt(curlLineup, CURLOPT_WRITEDATA, &lineupPayload);
+	        
+	        curl_easy_setopt(curlLineup, CURLOPT_TIMEOUT, 4L); 
+	        CURLcode res = curl_easy_perform(curlLineup);
+	        curl_easy_cleanup(curlLineup);
+	
+	        if (res != CURLE_OK) {
+	            std::printf("[DVR TEST ERROR] Network stream failed! Curl Code: %d\n", res);
+	        }
+	    }
+	
+	    try {
+	        // Parse the live payload directly out of system RAM
+	        auto jLineup = json::parse(lineupPayload);
+	        
+	        if (jLineup.is_array()) {
+	            if (cfg.debugEnable) std::printf("[DVR TEST] Successfully parsed %lu live network channel rows.\n", (unsigned long)jLineup.size());
+	            
+	            for (const auto& channelEntry : jLineup) {
+	                std::string chNum = channelEntry.value("GuideNumber", "0.0");
+	                
+	                int isRealHD = channelEntry.value("HD", 0);
+	                if (fCurrentFilter == FILTER_HD && isRealHD == 0) continue;
+	                if (fCurrentFilter == FILTER_SD && isRealHD == 1) continue;
+	
+	                ChannelGuideItem finalItem;
+	                
+	                // Read from your current SQLite-populated map structures seamlessly
+	                if (cloudGuideMap.find(chNum) != cloudGuideMap.end()) {
+	                    finalItem = cloudGuideMap[chNum];
+	                    if (finalItem.guideName.empty()) {
+	                        finalItem.guideName = channelEntry.value("GuideName", "Unknown");
+	                    }
+	                } else {
+	                    // Safe database-mismatch fallback: Keep the network channel visible
+	                    finalItem.guideNumber = chNum;
+	                    finalItem.guideName   = channelEntry.value("GuideName", "Unknown");
+	                    finalItem.nowPlaying  = "To Be Announced";
+	                    finalItem.nowPlayingDurationMinutes = 30;
+	                }
+	
+	                int32 activeListRowIndex = (int32)fLoadedChannels.size();
+	                fLoadedChannels.push_back(finalItem);
+	
+	                // Isolate image assets from the raw JSON payload
+	                std::string downloadUrl = "";
+	                if (channelEntry.contains("ImageURL")) {
+	                    downloadUrl = channelEntry["ImageURL"].get<std::string>();
+	                } else if (cloudIconMap.find(chNum) != cloudIconMap.end()) {
+	                    downloadUrl = cloudIconMap[chNum];
+	                }
+	
+	                if (!downloadUrl.empty()) {
+	                    std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + finalItem.guideName + ".png";
+	                    
+	                    std::ifstream checkFile(iconPath.c_str());
+	                    bool fileExistsOnDisk = checkFile.good();
+	                    checkFile.close();
+	
+	                    if (!fileExistsOnDisk) {
+	                        gIconQueueLocker.Lock();
+	                        DownloadQueueItem job = { iconPath, downloadUrl, activeListRowIndex };
+	                        gIconDownloadQueue.push_back(job);
+	                        gIconQueueLocker.Unlock();
+	                    }
+	                }
+	            }
+	        }
+	    } catch (...) {
+	        fStatusLabel->SetText("Status: Local tuner lineup filter network processing failed.");
+	        std::printf("[DVR TEST ERROR] JSON exception caught parsing live tuner payload string.\n");
+	    }
+	
+	
+	    // -------------------------------------------------------------------------
+	    // PASS 4: POPULATE RENDERING LIST LAYER AND INITIALIZE ASSETS
+	    // -------------------------------------------------------------------------
+	    for (size_t i = 0; i < fIconCache.size(); i++) {
+	        delete fIconCache[i];
+	    }
+	    fIconCache.clear();
+	
+	    for (size_t i = 0; i < fLoadedChannels.size(); i++) {
+	        const auto& item = fLoadedChannels[i];
+	
+	        std::string iconPath = "/boot/home/config/settings/HaikuDVR/icons/" + item.guideName + ".png";
+	        
+	        std::ifstream checkFile(iconPath.c_str());
+	        bool fileExistsOnDisk = checkFile.good();
+	        checkFile.close();
+	
+	        if (!fileExistsOnDisk && cloudIconMap.find(item.guideNumber) != cloudIconMap.end()) {
+	            std::string downloadUrl = cloudIconMap[item.guideNumber];
+	            gIconQueueLocker.Lock();
+	            DownloadQueueItem job = { iconPath, downloadUrl, -1 };
+	            gIconDownloadQueue.push_back(job);
+	            gIconQueueLocker.Unlock();
+	        }
+	
+	        BBitmap* activeIcon = BTranslationUtils::GetBitmap(iconPath.c_str());
+	        if (activeIcon != nullptr) {
+	            if (activeIcon->IsValid()) {
+	                fIconCache.push_back(activeIcon);
+	            } else {
+	                delete activeIcon;
+	                activeIcon = nullptr;
+	            }
+	        }
+	
+	        std::string timeContextLabel = "Now: ";
+	        if (targetDateStr != nullptr && std::strlen(targetDateStr) > 0) {
+	            std::string rawDate(targetDateStr);
+	            // Formats long strings like "2026-06-24" into a scannable "06-24" UI prefix
+	            std::string shortDate = (rawDate.length() >= 10) ? rawDate.substr(5) : rawDate;
+	            timeContextLabel = "On " + shortDate + ": ";
+	        }
+	
+	        std::string displayLabel = item.guideNumber + " - " + item.guideName + " (" + timeContextLabel + item.nowPlaying + ") ";
+	        
+	        fChannelListView->AddItem(new ChannelListItem(displayLabel.c_str(), activeIcon));
+	    }
+	    std::fflush(stdout); 
+	
+	    // Initialize Messenger targeting the current window instance handler securely
+	    if (gIconWindowMessenger == nullptr) {
+	        gIconWindowMessenger = new BMessenger(this);
+	    }
+	
+	    // Safely verify and spawn the low priority background icon loader thread
+	    if (atomic_get(&gIconThreadRunning) == 0) {
+	        gIconQueueLocker.Lock();
+	        bool queueHasWork = !gIconDownloadQueue.empty();
+	        gIconQueueLocker.Unlock();
+	
+	        if (queueHasWork) {
+	            thread_id downloader = spawn_thread(SerialIconDownloaderThread, "SerialIconWorker", B_LOW_PRIORITY, NULL);
+	            if (downloader >= B_OK) {
+	                resume_thread(downloader);
+	            }
+	        }
+	    }
+	    
+	    // Set a final status label message reflecting the chunk compilation context
+	    std::string successStatus = "Status: Loaded guide data for " + targetDateOnly;
+	    fStatusLabel->SetText(successStatus.c_str());
+	}
 
 
-void RefreshScheduleListView() {
+	void RefreshScheduleListView() {
         fScheduleListView->MakeEmpty();
         gScheduleLocker.Lock();
         for (const auto& item : gScheduleList) {
@@ -4085,9 +4046,6 @@ void RefreshScheduleListView() {
         gScheduleLocker.Unlock();
     }
 
-
-
-
     void AddDurationItem(const char* label, const char* secondsValue, bool isDefault = false) {
         BMessage* msg = new BMessage(MSG_DURATION_SELECTED);
         msg->AddString("seconds", secondsValue);
@@ -4100,8 +4058,6 @@ void RefreshScheduleListView() {
     }
     
     
-
-
 
 public:
     virtual ~DVRWindow(); 
@@ -4119,19 +4075,12 @@ public:
             resume_thread(updateThread);
         }
 
-
 		fLastNetworkSyncTime = 0; 
 		// 300,000,000 microseconds = 5 minutes
 		fRefreshRunner = new BMessageRunner(BMessenger(this), 
 		    new BMessage(MSG_PERIODIC_GUIDE_REFRESH), 
 		    300000000LL, -1); 
 		
-
-
-
-        //@delete new BMessageRunner(BMessenger(this), new BMessage('TICK'), 60000000LL, -1);
-
-
         fSelectedDirectory = gGlobalSaveDirectory;
         fFolderPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), NULL, B_DIRECTORY_NODE, false, new BMessage(MSG_DIR_CHOSEN));
         std::string initialButtonText = "Save To: " + fSelectedDirectory;
@@ -4158,14 +4107,7 @@ public:
         optionsMenu->AddItem(fDebugOnItem);  
             
         optionsMenu->AddSeparatorItem(); 
-        /*
-        BMessage* msgToggleFullscreen = new BMessage(MSG_TOGGLE_FULLSCREEN);
-        fFullscreenOnItem = new BMenuItem("Fullscreen Mode", msgToggleFullscreen);        
-        fFullscreenOnItem->SetMarked(cfg.fullscreenEnable);
-        optionsMenu->AddItem(fFullscreenOnItem); 
-               
-        optionsMenu->AddSeparatorItem(); 
-        */
+
         BMessage* msgOpenGuide = new BMessage(MSG_OPEN_GUIDE);
         BMenuItem* guideItem = new BMenuItem("Open Guide...", msgOpenGuide);
         optionsMenu->AddItem(guideItem);
@@ -4436,9 +4378,7 @@ public:
 	    BWindow::WindowActivated(active);
 	    PostMessage(B_COLORS_UPDATED);
 	}    
-	
-		
-	
+			
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
         	
@@ -4552,7 +4492,7 @@ public:
              FetchAndPopulateChannelList(newDateString);
 
              // =========================================================================
-             // FIXED: DIRECT WINDOW CROSS-POINTER SYNCHRONIZATION VIA FGUIDEWINDOW
+             // DIRECT WINDOW CROSS-POINTER SYNCHRONIZATION VIA FGUIDEWINDOW
              // =========================================================================
              // If the Guide Matrix Panel window is currently running open on screen
              if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
@@ -4662,37 +4602,32 @@ public:
 		  }
 
 
-     case MSG_TUNER_SELECTED: {
-         const char* newIp;
-         if (message->FindString("ip", &newIp) == B_OK) {
-             fSelectedIp = newIp;
-             std::string statusMsg = "Selected Tuner: " + fSelectedIp;
-             fStatusLabel->SetText(statusMsg.c_str());
-             FetchAndPopulateChannelList();
-         }
+	     case MSG_TUNER_SELECTED: {
+	         const char* newIp;
+	         if (message->FindString("ip", &newIp) == B_OK) {
+	             fSelectedIp = newIp;
+	             std::string statusMsg = "Selected Tuner: " + fSelectedIp;
+	             fStatusLabel->SetText(statusMsg.c_str());
+	             FetchAndPopulateChannelList();
+	         }
+	         
+	       	 if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
+			            BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
+			            fGuideWindow->PostMessage(&refreshGuide);
+			            fGuideWindow->Unlock();
+	         }
+	         
+	         break;
+	     }
+     
          
-       	 if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
-		            BMessage refreshGuide(MSG_PERIODIC_GUIDE_REFRESH);
-		            fGuideWindow->PostMessage(&refreshGuide);
-		            fGuideWindow->Unlock();
-         }
-         
-         break;
-     }
-     
-     
-     
      
      
          case MSG_OPEN_SEARCH_POPUP: {
-                // FIXED: Inside DVRWindow, "this" points directly to the BWindow instance!
                 ProgramSearchWindow* searchEnginePopup = new ProgramSearchWindow(this);
                 searchEnginePopup->Show();
                 break;
             }
-
-
-
 
 
            case MSG_SEARCH_SELECTED: {
@@ -4853,9 +4788,7 @@ public:
             break;
         }
 
-
  
- 	
          case MSG_FILTER_ALL:
          case MSG_FILTER_HD:
          case MSG_FILTER_SD: {
@@ -5040,7 +4973,7 @@ public:
                      }
 
                      // 4. SYNCHRONIZE BACKGROUND RECORDING STATE ARRAYS
-                     // FIXED: Used .String() to match native Haiku BString conventions
+                     // Used .String() to match native Haiku BString conventions
                      BString secondsConverter;
                      secondsConverter.SetToFormat("%d", showMinutes * 60);
                      fSelectedDurationSeconds = secondsConverter.String(); // Updates std::string context properties safely
@@ -5163,7 +5096,6 @@ public:
                      binaryPath = "/boot/system/bin/vlc"; 
                      playerName = "VLC";
                  }
-                 // --- ADD hTV OPTION MATCHING ---
                  else if (cfg.defaultPlayer == "hTV") {
                      binaryPath = "/boot/system/bin/hTV";
                      playerName = "hTV";
@@ -5425,9 +5357,6 @@ public:
     }
 
 
-
-
-
   case MSG_DURATION_SELECTED: {
        const char* secs;
        if (message->FindString("seconds", &secs) == B_OK) {
@@ -5435,8 +5364,7 @@ public:
        }
        break;
    }
-   
-   
+      
      
     case MSG_ADD_SCHEDULE: {
         std::string rawTime = fTimeInput->Text();
@@ -5583,7 +5511,7 @@ public:
      case MSG_START_RECORDING: {
          const char* targetChannel = fChannelInput->Text();
          
-         // FIXED: Used .c_str() to match std::string object data types natively
+         // Used .c_str() to match std::string object data types natively
          std::string targetDuration = fSelectedDurationSeconds.c_str();
 
          const char* forcedChannel = nullptr;
@@ -5615,7 +5543,7 @@ public:
             if (selectedIndex >= 0) {
                 ChannelListItem* listItem = (ChannelListItem*)fChannelListView->ItemAt(selectedIndex);
                 if (listItem != nullptr) {
-                    BString listRowText(listItem->textDisplay.c_str()); // e.g. "2.1 - WSBDT (Now: Channel 2 Action News)"
+                    BString listRowText(listItem->textDisplay.c_str()); 
                     
                     int32 nowStart = listRowText.FindFirst("(Now: ");
                     if (nowStart != B_ERROR) {
@@ -5759,7 +5687,7 @@ public:
                 if (fGuideWindow->Lock()) {
                     cfg.fullscreenEnable = !cfg.fullscreenEnable;
                     
-                    // FIXED: Using a static scope block tracker preserves coordinates without header alterations
+                    // Using a static scope block tracker preserves coordinates without header alterations
                     static BRect dynamicSavedFrame(100, 100, 1150, 750);
                     
                     if (cfg.fullscreenEnable) {
@@ -5945,8 +5873,6 @@ public:
         }
 
 
-
-
 		case MSG_VIEW_RECORDINGS: {
 		    if (fRecordingsBrowser == nullptr) {
 		        BRect browserFrame(150, 150, 800, 600);
@@ -6007,11 +5933,7 @@ public:
 	         fStatusLabel->SetText("Status: Stopping recording...");
 	         atomic_set(&gCancelRecording, 1);
 	         fStopButton->SetEnabled(false);
-	         break;
-	 
-	 
-
-	 
+	         break;	 
 	  
 	      case MSG_CLOSE_GUIDE_WINDOW: {
 	      
@@ -6023,8 +5945,7 @@ public:
 	            }
 	 
 	            break;
-	        }
-	        
+	        }        
 	        
 	         
 	      	case MSG_GUIDE_CLOSED: {
@@ -6081,25 +6002,13 @@ public:
 		            }
 		            break;
 		        }
-		        /* @delete
-		        case 'TICK': { 		         
-		            if (fGuideWindow != nullptr && fGuideWindow->Lock()) {
-		                BView* childHeader = fGuideWindow->FindView("timelineHeader");
-		                if (childHeader != nullptr) {
-		                    childHeader->Invalidate(); 
-		                }
-		                fGuideWindow->Unlock();
-		            }
-		            break;
-		        }
-				*/
 		
 		       case MSG_SET_PLAYER_MPV: {
 		            cfg.defaultPlayer = "MPV";
 		            fPlayerMpvItem->SetMarked(true);
 		            fPlayerMediaItem->SetMarked(false);
 		            fPlayerVlcItem->SetMarked(false);
-		            fPlayerHtvItem->SetMarked(false); // Unmark hTV
+		            fPlayerHtvItem->SetMarked(false); 
 		            SaveSchedulesToDisk();
 		            break;
 		        }
@@ -6109,7 +6018,7 @@ public:
 		            fPlayerMpvItem->SetMarked(false);
 		            fPlayerMediaItem->SetMarked(true);
 		            fPlayerVlcItem->SetMarked(false);
-		            fPlayerHtvItem->SetMarked(false); // Unmark hTV
+		            fPlayerHtvItem->SetMarked(false); 
 		            SaveSchedulesToDisk();
 		            break;
 		        }
@@ -6119,18 +6028,17 @@ public:
 		            fPlayerMpvItem->SetMarked(false);
 		            fPlayerMediaItem->SetMarked(false);
 		            fPlayerVlcItem->SetMarked(true);
-		            fPlayerHtvItem->SetMarked(false); // Unmark hTV
+		            fPlayerHtvItem->SetMarked(false);
 		            SaveSchedulesToDisk();
 		            break;
 		        }
 
-		       // --- ADD hTV SELECTION CASE BLOCK ---
 		       case MSG_SET_PLAYER_HTV: {
 		            cfg.defaultPlayer = "hTV";
 		            fPlayerMpvItem->SetMarked(false);
 		            fPlayerMediaItem->SetMarked(false);
 		            fPlayerVlcItem->SetMarked(false);
-		            fPlayerHtvItem->SetMarked(true); // Checkmark hTV exclusively
+		            fPlayerHtvItem->SetMarked(true); 
 		            SaveSchedulesToDisk();
 		            break;
 		        }
@@ -6250,7 +6158,7 @@ void RealTVGuideWindow::MessageReceived(BMessage* message) {
 			            delete item;
 			        }
 			
-			        // FIX: Explicitly lock the Main Window before touching its vector!
+			        // Explicitly lock the Main Window before touching its vector!
 			        std::vector<ChannelGuideItem> localCopy;
 			        if (mainWindow->Lock()) {
 			            localCopy = mainWindow->GetLoadedChannels(); // Makes a thread-safe snapshot copy
@@ -6314,7 +6222,8 @@ bool DVRWindow::QuitRequested() {
     }
 
     if (guideIsOpenOnScreen) {
-        this->Hide(); 
+       // this->Hide(); 
+        this->Minimize(true);
         return false; 
     }
 
@@ -6344,8 +6253,6 @@ public:
     }
 
 };
-
-
 
 
 int main() {

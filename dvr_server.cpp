@@ -83,8 +83,6 @@ BString gFrontendDefaultPlayer = "MPV";
 
 
 
-
-
 std::vector<std::string> DiscoverAllTuners() {
     std::vector<std::string> tuners;
     struct hdhomerun_discover_device_t result_list[64];
@@ -317,8 +315,6 @@ int32 BackgroundRecordingWorker(void* data) {
 }
 
 
-
-
 // Standard SSDP Configuration Values
 #define SSDP_MULTICAST_IP "239.255.255.250"
 #define SSDP_PORT 1900
@@ -534,12 +530,6 @@ static int32 dlna_discovery_worker_thread(void* data) {
     }
     return B_OK;
 }
-
-
-
-
-
-
 
 
 class DlnasHttpStreamingServer {
@@ -1069,7 +1059,7 @@ private:
                     
                     if (name.find(".ts") != std::string::npos || name.find(".mpg") != std::string::npos) {
                         
-                        // FIX: Percent-encode ONLY the filename part of the URL string
+                        // Percent-encode ONLY the filename part of the URL string
                         std::string encodedName = UrlEncodeFilename(name);
                         std::string streamUrl = "http://" + localIp + ":" + std::to_string(port) + "/video/" + encodedName;
                         
@@ -1157,7 +1147,7 @@ private:
 	    
 	    std::string rawFilename = req.substr(pos + 7, endPos - (pos + 7));
 	    
-	    // FIX: Decode the URL characters before referencing the storage path
+	    // Decode the URL characters before referencing the storage path
 	    std::string filename = UrlDecodeFilename(rawFilename);
 	    std::string fullPath = rootDir + "/" + filename;
 	
@@ -1248,7 +1238,7 @@ private:
         char chunk[64 * 1024]; 
         std::streamsize bytesRemaining = contentLength;
 
-        // FIX: Ensured atomic loop check and proper tracking of partial network writes
+        // Ensured atomic loop check and proper tracking of partial network writes
         while (bytesRemaining > 0 && file.good() && atomic_get(&gStopService) == 0) {
             std::streamsize toRead = sizeof(chunk);
             if (toRead > bytesRemaining) toRead = bytesRemaining;
@@ -1257,7 +1247,7 @@ private:
             std::streamsize bytesRead = file.gcount();
             if (bytesRead <= 0) break;
 
-            // FIX: Nested loop to ensure the ENTIRE read block is fully pushed to the network socket
+            // Nested loop to ensure the ENTIRE read block is fully pushed to the network socket
             std::streamsize bytesSentTotal = 0;
             while (bytesSentTotal < bytesRead && atomic_get(&gStopService) == 0) {
                 ssize_t sent = send(clientFd, chunk + bytesSentTotal, bytesRead - bytesSentTotal, 0);
