@@ -31,14 +31,18 @@ SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
 SERVER_RSRCS = dvr_server.rsrc 
 
 # Shared linking assets
-LIBS = -L./lib -lhdhomerun -lbe -ltranslation -lcurl -lnetwork -ltracker -lshared -lsqlite3
-RPATH = -Wl,-rpath=$$ORIGIN/lib
+LIBS = -L./libhdhomerun -lhdhomerun -lbe -ltranslation -lcurl -lnetwork -ltracker -lshared -lsqlite3
+RPATH = -Wl,-rpath=$$ORIGIN/libhdhomerun
 
 # OPTIMIZED: Added garbage collection linking flags and symbol stripping (-s)
 LDFLAGS = $(INCLUDE) -Wl,--gc-sections -s
 
 # Master target execution rule
-all: $(GUI_TARGET) $(SERVER_TARGET)
+all: libhdhomerun_build $(GUI_TARGET) $(SERVER_TARGET)
+
+# Rule to jump into the subdirectory and compile the library
+libhdhomerun_build:
+	$(MAKE) -C libhdhomerun
 
 # Link the graphical desktop client binary
 $(GUI_TARGET): $(GUI_OBJS) $(GUI_RSRCS)
@@ -65,12 +69,13 @@ clean:
 	rm -f *.o *.rsrc $(GUI_TARGET) $(SERVER_TARGET)
 	rm -f $(NAME) *.hpkg
 	rm -rf build
+	$(MAKE) -C libhdhomerun clean
 
-.PHONY: all clean
+.PHONY: all clean libhdhomerun_build
 
 
 
-release: all
+release: all	
 	@[ -n "$(PACKAGE_DIR)" ] || { echo "PACKAGE_DIR is undefined"; exit 1; }
 	rm -rf "./$(PACKAGE_DIR)"
 	mkdir -p $(PACKAGE_DIR)
@@ -83,7 +88,7 @@ release: all
 	mkdir -p $(PACKAGE_DIR)/data/deskbar/menu/Applications
 	cp $(GUI_TARGET) $(PACKAGE_DIR)/apps/$(GUI_TARGET)
 	cp $(SERVER_TARGET) $(PACKAGE_DIR)/servers/$(SERVER_TARGET)
-	cp lib/libhdhomerun.so $(PACKAGE_DIR)/lib/libhdhomerun.so
+	cp libhdhomerun/libhdhomerun.so $(PACKAGE_DIR)/lib/libhdhomerun.so
 	cp dvr_server.launch $(PACKAGE_DIR)/data/launch/dvr_server
 	ln -s ../apps/$(GUI_TARGET) $(PACKAGE_DIR)/bin/$(GUI_TARGET)
 	ln -s ../../../../apps/$(GUI_TARGET) $(PACKAGE_DIR)/data/deskbar/menu/Applications/$(GUI_TARGET)
