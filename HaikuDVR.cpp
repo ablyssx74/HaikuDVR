@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.33 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.34 (Haiku OS)";
 }
 
 

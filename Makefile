@@ -6,9 +6,9 @@ CXXFLAGS = -Wall -O3 -fdata-sections -ffunction-sections -I./include -I/boot/sys
 # Target binary definitions
 GUI_TARGET = HaikuDVR
 SERVER_TARGET = dvr_server
-VERSION = 1.0.33
+VERSION = 1.0.34
 PACKAGE_DIR := build/package
-REVISION = 2
+REVISION = 1
 
 # Shared target architectures
 UNAME_M := $(shell uname -p)
