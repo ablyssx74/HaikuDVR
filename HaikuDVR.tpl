@@ -18,9 +18,9 @@ provides {
 requires {
 	haiku
 	nlohmann_json
-	curl
-	mpv
-	sqlite
+	curl$(is32bit)
+	mpv$(is32bit)
+	sqlite$(is32bit)
 }	
 urls {
 	"https://github.com/ablyssx74/HaikuDVR"
