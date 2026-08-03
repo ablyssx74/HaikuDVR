@@ -8,6 +8,7 @@ GUI_TARGET = HaikuDVR
 SERVER_TARGET = dvr_server
 VERSION = 1.0.33
 PACKAGE_DIR := build/package
+REVISION = 2
 
 # Shared target architectures
 UNAME_M := $(shell uname -p)
@@ -16,10 +17,12 @@ ifeq ($(UNAME_M), x86)
     ARCH = x86_gcc2
     INCLUDE = -L/boot/system/lib/x86 
     is32bit = _x86
+    LIBDIR = $(PACKAGE_DIR)/lib/x86
 else ifeq ($(UNAME_M), x86_64)
     CXX = g++
     ARCH = x86_64
     INCLUDE = -L/boot/system/lib
+    LIBDIR = $(PACKAGE_DIR)/lib
 endif
 
 # Source mapping parameters
@@ -32,7 +35,7 @@ SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
 SERVER_RSRCS = dvr_server.rsrc 
 
 # Shared linking assets
-LIBS = -L./lib -lhdhomerun -lbe -ltranslation -lcurl -lnetwork -ltracker -lshared -lsqlite3
+LIBS = -L./libhdhomerun -lhdhomerun -lbe -ltranslation -lcurl -lnetwork -ltracker -lshared -lsqlite3
 RPATH = -Wl,-rpath=$$ORIGIN/lib
 
 # OPTIMIZED: Added garbage collection linking flags and symbol stripping (-s)
@@ -43,7 +46,7 @@ all: libhdhomerun_build $(GUI_TARGET) $(SERVER_TARGET)
 
 # Rule to jump into the subdirectory and compile the library
 libhdhomerun_build:
-	$(MAKE) -C lib
+	$(MAKE) -C libhdhomerun
 
 # Link the graphical desktop client binary
 $(GUI_TARGET): $(GUI_OBJS) $(GUI_RSRCS)
@@ -70,7 +73,7 @@ clean:
 	rm -f *.o *.rsrc $(GUI_TARGET) $(SERVER_TARGET)
 	rm -f $(NAME) *.hpkg
 	rm -rf build
-	$(MAKE) -C lib clean
+	$(MAKE) -C libhdhomerun clean
 
 .PHONY: all clean libhdhomerun_build
 
@@ -80,20 +83,20 @@ release: all
 	@[ -n "$(PACKAGE_DIR)" ] || { echo "PACKAGE_DIR is undefined"; exit 1; }
 	rm -rf "./$(PACKAGE_DIR)"
 	mkdir -p $(PACKAGE_DIR)
-	sed -e 's/$$(GUI_TARGET)/$(GUI_TARGET)/g' -e 's/$$(is32bit)/$(is32bit)/g' -e 's/$$(VERSION)/$(VERSION)/g' -e 's/$$(ARCH)/$(ARCH)/' -e 's/$$(YEAR)/$(shell date +%Y)/' $(GUI_TARGET).tpl > $(PACKAGE_DIR)/.PackageInfo
+	sed -e 's/$$(GUI_TARGET)/$(GUI_TARGET)/g' -e 's/$$(REVISION)/$(REVISION)/g' -e 's/$$(is32bit)/$(is32bit)/g' -e 's/$$(VERSION)/$(VERSION)/g' -e 's/$$(ARCH)/$(ARCH)/' -e 's/$$(YEAR)/$(shell date +%Y)/' $(GUI_TARGET).tpl > $(PACKAGE_DIR)/.PackageInfo
 	mkdir -p $(PACKAGE_DIR)/apps
 	mkdir -p $(PACKAGE_DIR)/bin
 	mkdir -p $(PACKAGE_DIR)/servers
-	mkdir -p $(PACKAGE_DIR)/lib
+	mkdir -p $(LIBDIR)
 	mkdir -p $(PACKAGE_DIR)/data/launch
 	mkdir -p $(PACKAGE_DIR)/data/deskbar/menu/Applications
 	cp $(GUI_TARGET) $(PACKAGE_DIR)/apps/$(GUI_TARGET)
 	cp $(SERVER_TARGET) $(PACKAGE_DIR)/servers/$(SERVER_TARGET)
-	cp lib/libhdhomerun.so $(PACKAGE_DIR)/lib/libhdhomerun.so
+	cp libhdhomerun/libhdhomerun.so $(LIBDIR)/libhdhomerun.so
 	cp dvr_server.launch $(PACKAGE_DIR)/data/launch/dvr_server
 	ln -s ../apps/$(GUI_TARGET) $(PACKAGE_DIR)/bin/$(GUI_TARGET)
 	ln -s ../../../../apps/$(GUI_TARGET) $(PACKAGE_DIR)/data/deskbar/menu/Applications/$(GUI_TARGET)
-	package create -C $(PACKAGE_DIR) $(GUI_TARGET)-$(VERSION)-1-$(ARCH).hpkg	
+	package create -C $(PACKAGE_DIR) $(GUI_TARGET)-$(VERSION)-$(REVISION)-$(ARCH).hpkg	
 
 
 

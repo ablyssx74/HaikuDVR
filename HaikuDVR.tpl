@@ -1,5 +1,5 @@
 name			$(GUI_TARGET)
-version			$(VERSION)-1
+version			$(VERSION)-$(REVISION)
 architecture	$(ARCH)
 summary 		"HaikuDVR"
 description 	"HaikuDVR - Native GUI Haiku DVR for HDHomeRun Tuners"
@@ -12,7 +12,7 @@ copyrights {
 	"$(YEAR) ablyss"
 }
 provides {
-	$(GUI_TARGET) = $(VERSION)-1
+	$(GUI_TARGET) = $(VERSION)-$(REVISION)
 	libhdhomerun
 }
 requires {
