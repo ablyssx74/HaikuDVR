@@ -60,10 +60,10 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.35 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.36 (Haiku OS)";
 }
 
-
+const uint32 MSG_TOGGLE_DLNA			    = 'dlna';
 const uint32 MSG_CLOCK_TICK_5MIN 			= 'clt5'; 
 const uint32 MSG_EXECUTE_SEARCH   			= 'exsr';
 const uint32 MSG_SEARCH_SELECTED		    = 'srsl';
@@ -134,6 +134,7 @@ void ensure_config_dir() {
 
 struct AppConfig {
     bool showUpdateNotifications = true;
+    bool dlnaEnable = true; 
     bool debugEnable = false; 
     bool fullscreenEnable = false;
     std::string defaultPlayer; 
@@ -220,6 +221,7 @@ void SaveSchedulesToDisk() {
     
     jRoot["save_directory"]            = gGlobalSaveDirectory;     
     jRoot["show_update_notifications"] = cfg.showUpdateNotifications; 
+    jRoot["dlna_enable"]               = cfg.dlnaEnable;
     jRoot["debug_enable"]              = cfg.debugEnable;
     jRoot["enable_fullscreen"]         = cfg.fullscreenEnable;
     jRoot["default_player"]            = cfg.defaultPlayer;
@@ -278,6 +280,7 @@ void LoadSchedulesFromDisk() {
         if (jIn.is_object()) {
             gGlobalSaveDirectory        = jIn.value("save_directory", "/boot/home");
             cfg.showUpdateNotifications = jIn.value("show_update_notifications", true);
+            cfg.dlnaEnable              = jIn.value("dlna_enable", true);
             cfg.debugEnable             = jIn.value("debug_enable", false);
             cfg.fullscreenEnable 		= jIn.value("enable_fullscreen", false);
             cfg.defaultPlayer           = jIn.value("default_player", "mpv"); 
@@ -305,6 +308,7 @@ void LoadSchedulesFromDisk() {
         }
         else if (jIn.is_array()) {
             cfg.showUpdateNotifications = true;
+            cfg.dlnaEnable              = true;
             cfg.debugEnable             = false;
             cfg.fullscreenEnable		= false;
             cfg.defaultPlayer           = "MPV"; 
@@ -3049,6 +3053,8 @@ private:
 	BButton* 	  fBrowseButton;       
 	BMenuItem* 	  fNotifyOnItem;
 	BMenuItem* 	  fNotifyOffItem;
+	BMenuItem* 	  fDlnaOnItem;
+	BMenuItem* 	  fDlnaOffItem;
 	BMenuItem* 	  fDebugOnItem;
 	BMenuItem* 	  fDebugOffItem;
 	BMenuItem* 	  fFullscreenOnItem;
@@ -4109,6 +4115,13 @@ public:
         optionsMenu->AddItem(fDebugOnItem);  
             
         optionsMenu->AddSeparatorItem(); 
+        
+        BMessage* msgDlnaOn = new BMessage(MSG_TOGGLE_DLNA);
+        fDlnaOnItem = new BMenuItem("Enable Dlna Server", msgDlnaOn);        
+        fDlnaOnItem->SetMarked(cfg.dlnaEnable);
+        optionsMenu->AddItem(fDlnaOnItem);  
+            
+        optionsMenu->AddSeparatorItem();         
 
         BMessage* msgOpenGuide = new BMessage(MSG_OPEN_GUIDE);
         BMenuItem* guideItem = new BMenuItem("Open Guide...", msgOpenGuide);
@@ -4402,6 +4415,56 @@ public:
             break;
         }
         
+        case MSG_TOGGLE_DLNA: {
+            cfg.dlnaEnable = !cfg.dlnaEnable;            
+            fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
+            SaveSchedulesToDisk();
+
+            // Native Haiku Alert Popup with corrected button layout enum
+            BAlert* alert = new BAlert("Warning",
+                "Toggling the DLNA server requires restarting the backend service.\n\n"
+                "Any current recordings in progress will be lost! Do you want to proceed?",
+                "Cancel", "Proceed", nullptr, B_WIDTH_FROM_LABEL, B_WARNING_ALERT);
+            
+            // Go() blocks until the user interacts with the popup window
+            int32 response = alert->Go();
+            
+            if (response == 0) {
+                // User clicked "Cancel" -> Revert settings and menu state
+                cfg.dlnaEnable = !cfg.dlnaEnable;            
+                fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
+                SaveSchedulesToDisk();
+                break; 
+            }
+
+            // User clicked "Proceed" -> Programmatically notify the backend to apply new DLNA settings
+            BRoster roster;
+            const char* backendSignature = "x-vnd.haikuhdhomerun-dvr";
+		
+            if (roster.IsRunning(backendSignature)) {
+                BMessenger backendMessenger(backendSignature);
+                if (backendMessenger.IsValid()) {
+                    BMessage quitMessage(B_QUIT_REQUESTED);
+                    backendMessenger.SendMessage(&quitMessage);
+                }
+            } else {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    close(STDIN_FILENO); 
+                    char* const args[] = { 
+                        (char*)"/bin/launch_roster", 
+                        (char*)"restart", 
+                        (char*)backendSignature, 
+                        nullptr 
+                    };
+                    execv(args[0], args);
+                    _exit(1); 
+                }
+            }
+            break;
+        }
+
+
         
          case MSG_TOGGLE_FULLSCREEN: {
             cfg.fullscreenEnable = !cfg.fullscreenEnable;            

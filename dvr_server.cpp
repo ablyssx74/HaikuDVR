@@ -77,6 +77,7 @@ std::vector<ScheduleItem> gScheduleList;
 std::string gGlobalSaveDirectory = "/boot/home";
 BLocker gScheduleLocker;
 bool gFrontendUpdateNotifications = true;
+bool gFrontendDlnaEnable = true;
 bool gFrontendDebugEnable = true;
 bool gFrontendFullscreenEnable = true;
 BString gFrontendDefaultPlayer = "MPV";
@@ -175,6 +176,7 @@ void LoadSchedulesFromDisk() {
             
             // --- BACKEND PRESERVE FRONTEND SETTINGS IN RAM ---
             gFrontendUpdateNotifications = jIn.value("show_update_notifications", true);
+            gFrontendDlnaEnable          = jIn.value("dlna_enable", true);
             gFrontendDebugEnable         = jIn.value("debug_enable", true);
             gFrontendFullscreenEnable	 = jIn.value("enable_fullscreen", true);
             gFrontendDefaultPlayer       = jIn.value("default_player", "mpv").c_str();
@@ -219,6 +221,7 @@ void SaveSchedulesToDisk() {
     
     // --- BACKEND INJECT FRONTEND SETTINGS BACK INTO THE JSON OBJECT ---
     jRoot["show_update_notifications"] = gFrontendUpdateNotifications;
+    jRoot["dlna_enable"]               = gFrontendDlnaEnable;
     jRoot["debug_enable"]              = gFrontendDebugEnable;
     jRoot["enable_fullscreen"]         = gFrontendFullscreenEnable;
     jRoot["default_player"]            = gFrontendDefaultPlayer.String();
@@ -336,6 +339,11 @@ public:
     }
 
     void Start(const std::string& ipAddress, int port) {
+        // Toggle check: Bypass initialization entirely if DLNA is disabled
+        if (!gFrontendDlnaEnable) { 
+            return; 
+        }
+
         localIp = ipAddress;
         httpPort = port;
         
@@ -362,6 +370,7 @@ public:
         }
     }
 };
+
 
 
 
@@ -398,8 +407,8 @@ static int32 dlna_discovery_worker_thread(void* data) {
 
     if (gFrontendDebugEnable) std::printf("[DVR BACKEND] SSDP Engine active with automatic healing pulse loop.\n");
 
-    // Monitor application state flag continuously
-    while (atomic_get(&gStopService) == 0) {
+    // Monitor application state flag and the global DLNA enable configuration toggle continuously
+    while (atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
         
         // 1. DYNAMIC SOCKET MONITOR: If socket is uninitialized or dropped, try to build it
         if (server->socketFd < 0) {
@@ -407,8 +416,8 @@ static int32 dlna_discovery_worker_thread(void* data) {
             
             // If the system hasn't obtained an IP address yet, pulse wait and retry
             if (liveIp == "0.0.0.0" || liveIp.empty()) {
-                // Sleep for 5 seconds checking for shutdown requests every 500ms
-                for (int i = 0; i < 10 && atomic_get(&gStopService) == 0; i++) {
+                // Sleep for 5 seconds checking for shutdown requests and config toggles every 500ms
+                for (int i = 0; i < 10 && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable; i++) {
                     usleep(500000);
                 }
                 continue; // Re-evaluate loop
@@ -443,8 +452,8 @@ static int32 dlna_discovery_worker_thread(void* data) {
                 if (gFrontendDebugEnable) std::printf("[DLNA ERROR] SSDP Bind failed on port 1900. Retrying in 5s...\n");
                 close(server->socketFd);
                 server->socketFd = -1;
-                // Sleep for 5 seconds checking for shutdown requests
-                for (int i = 0; i < 10 && atomic_get(&gStopService) == 0; i++) usleep(500000);
+                // Sleep for 5 seconds checking for shutdown or config toggle requests
+                for (int i = 0; i < 10 && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable; i++) usleep(500000);
                 continue;
             }
 
@@ -457,7 +466,7 @@ static int32 dlna_discovery_worker_thread(void* data) {
                 if (gFrontendDebugEnable) std::printf("[DLNA ERROR] Joining multicast group failed on interface %s\n", server->localIp.c_str());
                 close(server->socketFd);
                 server->socketFd = -1;
-                for (int i = 0; i < 10 && atomic_get(&gStopService) == 0; i++) usleep(500000);
+                for (int i = 0; i < 10 && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable; i++) usleep(500000);
                 continue;
             }
 
@@ -490,8 +499,8 @@ static int32 dlna_discovery_worker_thread(void* data) {
                 continue;
             }
             
-            // Socket was explicitly closed by Stop() or dropped catastrophically
-            if (atomic_get(&gStopService) != 0) break;
+            // Socket was explicitly closed by Stop() or dropped catastrophically, or toggled off mid-flight
+            if (atomic_get(&gStopService) != 0 || !gFrontendDlnaEnable) break;
             
             close(server->socketFd);
             server->socketFd = -1;
@@ -528,8 +537,10 @@ static int32 dlna_discovery_worker_thread(void* data) {
         close(server->socketFd);
         server->socketFd = -1;
     }
+    if (gFrontendDebugEnable) std::printf("[DVR BACKEND] SSDP Engine thread exiting cleanly.\n");
     return B_OK;
 }
+
 
 
 class DlnasHttpStreamingServer {
@@ -541,8 +552,6 @@ public:
 	std::string localIp; 
 	
     DlnasHttpStreamingServer() : serverThread(-1), listenFd(-1), port(8081) {}
-
-
 
 // Helper utility to grab the actual system IP address
 static std::string GetLiveHttpSystemIP() {
@@ -570,6 +579,12 @@ static std::string GetLiveHttpSystemIP() {
 static int32 HttpWorkerLoop(void* data) {
     DlnasHttpStreamingServer* self = static_cast<DlnasHttpStreamingServer*>(data);
     if (!self) return B_BAD_VALUE;
+
+    // UPDATE: Fast-abort if DLNA was disabled before the thread finished spawning
+    if (!gFrontendDlnaEnable) {
+        return B_OK;
+    }
+
     if (gFrontendDebugEnable) {
     	std::printf("[HTTP DEBUG] Creating master TCP stream socket...\n");
     	std::fflush(stdout);
@@ -586,6 +601,13 @@ static int32 HttpWorkerLoop(void* data) {
 
     int reuse = 1;
     setsockopt(self->listenFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    // UPDATE: Set a non-blocking timeout of 5 seconds on the master stream socket.
+    // This lets accept() periodically wake up to check gStopService and gFrontendDlnaEnable.
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(self->listenFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_in srvAddr{};
     srvAddr.sin_family = AF_INET;
@@ -611,9 +633,10 @@ static int32 HttpWorkerLoop(void* data) {
     	std::fflush(stdout);
     }
 
-    // --- LIVE IP HEALING AND ACQUISITION ---
+     // --- LIVE IP HEALING AND ACQUISITION ---
     // If we booted with a stale or blank IP address configuration, poll until one arrives
-    while ((self->localIp == "0.0.0.0" || self->localIp.empty()) && atomic_get(&gStopService) == 0) {
+    // UPDATE: Now aborts immediately if DLNA is toggled off
+    while ((self->localIp == "0.0.0.0" || self->localIp.empty()) && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
         std::string checkedIp = GetLiveHttpSystemIP();
         if (checkedIp != "0.0.0.0" && !checkedIp.empty()) {
             self->localIp = checkedIp;
@@ -624,23 +647,32 @@ static int32 HttpWorkerLoop(void* data) {
             break;
         }
         
-        // Check for application shutdown requests while waiting for the network links
-        for (int i = 0; i < 4 && atomic_get(&gStopService) == 0; i++) {
+        // Check for application shutdown or toggle requests while waiting for the network links
+        for (int i = 0; i < 4 && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable; i++) {
             usleep(500000); // 2-second polling increments split up safely
         }
     }
     // --- END OF IP HEALING ---
 
-    while (atomic_get(&gStopService) == 0) {
+    // UPDATE: Master loop now continuously monitors the DLNA configuration flag
+    while (atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
         struct sockaddr_in cliAddr{};
         socklen_t cliLen = sizeof(cliAddr);
         
-        // This is a blocking call waiting for a browser or TV to connect
+        // This call will unblock every 5 seconds (due to our previously set SO_RCVTIMEO) 
+        // to re-evaluate the while loop conditions (shutdown or feature toggle off).
         int clientFd = accept(self->listenFd, (struct sockaddr*)&cliAddr, &cliLen);
         if (clientFd < 0) {
-            if (atomic_get(&gStopService) != 0) break;
+            // If accept unblocked due to socket timeout, loop around to evaluate conditional flags
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            
+            // Check if we dropped out due to system shutdown or feature disablement
+            if (atomic_get(&gStopService) != 0 || !gFrontendDlnaEnable) break;
+            
             if (gFrontendDebugEnable) {
-            	std::printf("[HTTP DEBUG WARNING] Accept connection failed!\n");
+            	std::printf("[HTTP DEBUG WARNING] Accept connection failed: %s\n", strerror(errno));
             	std::fflush(stdout);
             }
             continue;
@@ -676,7 +708,8 @@ static int32 HttpWorkerLoop(void* data) {
             ssize_t bytesRecv = 0;
             int totalBytes = 0;
 
-                while (true) {
+                // UPDATE: Background client handlers drop instantly if the engine is toggled off
+                while (gFrontendDlnaEnable) {
                     std::memset(chunk, 0, sizeof(chunk));
                     bytesRecv = recv(clientFd, chunk, sizeof(chunk) - 1, 0);
                     
@@ -705,18 +738,18 @@ static int32 HttpWorkerLoop(void* data) {
                     std::fflush(stdout);
                 }
 
-                if (totalBytes <= 0) {
+                // If DLNA was toggled off mid-flight, break out cleanly and drop connection
+                if (!gFrontendDlnaEnable || totalBytes <= 0) {
                     if (gFrontendDebugEnable) {
-                        std::printf("[HTTP THREAD WARNING] Client dropped connection or sent empty packet.\n");
+                        std::printf("[HTTP THREAD WARNING] Connection closed (Client dropped or DLNA disabled).\n");
                         std::fflush(stdout);
                     }
                     close(clientFd);
                     return;
                 }
-
-
                 
-                // Print out the raw first line of the HTTP request to inspect headers
+                     // Print out the raw first line of the HTTP request to inspect headers
+
                 size_t firstNewLine = req.find("\r\n");
                 std::string firstLine = (firstNewLine != std::string::npos) ? req.substr(0, firstNewLine) : req;
                 
@@ -725,7 +758,16 @@ static int32 HttpWorkerLoop(void* data) {
                     std::fflush(stdout);
                 }
 
-                if (req.find("GET /description.xml") != std::string::npos) {
+                // UPDATE: Added defensive check to bypass route dispatching if DLNA was disabled
+                if (!gFrontendDlnaEnable) {
+                    if (gFrontendDebugEnable) {
+                        std::printf("[HTTP THREAD] DLNA turned off mid-flight. Rejecting request.\n");
+                        std::fflush(stdout);
+                    }
+                    const char* serviceUnavailable = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    send(clientFd, serviceUnavailable, std::strlen(serviceUnavailable), 0);
+                }
+                else if (req.find("GET /description.xml") != std::string::npos) {
                     if (gFrontendDebugEnable) {
                         std::printf("[HTTP THREAD] Route matched: GET description.xml\n");
                         std::fflush(stdout);
@@ -784,8 +826,12 @@ static int32 HttpWorkerLoop(void* data) {
     }
 
 
-
     void Start(int serverPort, const std::string& directory, const std::string& ipAddress) {
+        // UPDATE: Fail fast if the frontend config toggle has DLNA disabled
+        if (!gFrontendDlnaEnable) {
+            return;
+        }
+
         port = serverPort;
         rootDir = directory;
         localIp = ipAddress;
@@ -794,7 +840,7 @@ static int32 HttpWorkerLoop(void* data) {
     }
 
 private:
-private:
+
     void ServeScpd(int clientFd) {
         // Industry-standard UPnP ContentDirectory definition block tracking the "Browse" action
         std::string xml = 
@@ -1238,8 +1284,8 @@ private:
         char chunk[64 * 1024]; 
         std::streamsize bytesRemaining = contentLength;
 
-        // Ensured atomic loop check and proper tracking of partial network writes
-        while (bytesRemaining > 0 && file.good() && atomic_get(&gStopService) == 0) {
+        // UPDATE: Added gFrontendDlnaEnable config toggle guard to the outer data pool
+        while (bytesRemaining > 0 && file.good() && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
             std::streamsize toRead = sizeof(chunk);
             if (toRead > bytesRemaining) toRead = bytesRemaining;
 
@@ -1248,8 +1294,9 @@ private:
             if (bytesRead <= 0) break;
 
             // Nested loop to ensure the ENTIRE read block is fully pushed to the network socket
+            // UPDATE: Added gFrontendDlnaEnable config toggle guard here as well
             std::streamsize bytesSentTotal = 0;
-            while (bytesSentTotal < bytesRead && atomic_get(&gStopService) == 0) {
+            while (bytesSentTotal < bytesRead && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
                 ssize_t sent = send(clientFd, chunk + bytesSentTotal, bytesRead - bytesSentTotal, 0);
                 if (sent < 0) {
                     // Client disconnected, closed the window, or skipped away
