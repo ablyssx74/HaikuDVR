@@ -13,7 +13,7 @@ The project is split into a lightweight, headless background recorder daemon and
 * **Asynchronous Vector Icon Cache** – Automatically downloads station logos on an isolated background serial thread queue. Images are cached in-memory and rendered at 60 FPS using high-quality bilinear blending.
 * **Real-Time Bandwidth Instrumentation** – Features a non-blocking `libcurl` transfer info callback that calculates and prints live file download size metrics right to your dashboard status panel as streams write to disk.
 * **Proactive Storage Protection** – An automated background disk monitor queries Haiku Storage Kit partition volumes every 5 seconds, flashing high-visibility warnings if storage space drops below 5GB.
-* **SQLITE Database** – XML data is downloaded and stored in a SQL database for easy management and less CPU cycle for larger XML guides.  Intelligently rebuilds the database every 3 days to keep guide data up-to-date.
+* **SQLITE Database** – XML data is downloaded and stored in a SQL database for easy management and less CPU hits for larger XML guides.  Intelligently rebuilds the database every 3 days to keep guide data up-to-date.
 * **DLNA Server Built In** – The DVR_Server provides its own DLNA server that points to the recordings folder.  The DLNA server intelligently will update the IP if the IP changes or is down.
 
 
