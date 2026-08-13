@@ -329,7 +329,7 @@ public:
     int       httpPort;
     std::string localIp;
 
-    DlnasDiscoveryServer() : serverThread(-1), socketFd(-1), httpPort(8080), localIp("0.0.0.0") {}
+    DlnasDiscoveryServer() : serverThread(-1), socketFd(-1), httpPort(8081), localIp("0.0.0.0") {}
 
     ~DlnasDiscoveryServer() {
         Stop();
@@ -540,7 +540,7 @@ public:
     std::string rootDir;
 	std::string localIp; 
 	
-    DlnasHttpStreamingServer() : serverThread(-1), listenFd(-1), port(8080) {}
+    DlnasHttpStreamingServer() : serverThread(-1), listenFd(-1), port(8081) {}
 
 
 
@@ -1416,8 +1416,8 @@ public:
         
         std::string ip = GetHaikuLocalIpAddress(); 
         
-        // THE PORT AUTO-FALLBACK: Start at 8080, increment if busy
-        int port = 8080;
+        // THE PORT AUTO-FALLBACK: Start at 8081, increment if busy
+        int port = 8081;
         while (port < 8090) {
             int testFd = socket(AF_INET, SOCK_STREAM, 0);
             if (testFd >= 0) {

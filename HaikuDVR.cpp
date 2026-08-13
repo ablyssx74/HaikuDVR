@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.34 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.35 (Haiku OS)";
 }
 
 
@@ -1716,36 +1716,44 @@ public:
         StrokeLine(BPoint(bounds.left, bounds.bottom), BPoint(bounds.right, bounds.bottom));
     }
 
-    void MouseDown(BPoint point) override {
-        if (fMainAppTarget != nullptr) {
-            BMessenger targetMessenger(fMainAppTarget);
-			BRect bounds = Bounds();
-            if (fDateClickRect.Contains(point)) {
-                BPoint dropPoint = ConvertToScreen(BPoint(fDateClickRect.left, fDateClickRect.bottom));
-                CalendarWindow* calWin = new CalendarWindow(dropPoint, targetMessenger);
-                calWin->Show();
-            }
-            else if (fTimeDownRect.Contains(point)) {
-                BMessage msg(MSG_CLOCK_DOWN);
-                targetMessenger.SendMessage(&msg);
-            }
-            else if (fTimeUpRect.Contains(point)) {
-                BMessage msg(MSG_CLOCK_UP);
-                targetMessenger.SendMessage(&msg);
-            }
-			else if (point.x >= 300.0f && point.x <= 550.0f && 
-			         point.y >= 0.0f && point.y <= bounds.Height()) {
-			    
-			    // Only trigger if the parent window is currently active
-			    if (Window() && Window()->IsActive()) {
-			        BMessage msg(MSG_OPEN_SEARCH_POPUP);
-			        targetMessenger.SendMessage(&msg);
-			    }
-			}
+	void MouseDown(BPoint point) override {
+	    // 1. Safety check: Ignore all clicks if the window is missing, 
+	    // inactive (lacks focus), or minimized.
+	    if (!Window() || !Window()->IsActive() || Window()->IsMinimized()) {
+	        return;
+	    }
+	
+	    if (fMainAppTarget != nullptr) {
+	        BMessenger targetMessenger(fMainAppTarget);
+	        BRect bounds = Bounds();
+	
+	        if (fDateClickRect.Contains(point)) {
+	            BPoint dropPoint = ConvertToScreen(BPoint(fDateClickRect.left, fDateClickRect.bottom));
+	            CalendarWindow* calWin = new CalendarWindow(dropPoint, targetMessenger);
+	            calWin->Show();
+	        }
+	        else if (fTimeDownRect.Contains(point)) {
+	            BMessage msg(MSG_CLOCK_DOWN);
+	            targetMessenger.SendMessage(&msg);
+	        }
+	        else if (fTimeUpRect.Contains(point)) {
+	            BMessage msg(MSG_CLOCK_UP);
+	            targetMessenger.SendMessage(&msg);
+	        }
+	        else if (point.x >= 300.0f && point.x <= 550.0f && 
+	                 point.y >= 0.0f && point.y <= bounds.Height()) {
+	            
+	            BMessage msg(MSG_OPEN_SEARCH_POPUP);
+	            targetMessenger.SendMessage(&msg);
+	        }
+	        else {
+	            // Only pass to the base class if the window is in focus 
+	            // but the click didn't match any specific zones above
+	            BView::MouseDown(point);
+	        }
+	    }
+	}
 
-        }
-        BView::MouseDown(point);
-    }
 
     
     void MessageReceived(BMessage* message) override {
