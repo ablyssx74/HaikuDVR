@@ -35,7 +35,9 @@ The project is split into a lightweight, headless background recorder daemon and
 ## Installation & Build Requirements
 
 Ensure your Haiku system feature layers include the required development libraries:
-- libcurl_devel nlohmann_json
+- libcurl_devel nlohmann_json sqlite_devel curl_devel
+
+mpv or vlc recommended for watching videos or [hTV](https://github.com/ablyssx74/hTV/releases) if you have [nebula](https://github.com/X547/nvidia-haiku) ( nividia driver installed for GPU acceleration )
 
 A reboot is required for the backend service worker to register with the Haiku Launcher Roster.
 
