@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.36 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.37 (Haiku OS)";
 }
 
 const uint32 MSG_TOGGLE_DLNA			    = 'dlna';
@@ -102,6 +102,7 @@ const uint32 MSG_TUNER_SELECTED    			= 'tunS';
 const uint32 MSG_ADD_SCHEDULE      			= 'schA';
 const uint32 MSG_DURATION_SELECTED 			= 'durS';
 const uint32 MSG_CHANNEL_CLICKED   			= 'chCl';
+const uint32 MSG_CHANNEL_DOUBLE_CLICKED 	= 'chdc';
 const uint32 MSG_REFRESH_SCHEDULES 			= 'schR';
 const uint32 MSG_PLAY_IN_MPV		 		= 'pimv';
 const uint32 MSG_REMOVE_SCHEDULE   			= 'scRh';
@@ -4070,7 +4071,7 @@ private:
 public:
     virtual ~DVRWindow(); 
     bool QuitRequested() override;
-
+	
     const std::vector<ChannelGuideItem>& GetLoadedChannels() const { 
         return fLoadedChannels; 
     }
@@ -4302,9 +4303,10 @@ public:
         quickViewBox->SetLabel("Quick View");
         quickViewBox->SetBorder(B_FANCY_BORDER);
 
-        fChannelListView = new BListView(BRect(0, 0, 480, 180), "channel_list", B_SINGLE_SELECTION_LIST);
-        fChannelListView->SetSelectionMessage(new BMessage(MSG_CHANNEL_CLICKED));        
-        
+		fChannelListView = new BListView(BRect(0, 0, 480, 180), "channel_list", B_SINGLE_SELECTION_LIST);
+		fChannelListView->SetSelectionMessage(new BMessage(MSG_CHANNEL_CLICKED));
+		fChannelListView->SetInvocationMessage(new BMessage(MSG_CHANNEL_DOUBLE_CLICKED));
+		        
         fChannelScrollView = new BScrollView("scroll_channels", fChannelListView, B_FOLLOW_LEFT | B_FOLLOW_TOP, 0, false, true);
         
         fChannelScrollView->MoveTo(10, 20);
@@ -4330,13 +4332,12 @@ public:
         // =========================================================================
         // APPLICATION BACKEND SYSTEM CONSOLES (RECALIBRATED VERTICAL SPACING)
         // =========================================================================
-        fRestartBackendButton = new BButton(BRect(730, 375, 860, 405), "restart_backend", "ABORT!", new BMessage(MSG_RESTART_BACKEND));
-        fRestartBackendButton->SetToolTip("Warning: ABORT! will immediately abort any active scheduled recording streams currently in progress!");
+        fRestartBackendButton = new BButton(BRect(730, 375, 860, 405), "restart_backend", "Restart Backend", new BMessage(MSG_RESTART_BACKEND));
 
         BBox* statusBox = new BBox(BRect(730, 415, 860, 445), "bebox_status_wrapper");
         statusBox->SetBorder(B_FANCY_BORDER); 
 
-        fBackendStatusLabel = new BStringView(BRect(5, 5, 125, 25), "backend_status", "Backend: Checking...");
+        fBackendStatusLabel = new BStringView(BRect(5, 5, 125, 25), "backend_status", "Connecting...");
         BFont monoFont(be_fixed_font);
         monoFont.SetSize(11.0);
         fBackendStatusLabel->SetFont(&monoFont);
@@ -4962,8 +4963,40 @@ public:
 	         RefreshScheduleListView();
 	         break;
 	         
-	         
 
+		case MSG_CHANNEL_DOUBLE_CLICKED:
+		{
+		    int32 selection = fChannelListView->CurrentSelection();
+		    if (selection >= 0) {
+		        GuideListRowItem* item = static_cast<GuideListRowItem*>(
+		            fChannelListView->ItemAt(selection)
+		        );
+		
+		        if (item != nullptr) {
+		            // FIX: Force a fresh copy using .String() so the original item label isn't modified
+		            BString cleanNumberOnly;
+		            cleanNumberOnly.SetTo(item->fData.channelLabel.String());
+		
+		            int32 sliceIndex = cleanNumberOnly.FindFirst(" ");
+		            if (sliceIndex != B_ERROR) {
+		                cleanNumberOnly.Truncate(sliceIndex);
+		            }
+		            cleanNumberOnly.Trim();
+		
+		            BMessage playMsg(MSG_PLAY_IN_MPV);
+		            playMsg.AddString("numeric_channel", cleanNumberOnly.String());
+		            
+		            // Post directly to this window:
+		            PostMessage(&playMsg); 
+		
+		            // Redraw the item to clear any remaining highlight artifacts
+		            fChannelListView->InvalidateItem(selection);
+		        }
+		    }
+		    break;
+		}
+		
+		
          case MSG_CHANNEL_CLICKED: {
              int32 selection = fChannelListView->CurrentSelection();
              if (selection >= 0 && (size_t)selection < fLoadedChannels.size()) {
@@ -5054,10 +5087,22 @@ public:
          }
 
 
-
-
+	
 		case MSG_RESTART_BACKEND:
-		{
+		{			
+			// Native Haiku Alert Popup with corrected button layout enum
+            BAlert* alert = new BAlert("Warning",
+                "Restarting the backend service.\n\n"
+                "Any current recordings in progress will be stopped! Do you want to proceed?",
+                "Cancel", "Proceed", nullptr, B_WIDTH_FROM_LABEL, B_WARNING_ALERT);
+            
+            // Go() blocks until the user interacts with the popup window
+            int32 response = alert->Go();
+            
+            if (response == 0) {               
+                break; 
+            }
+            
 		    BRoster roster;
 		    const char* backendSignature = "x-vnd.haikuhdhomerun-dvr";
 		
