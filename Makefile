@@ -12,13 +12,13 @@ REVISION = 1
 
 # Shared target architectures
 UNAME_M := $(shell uname -p)
-ifeq ($(UNAME_M), x86)
+ifeq ($(UNAME_M), BePC)
     CXX = g++-x86 
     ARCH = x86_gcc2
     INCLUDE = -L/boot/system/lib/x86 
     is32bit = _x86
     LIBDIR = $(PACKAGE_DIR)/lib/x86
-else ifeq ($(UNAME_M), x86_64)
+else
     CXX = g++
     ARCH = x86_64
     INCLUDE = -L/boot/system/lib

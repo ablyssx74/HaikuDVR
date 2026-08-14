@@ -3,7 +3,7 @@ OS := $(shell uname -s)
 endif
 
 UNAME_M := $(shell uname -p)
-ifeq ($(UNAME_M), x86)
+ifeq ($(UNAME_M), BePC)
 	CC := $(CROSS_COMPILE)gcc-x86
 else
 	CC := $(CROSS_COMPILE)gcc
