@@ -64,6 +64,7 @@ namespace AppInfo {
 }
 
 const uint32 MSG_TOGGLE_DLNA			    = 'dlna';
+const uint32 MSG_ABOUT_WINDOW				= 'mabw';
 const uint32 MSG_CLOCK_TICK_5MIN 			= 'clt5'; 
 const uint32 MSG_EXECUTE_SEARCH   			= 'exsr';
 const uint32 MSG_SEARCH_SELECTED		    = 'srsl';
@@ -3056,6 +3057,7 @@ private:
 	BMenuItem* 	  fNotifyOffItem;
 	BMenuItem* 	  fDlnaOnItem;
 	BMenuItem* 	  fDlnaOffItem;
+	BMenuItem*    fAboutItem;
 	BMenuItem* 	  fDebugOnItem;
 	BMenuItem* 	  fDebugOffItem;
 	BMenuItem* 	  fFullscreenOnItem;
@@ -4130,14 +4132,22 @@ public:
         
         optionsMenu->AddSeparatorItem();
 		BMenuItem* firmwareItem = new BMenuItem("Check Tuner Firmware...", new BMessage(MSG_CHECK_FIRMWARE));
-		optionsMenu->AddItem(firmwareItem);
+		optionsMenu->AddItem(firmwareItem);	
+		
+        optionsMenu->AddSeparatorItem();        
+        
+        BMessage* msgAbout = new BMessage(MSG_ABOUT_WINDOW);
+        fAboutItem = new BMenuItem("About...", msgAbout);        
+        optionsMenu->AddItem(fAboutItem);  
+        
         
         // =========================================================================
         // DEFAULT PLAYER RADIO SELECTION SECTION
         // =========================================================================
-        optionsMenu->AddSeparatorItem();
+            
+        optionsMenu->AddSeparatorItem(); 
         
-        BMenuItem* playerHeader = new BMenuItem("--- Default Player ---", NULL);
+        BMenuItem* playerHeader = new BMenuItem("    --- Default Player ---", NULL);
         playerHeader->SetEnabled(false); 
         optionsMenu->AddItem(playerHeader);
 
@@ -4415,6 +4425,29 @@ public:
                    cfg.debugEnable ? "ENABLED" : "DISABLED");
             break;
         }
+     
+       case MSG_ABOUT_WINDOW: {
+                BString aboutText;
+                aboutText <<  AppInfo::VERSION_STRING << "\n" 
+                		  << "By Kris Beazley (ablyss)\n"
+                		  << "Copyright 2026 The MIT License\n\n"
+
+                          << "HaikuDVR is a native GUI digital video recorder application and " 
+                          << "background scheduling service designed explicitly for Haiku.\n\n"
+                          
+                          << "Features:\n"
+                          << "     * Sqlite Database\n"
+                          << "     * Default Player Selection\n"
+                          << "     * DLNA Server\n"
+                          << "     * Online Update Checking\n"
+                          << "     * And Much More!\n";
+
+                BAlert* aboutAlert = new BAlert("About HaikuDVR", aboutText.String(), "OK", 
+                                                nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);                
+                aboutAlert->Go();
+                break;
+            }
+     
         
         case MSG_TOGGLE_DLNA: {
             cfg.dlnaEnable = !cfg.dlnaEnable;            
