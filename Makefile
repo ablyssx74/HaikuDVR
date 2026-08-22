@@ -11,7 +11,7 @@ PACKAGE_DIR := build/package
 REVISION = 1
 
 # Shared target architectures
-UNAME_M := $(shell uname -p)
+UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_M), BePC)
     CXX = g++-x86 
     ARCH = x86_gcc2
