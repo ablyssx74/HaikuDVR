@@ -487,8 +487,8 @@ static int32 dlna_discovery_worker_thread(void* data) {
                                      (struct sockaddr*)&clientAddr, &addrLen);
         
         if (bytesRead < 0) {
-            // Check if it was just a 5-second socket timeout pulse
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // FIX: Include ETIMEDOUT for Haiku OS compliance
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
                 // Heartbeat Pulse Check: Confirm that our bound interface IP hasn't shifted underneath us
                 std::string currentCheckIP = GetLiveSystemIP();
                 if (currentCheckIP != server->localIp) {
@@ -507,29 +507,40 @@ static int32 dlna_discovery_worker_thread(void* data) {
             continue;
         }
 
+
         // 3. PROCESS SSDP MATCHES
         std::string packetStr(buffer);
         if (packetStr.find("M-SEARCH") != std::string::npos) {
             if (packetStr.find("ssdp:all") != std::string::npos || 
                 packetStr.find("urn:schemas-upnp-org:device:MediaServer:1") != std::string::npos) {
                 
+                // Automatically determine the correct USN string at compile time
+                #if defined(__LP64__) || defined(_LP64) || defined(__x86_64__)
+                    // 64-bit Architecture
+                    const char* usnStr = "USN: uuid:fe80::haiku:dvr-64bit::urn:schemas-upnp-org:device:MediaServer:1\r\n";
+                #else
+                    // 32-bit Architecture (fallback)
+                    const char* usnStr = "USN: uuid:fe80::haiku:dvr-32bit::urn:schemas-upnp-org:device:MediaServer:1\r\n";
+                #endif
+
                 char response[1024];
                 std::snprintf(response, sizeof(response),
                     "HTTP/1.1 200 OK\r\n"
                     "CACHE-CONTROL: max-age=1800\r\n"
                     "LOCATION: http://%s:%d/description.xml\r\n"
                     "ST: urn:schemas-upnp-org:device:MediaServer:1\r\n"
-                    "USN: uuid:fe80::haiku:dvr::urn:schemas-upnp-org:device:MediaServer:1\r\n"
+                    "%s" // Injects the architecture-specific USN string dynamically
                     "EXT:\r\n"
                     "SERVER: HaikuOS HaikuDVR-MediaServer/1.0\r\n"
                     "\r\n", 
-                    server->localIp.c_str(), server->httpPort
+                    server->localIp.c_str(), server->httpPort, usnStr
                 );
 
                 sendto(server->socketFd, response, std::strlen(response), 0, 
-                       (struct sockaddr*)&clientAddr, sizeof(clientAddr));
+                       (struct sockaddr*)&clientAddr, addrLen);
             }
         }
+
     }
 
     // Clean final thread drop
@@ -663,8 +674,8 @@ static int32 HttpWorkerLoop(void* data) {
         // to re-evaluate the while loop conditions (shutdown or feature toggle off).
         int clientFd = accept(self->listenFd, (struct sockaddr*)&cliAddr, &cliLen);
         if (clientFd < 0) {
-            // If accept unblocked due to socket timeout, loop around to evaluate conditional flags
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // FIX: Include ETIMEDOUT for Haiku OS compliance
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
                 continue;
             }
             
@@ -677,6 +688,7 @@ static int32 HttpWorkerLoop(void* data) {
             }
             continue;
         }
+
 
         // Heartbeat verification: If the system IP shifted, dynamically re-update it on the fly
         std::string validationIp = GetLiveHttpSystemIP();
@@ -950,18 +962,29 @@ private:
     }
 
     void ServeDescription(int clientFd) {
-        std::string xml = 
+        // Automatically determine the correct names and UUIDs at compile time
+        #if defined(__LP64__) || defined(_LP64) || defined(__x86_64__)
+            // 64-bit Architecture Configuration
+            const char* friendlyName = "Haiku 64 DVR Server";
+            const char* udnUuid = "uuid:fe80::haiku:dvr-64bit";
+        #else
+            // 32-bit Architecture Configuration (fallback)
+            const char* friendlyName = "Haiku 32bit DVR Server";
+            const char* udnUuid = "uuid:fe80::haiku:dvr-32bit";
+        #endif
+
+        // Build the XML payload dynamically using string formatting
+        char xmlBuffer[2048];
+        std::snprintf(xmlBuffer, sizeof(xmlBuffer),
             "<?xml version=\"1.0\"?>\r\n"
             "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">\r\n"
             "  <specVersion><major>1</major><minor>0</minor></specVersion>\r\n"
             "  <device>\r\n"
             "    <deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>\r\n"
-            "    <friendlyName>Haiku OS DVR Server</friendlyName>\r\n"
+            "    <friendlyName>%s</friendlyName>\r\n"
             "    <manufacturer>Haiku Community</manufacturer>\r\n"
             "    <modelName>HaikuDVR</modelName>\r\n"
-            "    <UDN>uuid:fe80::haiku:dvr</UDN>\r\n"
-            
-            // Provide explicit routing tables so the TV knows where to send POST browse packets
+            "    <UDN>%s</UDN>\r\n"
             "    <serviceList>\r\n"
             "      <service>\r\n"
             "        <serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>\r\n"
@@ -971,9 +994,12 @@ private:
             "        <SCPDURL>/ContentDirectory/scpd.xml</SCPDURL>\r\n"
             "      </service>\r\n"
             "    </serviceList>\r\n"
-            
             "  </device>\r\n"
-            "</root>\r\n";
+            "</root>\r\n",
+            friendlyName, udnUuid
+        );
+
+        std::string xml(xmlBuffer);
 
         std::string resp = 
             "HTTP/1.1 200 OK\r\n"
@@ -983,6 +1009,7 @@ private:
 
         send(clientFd, resp.c_str(), resp.length(), 0);
     }
+
 
 
     // Helper function to escape reserved XML control characters
