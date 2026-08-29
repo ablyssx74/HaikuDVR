@@ -31,6 +31,10 @@
 #include <algorithm>
 #include <regex>
 #include <cctype>
+#include <functional>
+#include <sqlite3.h>
+#include <cstdlib> 
+#include <netinet/tcp.h> 
 
 const uint32 MSG_ABORT_SPECIFIC_RECORDING = 'absp';
 
@@ -563,6 +567,8 @@ public:
 	std::string localIp; 
 	
     DlnasHttpStreamingServer() : serverThread(-1), listenFd(-1), port(8081) {}
+    
+ 
 
 // Helper utility to grab the actual system IP address
 static std::string GetLiveHttpSystemIP() {
@@ -720,113 +726,153 @@ static int32 HttpWorkerLoop(void* data) {
             ssize_t bytesRecv = 0;
             int totalBytes = 0;
 
-                // UPDATE: Background client handlers drop instantly if the engine is toggled off
-                while (gFrontendDlnaEnable) {
+                // =========================================================================
+                // HIGH-PERFORMANCE UNIFIED REQUEST STREAM READER
+                // =========================================================================
+                // Master socket reader runs independent of the DLNA configuration flag
+                while (atomic_get(&gStopService) == 0) {
                     std::memset(chunk, 0, sizeof(chunk));
                     bytesRecv = recv(clientFd, chunk, sizeof(chunk) - 1, 0);
                     
-                    if (bytesRecv <= 0) break; // Client disconnected or finished
+                    if (bytesRecv <= 0) break; // Client gracefully finished or disconnected
 
                     req.append(chunk, bytesRecv);
                     totalBytes += bytesRecv;
 
-                    // Stop reading if we have captured the full standard UPnP SOAP envelope
+                    // Standard SOAP envelope guard for legacy DLNA controllers
                     if (req.find("</s:Envelope>") != std::string::npos || 
                         req.find("</SOAP-ENV:Envelope>") != std::string::npos) {
                         break;
                     }
                     
-                    // If it's a GET request (like description.xml), it has no body, so stop after headers
+                    // IF GET ROUTE: Instantly short-circuit read because GET routes have zero payload text body
                     if (req.find("GET ") == 0 && req.find("\r\n\r\n") != std::string::npos) {
                         break;
                     }
+
+                    // IF POST ROUTE: Ensure we read past the headers and pull the full Content-Length data body
+                    if (req.find("POST ") == 0 && req.find("\r\n\r\n") != std::string::npos) {
+                        size_t clPos = req.find("Content-Length: ");
+                        if (clPos != std::string::npos) {
+                            size_t valueStart = clPos + 16;
+                            size_t valueEnd = req.find("\r\n", valueStart);
+                            if (valueEnd != std::string::npos) {
+                                int expectedBodyLength = std::atoi(req.substr(valueStart, valueEnd - valueStart).c_str());
+                                size_t headerEndPos = req.find("\r\n\r\n");
+                                size_t currentBodyLength = req.length() - (headerEndPos + 4);
+                                
+                                // Break only when the entire JSON body payload has been pulled from the socket buffer
+                                if (currentBodyLength >= (size_t)expectedBodyLength) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     
-                    // Safety break to avoid reading forever on oversized malformed data
-                    if (totalBytes > 16384) break;
+                    if (totalBytes > 32768) break; // Defensive buffer overrun safeguard
                 }
                 
                 if (gFrontendDebugEnable) {
-                    std::printf("[HTTP THREAD] recv() loop finished! Total bytes read: %d\n", totalBytes);
+                    std::printf("[HTTP THREAD] Network stream read complete. Total payload size: %d bytes\n", totalBytes);
                     std::fflush(stdout);
                 }
 
-                // If DLNA was toggled off mid-flight, break out cleanly and drop connection
-                if (!gFrontendDlnaEnable || totalBytes <= 0) {
-                    if (gFrontendDebugEnable) {
-                        std::printf("[HTTP THREAD WARNING] Connection closed (Client dropped or DLNA disabled).\n");
-                        std::fflush(stdout);
-                    }
+                if (totalBytes <= 0) {
                     close(clientFd);
                     return;
                 }
                 
-                     // Print out the raw first line of the HTTP request to inspect headers
-
                 size_t firstNewLine = req.find("\r\n");
                 std::string firstLine = (firstNewLine != std::string::npos) ? req.substr(0, firstNewLine) : req;
                 
                 if (gFrontendDebugEnable) {
-                    std::printf("[HTTP THREAD] Request Line: \"%s\"\n", firstLine.c_str());
+                    std::printf("[HTTP THREAD] Request Header Processing: \"%s\"\n", firstLine.c_str());
                     std::fflush(stdout);
                 }
 
-                // UPDATE: Added defensive check to bypass route dispatching if DLNA was disabled
-                if (!gFrontendDlnaEnable) {
-                    if (gFrontendDebugEnable) {
-                        std::printf("[HTTP THREAD] DLNA turned off mid-flight. Rejecting request.\n");
-                        std::fflush(stdout);
-                    }
-                    const char* serviceUnavailable = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    send(clientFd, serviceUnavailable, std::strlen(serviceUnavailable), 0);
+                // =========================================================================
+                // CLEANED WEB DASHBOARD REMOTE CONTROL ROUTING MATRIX
+                // =========================================================================
+                
+                // --- VISUAL USER WEB INTERFACE CONTROL DASHBOARD PANEL ---
+                if (req.find("GET / ") != std::string::npos || req.find("GET /index.html") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP DASHBOARD] Serving Admin Dashboard View\n");
+                    self->ServeAdminDashboard(clientFd);
+                }         
+                // --- CUSTOM INTEGRATED DESKTOP REMOTE PLAYER ENDPOINT ---
+                else if (req.find("GET /api/desktop/play?ch=") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/desktop/play\n");
+                    self->HandleDesktopAppLaunch(clientFd, req);
                 }
+                // --- CUSTOM INTEGRATED ADMIN API ENDPOINTS ---
+                else if (req.find("GET /api/guide") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/guide\n");
+                    self->HandleGetTvGuide(clientFd, req); 
+                } 
+
+                else if (req.find("GET /api/search?q=") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/search\n");
+                    self->HandleApiSearch(clientFd, req);
+                }
+                else if (req.find("GET /api/schedules") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: GET /api/schedules\n");
+                    self->HandleGetSchedules(clientFd);
+                } 
+                else if (req.find("POST /api/schedules/add") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: POST /api/schedules/add\n");
+                    self->HandleAddSchedule(clientFd, req);
+                } 
+                else if (req.find("POST /api/schedules/delete") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: POST /api/schedules/delete\n");
+                    self->HandleDeleteSchedule(clientFd, req);
+                }
+
+                // --- ORIGINAL DLNA MEDIA ENGINE DISPATCHERS (Protected by your runtime flag) ---
                 else if (req.find("GET /description.xml") != std::string::npos) {
-                    if (gFrontendDebugEnable) {
-                        std::printf("[HTTP THREAD] Route matched: GET description.xml\n");
-                        std::fflush(stdout);
+                    if (!gFrontendDlnaEnable) {
+                        const char* serviceUnavailable = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        send(clientFd, serviceUnavailable, std::strlen(serviceUnavailable), 0);
+                    } else {
+                        if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET description.xml\n");
+                        self->ServeDescription(clientFd);                    
                     }
-                    self->ServeDescription(clientFd);                    
-                } else if (req.find("GET /ContentDirectory/scpd.xml") != std::string::npos) {
-                    if (gFrontendDebugEnable) {
-                        std::printf("[HTTP THREAD] Route matched: GET scpd.xml\n");
-                        std::fflush(stdout);
-                    }
+                } 
+                else if (req.find("GET /ContentDirectory/scpd.xml") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET scpd.xml\n");
                     self->ServeScpd(clientFd);   
-                                          
-                } else if ((req.find("POST ") == 0 || req.find("\nPOST ") != std::string::npos) && 
+                } 
+                else if ((req.find("POST ") == 0 || req.find("\nPOST ") != std::string::npos) && 
                            (req.find("/ContentDirectory/control") != std::string::npos || 
                             req.find("/ctl/ContentDir") != std::string::npos)) {
-                    
-                    if (gFrontendDebugEnable) {
-                        std::printf("[HTTP THREAD] Route matched safely: POST ContentDirectory\n");
-                        std::fflush(stdout);
-                    }
-                    // Pass req down to the browser block
+                    if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched safely: POST ContentDirectory\n");
                     self->ServeContentDirectory(clientFd, req);
-
-                } else if (req.find("GET /video/") != std::string::npos) {
-                    if (gFrontendDebugEnable) {
-                        std::printf("[HTTP THREAD] Route matched: GET Video Streaming\n");
-                        std::fflush(stdout);
-                    }
+                } 
+                else if (req.find("GET /video/") != std::string::npos) {
+                    if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET Video Streaming\n");
                     self->StreamVideoFile(clientFd, req);
-                } else {
-                    if (gFrontendDebugEnable) {
-                        std::printf("[HTTP THREAD WARNING] Route fallback: Sending 404 Not Found\n");
-                        std::fflush(stdout);
-                    }
+                } 
+                
+                // --- UNKNOWN ENDPOINT FALLBACK ---
+                else {
                     const char* notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     send(clientFd, notFound, std::strlen(notFound), 0);
+                    close(clientFd);
                 }
-                
-                if (gFrontendDebugEnable) {
-                    std::printf("[HTTP THREAD] Closing client socket file descriptor.\n");
-                    std::printf("--------------------------------------------------\n");
-                    std::fflush(stdout);
+
+                // =========================================================================
+                // SIMPLIFIED ROUTE TERMINATION GUARD
+                // =========================================================================
+                // Delegates socket life cycles ONLY to your active long-running library file streams
+                if (req.find("GET /video/") == std::string::npos) {
+                    close(clientFd);
                 }
-                close(clientFd);
             });
             handler.detach();
         }
+
+
+
+
 
         
         if (gFrontendDebugEnable) {
@@ -852,6 +898,666 @@ static int32 HttpWorkerLoop(void* data) {
     }
 
 private:
+    // Endpoint: GET /api/desktop/play?ch=CH — Launches player app natively inside your Haiku desktop environment
+    void HandleDesktopAppLaunch(int clientFd, const std::string& requestStr) {
+        size_t queryPos = requestStr.find("/api/desktop/play?ch=");
+        if (queryPos == std::string::npos) {
+            SendJsonResponse(clientFd, 400, "Bad Request", "{\"error\":\"Missing channel parameter\"}");
+            return;
+        }
+
+        size_t endPos = requestStr.find(" ", queryPos);
+        std::string channel = requestStr.substr(queryPos + 21, endPos - (queryPos + 21));
+
+        // 1. Dynamic Tuner IP Discovery Step
+        std::string tunerIp = "";
+        std::vector<std::string> discoveredDevices = DiscoverAllTuners();        
+        if (!discoveredDevices.empty()) {
+            tunerIp = discoveredDevices[0];
+        } else {
+            tunerIp = "192.168.1.68"; // Fallback to your verified tuner IP address
+        }
+
+        // Reconstruct the direct raw hardware streaming target link 
+        std::string targetUrl = "http://" + tunerIp + ":5004/auto/v" + channel;
+
+        if (gFrontendDebugEnable) {
+            std::printf("[DESKTOP REMOTE] Action triggered! Launching player on Haiku for: %s\n", targetUrl.c_str());
+            std::fflush(stdout);
+        }
+
+        // 2. Fork and Execute Player Environment Process
+        // Fallback loops check for standard Haiku native player binary availability automatically
+        const char* binaryPath = "/boot/system/bin/mpv";
+        
+        // Check if vlc or hTV exist on disk if mpv isn't your preferred launcher
+        if (access("/boot/system/bin/hTV", F_OK) == 0) {
+            binaryPath = "/boot/system/bin/hTV";
+        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
+            binaryPath = "/boot/system/bin/vlc";
+        }
+
+        pid_t processId = fork();
+        if (processId == 0) {
+            // Child scope: Spin up the desktop player overlay
+            char* playerArgs[3];
+            playerArgs[0] = (char*)binaryPath;
+            playerArgs[1] = (char*)targetUrl.c_str();
+            playerArgs[2] = nullptr; 
+            
+            execv(playerArgs[0], playerArgs);
+            _exit(1); 
+        }
+
+
+        // Return a response to the dashboard browser window
+        json resp = {{"status", "success"}, {"message", "Player application fired up on Haiku desktop workspace."}};
+        SendJsonResponse(clientFd, 200, "OK", resp.dump());
+    }
+
+
+    // Endpoint: GET / — Serves an in-memory visual web dashboard panel
+    void ServeAdminDashboard(int clientFd) {
+        std::string html = 
+            "<!DOCTYPE html>\n<html>\n<head>\n"
+            "<meta name='viewport' content='width=device-width, initial-scale=1.0'>\n"
+            "<title>HaikuDVR Web Control Panel</title>\n"
+            "<style>\n"
+            "  body { font-family: -apple-system,system-ui,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }\n"
+            "  .container { max-width: 1100px; margin: 0 auto; }\n"
+            "  h1, h2 { color: #ffffff; border-bottom: 1px solid #2d2d2d; padding-bottom: 10px; }\n"
+            "  .grid { display: grid; grid-template-columns: 1fr; gap: 20px; }\n"
+            "  @media(min-width: 768px) { .grid { grid-template-columns: 2fr 1fr; } }\n"
+            "  .card { background: #1e1e1e; border: 1px solid #2d2d2d; border-radius: 8px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }\n"
+            "  .program-row { border-bottom: 1px solid #2d2d2d; padding: 12px 0; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }\n"
+            "  .program-row:hover { background: #252525; }\n"
+            "  .badge { background: #3a3a3a; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; font-weight: bold; }\n"
+            "  .btn { background: #0078d7; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.9em; }\n"
+            "  .btn-del { background: #a80000; }\n"
+            "  .form-group { margin-bottom: 12px; }\n"
+            "  label { display: block; margin-bottom: 5px; font-size: 0.9em; color: #aaa; }\n"
+            "  input, select { width: 100%; padding: 8px; background: #2d2d2d; border: 1px solid #3a3a3a; color: #fff; border-radius: 4px; box-sizing: border-box; }\n"
+            "  /* MINIMAL TARGETED MODAL STYLING OVERLAYS */\n"
+            "  .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); align-items: center; justify-content: center; }\n"
+            "  .modal-content { background: #1e1e1e; border: 1px solid #3a3a3a; padding: 20px; border-radius: 8px; max-width: 600px; width: 95%; position: relative; }\n"
+            "  .close-btn { position: absolute; right: 15px; top: 10px; color: #aaa; font-size: 24px; cursor: pointer; }\n"
+            "  video { width: 100%; border-radius: 4px; margin-top: 15px; background: #000; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }\n"
+            "</style>\n"
+            "</head>\n<body>\n"
+            "<div class='container'>\n"
+            "  <h1>HaikuDVR Web Control Panel</h1>\n"
+            "  <div class='grid'>\n"
+            "    <div class='card'>\n"
+			"      <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; border-bottom:1px solid #2d2d2d; margin-bottom:10px; padding-bottom:5px;'>\n"
+			"        <h2 style='border-bottom:none; margin:0;'>TV Program Guide</h2>\n"
+			"        <div style='display:flex; gap:8px; align-items:center;'>\n"
+			"          <input type='date' id='guide-date' style='width:130px; padding:4px;'>\n"
+			"          <input type='time' id='guide-time' style='width:90px; padding:4px;'>\n"
+			"          <button class='btn' onclick='loadGuide()' style='padding:5px 10px;'>Go</button>\n"
+			"        </div>\n"
+			"        <input type='text' id='search-box' placeholder='Search program titles...' style='width:200px;'>\n"
+			"      </div>\n"
+            "      <div id='guide-target'>Loading guide rows from engine...</div>\n"
+            "    </div>\n"
+            "    <div>\n"
+            "      <div class='card' style='margin-bottom: 20px;'>\n"
+            "        <h2>Quick-Schedule Recording</h2>\n"
+            "        <form id='sched-form'>\n"
+            "          <div class='form-group'><label>Show Title</label><input type='text' id='title' required value='Web Scheduled Recording'></div>\n"
+            "          <div class='form-group'><label>Channel (LCN)</label><input type='text' id='channel' placeholder='e.g. 5.1' required></div>\n"
+            "          <div class='form-group'><label>Start Date</label><input type='date' id='date' required></div>\n"
+            "          <div class='form-group'><label>Start Time</label><input type='time' id='time' required></div>\n"
+            "          <div class='form-group'><label>Duration</label>"
+            "            <select id='duration'>\n"
+            "              <option value='1800'>30 Minutes</option>\n"
+            "              <option value='3600' selected>1 Hour</option>\n"
+            "              <option value='7200'>2 Hours</option>\n"
+            "              <option value='10800'>3 Hours</option>\n" 
+            "              <option value='14400'>4 Hours</option>\n" 
+            "            </select>\n"
+            "          </div>\n"
+            "          <button type='submit' class='btn'>Add Active Recording Task</button>\n"
+            "        </form>\n"
+            "      </div>\n"
+            "      <div class='card'>\n"
+            "        <h2>Active Task Schedules</h2>\n"
+            "        <div id='schedule-target'>No active tasks recorded.</div>\n"
+            "      </div>\n"
+            "    </div>\n"
+            "  </div>\n" // Ends your master grid panel container layout block safely
+            "</div>\n"
+            "\n"
+            "<!-- NATIVE INFRASTRUCTURE FOR PROGRAM VISUAL MODALS -->\n"
+            "<div id='details-modal' class='modal'>\n"
+            "  <div class='modal-content'>\n"
+            "    <span class='close-btn' onclick='closeModal()'>&times;</span>\n"
+            "    <h2 id='modal-title' style='margin-top:0;'>Show Title</h2>\n"
+            "    <div style='margin: 10px 0;'><span id='modal-channel' class='badge'>Ch --</span> <span id='modal-time' style='color:#aaa; font-size:0.9em;'>00:00</span></div>\n"
+            "    <p id='modal-desc' style='color:#ccc; font-size:0.95em; line-height:1.4;'>Loading catalog record attributes...</p>\n"
+            "    <div id='player-container'></div>\n"
+            "    <div style='margin-top:15px; text-align:right;'><button id='modal-action-btn' class='btn'>Record Program</button></div>\n"
+            "  </div>\n"
+            "</div>\n"
+            "\n"
+            "<script>\n"
+            "  let guideCache = [];\n"
+            "  let scheduleCache = [];\n"
+            "  let activeLivePlayer = null;\n"
+            "\n"
+			"  function loadGuide() {\n"
+			"    let dt = document.getElementById('guide-date').value;\n"
+			"    let tm = document.getElementById('guide-time').value;\n"
+			"    let url = '/api/guide';\n"
+			"    if(dt && tm) { url += '?dt=' + dt + '&tm=' + encodeURIComponent(tm); }\n"
+			"    \n"
+			"    fetch(url).then(r => r.json()).then(data => {\n"
+			"      guideCache = data;\n"
+			"      let html = '';\n"
+			"      if(data.length === 0) { html = '<p style=\"color:#888; padding:10px;\">No broadcasts found for this time slot.</p>'; }\n"
+			"      data.forEach((p, idx) => {\n"
+			"        let displayDate = p.air_date ? p.air_date + ' | ' : '';\n"
+			"        html += '<div class=\"program-row\" onclick=\"showProgramDetails(' + idx + ', false)\"><div><strong>' + p.title + '</strong><br><small style=\"color:#888;\">' + displayDate + p.start_time + ' - ' + p.end_time + '</small></div><div style=\"text-align:right;\"><span class=\"badge\">Ch ' + p.channel + '</span></div></div>';\n"
+			"      });\n"
+			"      document.getElementById('guide-target').innerHTML = html;\n"
+			"    });\n"
+			"  }\n"
+			"  function loadSchedules() {\n"
+			"    fetch('/api/schedules').then(r => r.json()).then(data => {\n"
+			"      scheduleCache = data;\n"
+			"      let target = document.getElementById('schedule-target');\n"
+			"      target.innerHTML = '';\n"
+			"      \n"
+			"      if(data.length === 0) {\n"
+			"        target.innerHTML = '<p style=\"color:#888;\">No upcoming recording schedules.</p>';\n"
+			"        return;\n"
+			"      }\n"
+			"      \n"
+			"      data.forEach((s, idx) => {\n"
+			"        let cleanTitle = s.show_title.replace(/_/g, ' ');\n"
+			"        \n"
+			"        let row = document.createElement('div');\n"
+			"        row.className = 'program-row';\n"
+			"        row.style.display = 'flex';\n"
+			"        row.style.justifyContent = 'space-between';\n"
+			"        row.style.alignItems = 'center';\n"
+			"        row.onclick = () => showProgramDetails(idx, true);\n"
+			"        \n"
+			"        row.innerHTML = '<div><strong>' + cleanTitle + '</strong><br><small style=\"color:#aaa;\">Ch ' + s.channel + ' | ' + s.date + '</small></div>' +\n"
+			"                        '<div><button class=\"btn btn-del\">Drop</button></div>';\n"
+			"        \n"
+			"        let btn = row.querySelector('.btn-del');\n"
+			"        btn.onclick = (e) => {\n"
+			"          e.stopPropagation();\n"
+			"          deleteSched(s.date, s.time, s.channel);\n"
+			"        };\n"
+			"        \n"
+			"        target.appendChild(row);\n"
+			"        \n"
+			"      });\n"
+			"    });\n"
+			"  }\n"
+            "\n"
+			"  function showProgramDetails(index, isSchedule) {\n"
+			"    let item = isSchedule ? scheduleCache[index] : guideCache[index];\n"
+			"    let title = isSchedule ? item.show_title.replace(/_/g, ' ') : item.title;\n"
+			"    \n"
+			"    document.getElementById('modal-title').innerText = title;\n"
+			"    document.getElementById('modal-channel').innerText = 'Ch ' + item.channel;\n"
+			"    document.getElementById('modal-time').innerText = isSchedule ? (item.date + ' @ ' + item.time) : (item.start_time + ' - ' + item.end_time);\n"
+			"    document.getElementById('modal-desc').innerText = item.description || 'No additional catalog info recorded for this station broadcast event.';\n"
+			"    \n"
+			"    let playerBox = document.getElementById('player-container'); playerBox.innerHTML = '';\n"
+			"    let actionBtn = document.getElementById('modal-action-btn');\n"
+			"    \n"
+			"    if(isSchedule) {\n"
+			"      actionBtn.style.display = 'none';\n"
+			"    } else {\n"
+			"      actionBtn.style.display = 'inline-block'; actionBtn.innerText = 'Schedule Recording';\n"
+			"      actionBtn.onclick = () => {\n"
+			"        document.getElementById('title').value = title;\n"
+			"        document.getElementById('channel').value = item.channel;\n"
+			"        \n"
+			"        if (item.air_date) {\n"
+			"          document.getElementById('date').value = item.air_date;\n"
+			"        }\n"
+			"        if (item.start_time) {\n"
+			"          document.getElementById('time').value = item.start_time;\n"
+			"        }\n"
+			"        \n"
+			"        // FIXED: Dynamically map the closest program runtime duration option\n"
+			"        if (item.duration) {\n"
+			"          let durationSelect = document.getElementById('duration');\n"
+			"          \n"
+			"          // Default to 1 hour (3600s) if no exact match is discovered\n"
+			"          durationSelect.value = '3600'; \n"
+			"          \n"
+			"          // Cycle through choices to see if show runtime matches an option\n"
+			"          for (let option of durationSelect.options) {\n"
+			"            if (Math.abs(parseInt(option.value) - item.duration) < 300) { // 5-minute safety threshold window\n"
+			"              durationSelect.value = option.value;\n"
+			"              break;\n"
+			"            }\n"
+			"          }\n"
+			"        }\n"
+			"        \n"
+			"        closeModal(); \n"
+			"        document.getElementById('title').focus();\n"
+			"      };\n"
+
+			"      \n"
+			"      // DESKTOP LAUNCHER BUTTON BANNER\n"
+			"      playerBox.innerHTML = '<button class=\"btn\" style=\"background:#107c41; margin-bottom:10px; width:100%; padding:10pxTrigger;\" id=\"play-live-btn\">Launch Player App Natively on Haiku Screen</button>';\n"
+			"      setTimeout(() => {\n"
+			"        let btn = document.getElementById('play-live-btn');\n"
+			"        if(btn) btn.onclick = () => {\n"
+			"          fetch('/api/desktop/play?ch=' + item.channel)\n"
+			"            .then(r => r.json())\n"
+			"            .then(() => { closeModal(); });\n"
+			"        };\n"
+			"      }, 50);\n"
+			"    }\n"
+			"    document.getElementById('details-modal').style.display = 'flex';\n"
+			"  }\n"
+
+            "  \n"
+			"  function destroyActivePlayer() {\n"
+			"      if(activeLivePlayer !== null) {\n"
+			"          try {\n"
+			"              activeLivePlayer.pause(); activeLivePlayer.unload();\n"
+			"              activeLivePlayer.detachMediaElement(); activeLivePlayer.destroy();\n"
+			"          } catch(e) {}\n"
+			"          activeLivePlayer = null;\n"
+			"      }\n"
+			"  }\n"
+			"  \n"
+			"  function closeModal() { destroyActivePlayer(); document.getElementById('details-modal').style.display = 'none'; }\n"
+			"  \n"
+			"  // FIX: Added 'application/json' content-type headers so the C++ engine can read the payload body\n"
+			"  function deleteSched(date, time, channel) {\n"
+			"    if(confirm('Drop this scheduled task?')) {\n"
+			"      fetch('/api/schedules/delete', {\n"
+			"        method: 'POST',\n"
+			"        headers: { 'Content-Type': 'application/json' },\n"
+			"        body: JSON.stringify({ date, time, channel })\n"
+			"      }).then(() => { loadSchedules(); });\n"
+			"    }\n"
+			"  }\n"
+			"  \n"
+			"  // FIXED: Form listener no longer overwrites or resets titles unexpectedly\n"
+			"  document.getElementById('sched-form').addEventListener('submit', (e) => {\n"
+			"    e.preventDefault();\n"
+			"    let payload = {\n"
+			"      title: document.getElementById('title').value,\n"
+			"      channel: document.getElementById('channel').value,\n"
+			"      date: document.getElementById('date').value,\n"
+			"      time: document.getElementById('time').value,\n"
+			"      duration: document.getElementById('duration').value\n"
+			"    };\n"
+			"    fetch('/api/schedules/add', {\n"
+			"      method: 'POST',\n"
+			"      headers: { 'Content-Type': 'application/json' },\n"
+			"      body: JSON.stringify(payload)\n"
+			"    }).then(r => {\n"
+			"      if(r.ok) {\n"
+			"        loadSchedules();\n"
+			"        // Clear the form fields naturally instead of hardcoding a placeholder text\n"
+			"        document.getElementById('title').value = '';\n"
+			"        document.getElementById('channel').value = '';\n"
+			"      } else {\n"
+			"        alert('Failed to save schedule on server.');\n"
+			"      }\n"
+			"    });\n"
+			"  });\n"
+			"  \n"
+			"  // Updated Asynchronous Live Search Input Listener\n"
+			"  document.getElementById('search-box').addEventListener('input', (e) => {\n"
+			"    let query = e.target.value.trim();\n"
+			"    if (query.length < 2) {\n"
+			"      loadGuide();\n"
+			"      return;\n"
+			"    }\n"
+			"    fetch('/api/search?q=' + encodeURIComponent(query))\n"
+			"      .then(r => r.json())\n"
+			"      .then(data => {\n"
+			"        let html = '';\n"
+			"        if (data.length === 0) { html = '<p style=\"color:#888; padding:10px;\">No matching programs discovered.</p>'; }\n"
+			"        data.forEach((p, idx) => {\n"
+			"          let displayDate = p.air_date ? p.air_date + ' | ' : '';\n"
+			"          html += '<div class=\"program-row\" onclick=\"showProgramDetails(\' + idx + \', false)\"><div><strong>' + p.title + '</strong><br><small style=\"color:#888;\">' + displayDate + p.start_time + ' - ' + p.end_time + '</small></div><div style=\"text-align:right;\"><span class=\"badge\">Ch ' + p.channel + '</span></div></div>';\n"
+			"        });\n"
+			"        document.getElementById('guide-target').innerHTML = html;\n"
+			"      });\n"
+			"  });\n"
+			"  \n"
+			"  try {\n"
+			"    let now = new Date();\n"
+			"    // Sweedish locale safely yields standard YYYY-MM-DD format output\n"
+			"    let localISODate = now.toLocaleDateString('sv');\n"
+			"    \n"
+			"    // Safely extract hours and minutes\n"
+			"    let hh = String(now.getHours()).padStart(2, '0');\n"
+			"    let mm = String(now.getMinutes()).padStart(2, '0');\n"
+			"    let localISOTime = hh + ':' + mm;\n"
+			"    \n"
+			"    document.getElementById('date').value = localISODate;\n"
+			"    document.getElementById('guide-date').value = localISODate;\n"
+			"    document.getElementById('guide-time').value = localISOTime;\n"
+			"  } catch(err) {}\n"
+			"  \n"
+			"  loadGuide(); loadSchedules();\n"
+			"  setInterval(loadSchedules, 6000);\n"
+
+			"</script>\n"
+			"\n"
+			"</body>\n</html>\n";
+
+
+        std::string response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + std::to_string(html.length()) + "\r\nConnection: close\r\n\r\n" + html;
+        send(clientFd, response.c_str(), response.length(), 0);
+    }
+
+
+    std::string ExtractHttpRequestBody(const std::string& requestStr) {
+        size_t bodyPos = requestStr.find("\r\n\r\n");
+        if (bodyPos != std::string::npos) return requestStr.substr(bodyPos + 4);
+        return "";
+    }
+
+    // Standardized helper utility to dispatch clean RESTful JSON responses
+    void SendJsonResponse(int clientFd, int statusCode, const std::string& statusMessage, const std::string& jsonContent) {
+        std::string response = 
+            "HTTP/1.1 " + std::to_string(statusCode) + " " + statusMessage + "\r\n"
+            "Content-Type: application/json; charset=utf-8\r\n"
+            "Content-Length: " + std::to_string(jsonContent.length()) + "\r\n"
+            "Access-Control-Allow-Origin: *\r\n" // Allows easy third-party web panel interfaces
+            "Connection: close\r\n\r\n" + jsonContent;
+        send(clientFd, response.c_str(), response.length(), 0);
+    }
+
+    // Endpoint: GET /api/guide — Queries your live SQLite guide.db directly
+    void HandleGetTvGuide(int clientFd, const std::string& requestStr) {
+        std::string targetDate = "";
+        std::string targetTime = "";
+        
+        // 1. Safe extraction of ?dt= and &tm= parameters
+        size_t dtPos = requestStr.find("dt=");
+        if (dtPos != std::string::npos) {
+            targetDate = requestStr.substr(dtPos + 3, 10); // Extracted YYYY-MM-DD
+        }
+        
+        size_t tmPos = requestStr.find("tm=");
+        if (tmPos != std::string::npos) {
+            // Find end of parameter value (space or end of string)
+            size_t tmEnd = requestStr.find(" ", tmPos);
+            std::string rawTime = (tmEnd != std::string::npos) ? 
+                                  requestStr.substr(tmPos + 3, tmEnd - (tmPos + 3)) : 
+                                  requestStr.substr(tmPos + 3);
+            
+            // Clean URL-encoded colon sequences (%3A / %3a)
+            for (size_t i = 0; i < rawTime.length(); i++) {
+                if (rawTime[i] == '%' && i + 2 < rawTime.length() && 
+                    (rawTime[i+1] == '3' && (rawTime[i+2] == 'A' || rawTime[i+2] == 'a'))) {
+                    targetTime += ":";
+                    i += 2;
+                } else {
+                    targetTime += rawTime[i];
+                }
+            }
+            if (targetTime.length() > 5) targetTime = targetTime.substr(0, 5); // Safe truncate to HH:MM
+        }
+
+        sqlite3* db = nullptr;
+        const char* dbPath = "/boot/home/config/settings/HaikuDVR/guide.db";
+        
+        if (sqlite3_open(dbPath, &db) != SQLITE_OK) {
+            if (db) sqlite3_close(db);
+            json err = {{"status", "error"}, {"message", "Could not open guide database."}};
+            SendJsonResponse(clientFd, 500, "Internal Server Error", err.dump());
+            return;
+        }
+
+        // 2. FIXED TIME CONDITION: Treat incoming string parameters explicitly as 'localtime'
+        std::string timeFilter = "p.end_epoch > strftime('%s', 'now') ";
+        if (!targetDate.empty() && targetTime.length() == 5) {
+            std::string fullTargetStr = targetDate + " " + targetTime + ":00";
+            timeFilter = "p.start_epoch <= strftime('%s', '" + fullTargetStr + "', 'utc') "
+                         "AND p.end_epoch > strftime('%s', '" + fullTargetStr + "', 'utc') ";
+        }
+
+        std::string sql = 
+            "WITH RankedPrograms AS ("
+            "    /* FIXED: Added p.end_epoch to the interior subquery select sequence */\n"
+            "    SELECT p.title, c.lcn, p.desc, p.start_epoch, p.end_epoch, "
+            "           strftime('%H:%M', p.start_epoch, 'unixepoch', 'localtime') as start_t, "
+            "           strftime('%H:%M', p.end_epoch, 'unixepoch', 'localtime') as end_t, "
+            "           strftime('%Y-%m-%d', p.start_epoch, 'unixepoch', 'localtime') as air_date, "
+            "           ROW_NUMBER() OVER (PARTITION BY p.channel_id ORDER BY p.start_epoch ASC) as rn "
+            "    FROM programs p "
+            "    LEFT JOIN channels c ON p.channel_id = c.xml_id "
+            "    WHERE " + timeFilter + 
+            ") "
+            "SELECT title, lcn, start_t, end_t, desc, air_date, start_epoch, end_epoch "
+            "FROM RankedPrograms "
+            "WHERE rn = 1 "
+            "ORDER BY "
+            "         CAST(CASE WHEN instr(lcn, '.') > 0 THEN substr(lcn, 1, instr(lcn, '.') - 1) ELSE lcn END AS INTEGER) ASC, "
+            "         CAST(CASE WHEN instr(lcn, '.') > 0 THEN substr(lcn, instr(lcn, '.') + 1) ELSE 0 END AS INTEGER) ASC;";
+
+
+
+        sqlite3_stmt* stmt = nullptr;
+        json jResults = json::array();
+
+        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* title   = (const char*)sqlite3_column_text(stmt, 0);
+                const char* lcn     = (const char*)sqlite3_column_text(stmt, 1);
+                const char* start   = (const char*)sqlite3_column_text(stmt, 2);
+                const char* end     = (const char*)sqlite3_column_text(stmt, 3);
+                const char* desc    = (const char*)sqlite3_column_text(stmt, 4);
+                const char* airDate = (const char*)sqlite3_column_text(stmt, 5); 
+
+                // Extract epoch timestamps from columns 6 and 7
+                int64_t startEpoch = (int64_t)sqlite3_column_int64(stmt, 6);
+                int64_t endEpoch   = (int64_t)sqlite3_column_int64(stmt, 7);
+                int64_t durationSec = endEpoch - startEpoch;
+
+                jResults.push_back({
+                    {"title", title ? title : "Unknown"},
+                    {"channel", lcn ? lcn : "??"},
+                    {"start_time", start ? start : "--:--"},
+                    {"end_time", end ? end : "--:--"},
+                    {"description", desc ? desc : "No description available."},
+                    {"air_date", airDate ? airDate : ""},
+                    {"duration", durationSec} // Sent down cleanly to frontend matcher
+                });
+            }
+        }
+
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        SendJsonResponse(clientFd, 200, "OK", jResults.dump());
+    }
+
+
+    // Endpoint: GET /api/search?q=... — Dynamic asynchronous database filtering
+    void HandleApiSearch(int clientFd, const std::string& requestStr) {
+        size_t queryPos = requestStr.find("/api/search?q=");
+        if (queryPos == std::string::npos) {
+            SendJsonResponse(clientFd, 400, "Bad Request", "{\"error\":\"Missing query parameter\"}");
+            return;
+        }
+        
+        size_t endPos = requestStr.find(" ", queryPos);
+        std::string rawQuery = requestStr.substr(queryPos + 14, endPos - (queryPos + 14));
+        
+        // Simple URL Decode helper to turn %20 tokens back to spaces for SQLite matching
+        std::string cleanedQuery = "";
+        for (size_t i = 0; i < rawQuery.length(); i++) {
+            if (rawQuery[i] == '%' && i + 2 < rawQuery.length()) {
+                char chr = static_cast<char>(std::strtol(rawQuery.substr(i + 1, 2).c_str(), nullptr, 16));
+                cleanedQuery += chr; i += 2;
+            } else if (rawQuery[i] == '+') { cleanedQuery += ' '; }
+            else { cleanedQuery += rawQuery[i]; }
+        }
+
+        sqlite3* db = nullptr;
+        if (sqlite3_open("/boot/home/config/settings/HaikuDVR/guide.db", &db) != SQLITE_OK) {
+            if (db) sqlite3_close(db);
+            SendJsonResponse(clientFd, 500, "Error", "{\"error\":\"Database open failed\"}");
+            return;
+        }
+
+           const char* sql = 
+            "SELECT p.title, c.lcn, "
+            "       strftime('%H:%M', p.start_epoch, 'unixepoch', 'localtime') as start_t, "
+            "       strftime('%H:%M', p.end_epoch, 'unixepoch', 'localtime') as end_t, "
+            "       p.desc, "
+            "       strftime('%Y-%m-%d', p.start_epoch, 'unixepoch', 'localtime') as air_date, "
+            "       p.start_epoch, p.end_epoch " 
+            "FROM programs p "
+            "LEFT JOIN channels c ON p.channel_id = c.xml_id "
+            "WHERE lower(p.title) LIKE lower(?) "
+            "  AND p.end_epoch > strftime('%s', 'now') /* Guard: Don't return past shows */ "
+            "ORDER BY "
+            "         /* 1. Sort by major channel digits numerically */ "
+            "         CAST(CASE "
+            "           WHEN instr(c.lcn, '.') > 0 THEN substr(c.lcn, 1, instr(c.lcn, '.') - 1) "
+            "           ELSE c.lcn "
+            "         END AS INTEGER) ASC, "
+            "         /* 2. Sort by minor sub-channel digits numerically */ "
+            "         CAST(CASE "
+            "           WHEN instr(c.lcn, '.') > 0 THEN substr(c.lcn, instr(c.lcn, '.') + 1) "
+            "           ELSE 0 "
+            "         END AS INTEGER) ASC, "
+            "         /* 3. Chronological sorting for different episodes on the same station */ "
+            "         p.start_epoch ASC "
+            "LIMIT 50;";
+
+        sqlite3_stmt* stmt = nullptr;
+        json jResults = json::array();
+
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            std::string bindPattern = "%" + cleanedQuery + "%";
+            sqlite3_bind_text(stmt, 1, bindPattern.c_str(), -1, SQLITE_TRANSIENT);
+
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* title   = (const char*)sqlite3_column_text(stmt, 0);
+                const char* lcn     = (const char*)sqlite3_column_text(stmt, 1);
+                const char* start   = (const char*)sqlite3_column_text(stmt, 2);
+                const char* end     = (const char*)sqlite3_column_text(stmt, 3);
+                const char* desc    = (const char*)sqlite3_column_text(stmt, 4);
+                const char* airDate = (const char*)sqlite3_column_text(stmt, 5); 
+
+                int64_t startEpoch  = (int64_t)sqlite3_column_int64(stmt, 6);
+                int64_t endEpoch    = (int64_t)sqlite3_column_int64(stmt, 7);
+                int64_t durationSec = endEpoch - startEpoch;
+
+                jResults.push_back({
+                    {"title", title ? title : "Unknown"},
+                    {"channel", lcn ? lcn : "??"},
+                    {"start_time", start ? start : "--:--"},
+                    {"end_time", end ? end : "--:--"},
+                    {"description", desc ? desc : "No description available."},
+                    {"air_date", airDate ? airDate : ""},
+                    {"duration", durationSec} 
+                });
+            }
+        }
+
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        SendJsonResponse(clientFd, 200, "OK", jResults.dump(4));
+    }
+
+
+
+
+    // Endpoint: GET /api/schedules — Exports current memory schedules as JSON strings
+    void HandleGetSchedules(int clientFd) {
+        gScheduleLocker.Lock();
+        json jSchedules = json::array();
+        for (const auto& item : gScheduleList) {
+            jSchedules.push_back({
+                {"date", item.startDate},
+                {"time", item.startTime},
+                {"channel", item.channel},
+                {"channel_label", item.channelLabel},
+                {"duration", item.duration},
+                {"processed", item.processed},
+                {"tuner_ip", item.tunerIp},
+                {"show_title", item.showTitle}
+            });
+        }
+        gScheduleLocker.Unlock();
+        SendJsonResponse(clientFd, 200, "OK", jSchedules.dump(4));
+    }
+
+    // Endpoint: POST /api/schedules/add — Adds a new task over the network
+    void HandleAddSchedule(int clientFd, const std::string& requestStr) {
+        std::string body = ExtractHttpRequestBody(requestStr);
+        try {
+            json jIn = json::parse(body);
+            ScheduleItem item;
+            item.startDate    = jIn.at("date").get<std::string>();
+            item.startTime    = jIn.at("time").get<std::string>();
+            item.channel      = jIn.at("channel").get<std::string>();
+            item.channelLabel = jIn.value("channel_label", "");
+            item.duration     = jIn.at("duration").get<std::string>();
+            item.tunerIp      = jIn.value("tuner_ip", "");
+            item.showTitle    = jIn.value("title", "Remote Web Record");
+            item.processed    = 0; 
+            
+            item.durationSec  = std::atoll(item.duration.c_str());
+            item.epochStart   = CalculateEpoch(item.startDate, item.startTime);
+
+            gScheduleLocker.Lock();
+            gScheduleList.push_back(item);
+            gScheduleLocker.Unlock();
+            
+            SaveSchedulesToDisk(); // Serializes straight down to your persistent JSON file
+
+            json resp = {{"status", "success"}, {"message", "Schedule appended successfully"}};
+            SendJsonResponse(clientFd, 201, "Created", resp.dump());
+        } catch (const std::exception& e) {
+            json errorJson = {{"status", "error"}, {"message", std::string("JSON Validation Fail: ") + e.what()}};
+            SendJsonResponse(clientFd, 400, "Bad Request", errorJson.dump());
+        }
+    }
+
+    // Endpoint: POST /api/schedules/delete — Removes a task via network matching properties
+    void HandleDeleteSchedule(int clientFd, const std::string& requestStr) {
+        std::string body = ExtractHttpRequestBody(requestStr);
+        try {
+            json jIn = json::parse(body);
+            std::string targetDate = jIn.at("date").get<std::string>();
+            std::string targetTime = jIn.at("time").get<std::string>();
+            std::string targetChan = jIn.at("channel").get<std::string>();
+
+            bool removed = false;
+            gScheduleLocker.Lock();
+            for (auto it = gScheduleList.begin(); it != gScheduleList.end(); ++it) {
+                if (it->startDate == targetDate && it->startTime == targetTime && it->channel == targetChan) {
+                    gScheduleList.erase(it);
+                    removed = true;
+                    break;
+                }
+            }
+            gScheduleLocker.Unlock();
+
+            if (removed) {
+                SaveSchedulesToDisk();
+                json resp = {{"status", "success"}, {"message", "Schedule dropped successfully"}};
+                SendJsonResponse(clientFd, 200, "OK", resp.dump());
+            } else {
+                json resp = {{"status", "fail"}, {"message", "No matching schedule sequence found"}};
+                SendJsonResponse(clientFd, 404, "Not Found", resp.dump());
+            }
+        } catch (...) {
+            json errorJson = {{"status", "error"}, {"message", "Invalid schedule matching request context"}};
+            SendJsonResponse(clientFd, 400, "Bad Request", errorJson.dump());
+        }
+    }
 
     void ServeScpd(int clientFd) {
         // Industry-standard UPnP ContentDirectory definition block tracking the "Browse" action
@@ -1213,106 +1919,91 @@ private:
 	    return result;
 	}
 	
-	void StreamVideoFile(int clientFd, const std::string& req) {
-	    size_t pos = req.find("/video/");
-	    size_t endPos = req.find(" ", pos);
-	    if (pos == std::string::npos || endPos == std::string::npos) return;
-	    
-	    std::string rawFilename = req.substr(pos + 7, endPos - (pos + 7));
-	    
-	    // Decode the URL characters before referencing the storage path
-	    std::string filename = UrlDecodeFilename(rawFilename);
-	    std::string fullPath = rootDir + "/" + filename;
-	
-	    if (gFrontendDebugEnable) {
-	        std::printf("[DLNA STREAM] Incoming URI segment: %s\n", rawFilename.c_str());
-	        std::printf("[DLNA STREAM] Reconstructed disk path: %s\n", fullPath.c_str());
-	        std::fflush(stdout);
-	    }
-	
-	    // Open the file with ate (at the end) to read total file size
-	    std::ifstream file(fullPath, std::ios::binary | std::ios::ate);
-	    if (!file.is_open()) {
-	        if (gFrontendDebugEnable) {
-	            std::printf("[DLNA ERROR] File open failed for path: %s\n", fullPath.c_str());
-	            std::fflush(stdout);
-	        }
-	        const char* notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-	        send(clientFd, notFound, std::strlen(notFound), 0);
-	        return;
-	    }
-	
-	    std::streamsize fileSize = file.tellg();
-	    std::streamsize startByte = 0;
-	    std::streamsize endByte = fileSize - 1;
-	    bool isPartial = false;
-	
-	    // PARSE HTTP RANGE HEADERS: Look for timeline scrubbing requests
-	    size_t rangePos = req.find("Range: bytes=");
-	    if (rangePos != std::string::npos) {
-	        size_t startIdx = rangePos + 13;
-	        size_t dashIdx = req.find("-", startIdx);
-	        if (dashIdx != std::string::npos) {
-	            std::string startStr = req.substr(startIdx, dashIdx - startIdx);
-	            if (!startStr.empty()) {
-	                startByte = std::atoll(startStr.c_str());
-	                isPartial = true;
-	            }
-	            
-	            size_t nlnIdx = req.find("\r\n", dashIdx);
-	            if (nlnIdx != std::string::npos) {
-	                std::string endStr = req.substr(dashIdx + 1, nlnIdx - (dashIdx + 1));
-	                if (!endStr.empty()) {
-	                    endByte = std::atoll(endStr.c_str());
-	                }
-	            }
-	        }
-	    }
+    void StreamVideoFile(int clientFd, const std::string& req) {
+        size_t pos = req.find("/video/");
+        size_t endPos = req.find(" ", pos);
+        if (pos == std::string::npos || endPos == std::string::npos) {
+            close(clientFd); // Clean up right away on a malformed path
+            return;
+        }
+        
+        std::string rawFilename = req.substr(pos + 7, endPos - (pos + 7));
+        std::string filename = UrlDecodeFilename(rawFilename);
+        std::string fullPath = rootDir + "/" + filename;
 
-        // Seek the file pointer straight to the requested byte position
+        if (gFrontendDebugEnable) {
+            std::printf("[STREAM] Reconstructed disk path: %s\n", fullPath.c_str());
+            std::fflush(stdout);
+        }
+
+        std::ifstream file(fullPath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            const char* notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+            send(clientFd, notFound, std::strlen(notFound), 0);
+            close(clientFd);
+            return;
+        }
+
+        std::streamsize fileSize = file.tellg();
+        std::streamsize startByte = 0;
+        std::streamsize endByte = fileSize - 1;
+        bool isPartial = false;
+
+        size_t rangePos = req.find("Range: bytes=");
+        if (rangePos != std::string::npos) {
+            size_t startIdx = rangePos + 13;
+            size_t dashIdx = req.find("-", startIdx);
+            if (dashIdx != std::string::npos) {
+                std::string startStr = req.substr(startIdx, dashIdx - startIdx);
+                if (!startStr.empty()) {
+                    startByte = std::atoll(startStr.c_str());
+                    isPartial = true;
+                }
+                
+                size_t nlnIdx = req.find("\r\n", dashIdx);
+                if (nlnIdx != std::string::npos) {
+                    std::string endStr = req.substr(dashIdx + 1, nlnIdx - (dashIdx + 1));
+                    if (!endStr.empty()) {
+                        endByte = std::atoll(endStr.c_str());
+                    }
+                }
+            }
+        }
+
         file.seekg(startByte, std::ios::beg);
         std::streamsize contentLength = (endByte - startByte) + 1;
 
-        // Changed from char header to a 1KB buffer array
         char header[1024] = {0}; 
         if (isPartial) {
-        	if (gFrontendDebugEnable) {
-            	std::printf("[SEEK SYSTEM] Client scrubbing to offset position: %lld / %lld bytes\n", (long long)startByte, (long long)fileSize);
-            	std::fflush(stdout);
-        	}
-            
+            if (gFrontendDebugEnable) std::printf("[SEEK SYSTEM] Offset scrubbing position: %lld bytes\n", (long long)startByte);
             std::snprintf(header, sizeof(header),
                 "HTTP/1.1 206 Partial Content\r\n"
                 "Content-Type: video/mp2t\r\n"
                 "Content-Range: bytes %lld-%lld/%lld\r\n"
                 "Content-Length: %lld\r\n"
-                "Connection: close\r\n\r\n",
+                "Access-Control-Allow-Origin: *\r\n"
+                "Connection: close\r\n\r\n", // DLNA seekers prefer individual close bursts
                 (long long)startByte, (long long)endByte, (long long)fileSize, (long long)contentLength
             );
         } else {
-        	if (gFrontendDebugEnable) {
-            	std::printf("[SEEK SYSTEM] Client streaming video file from absolute beginning.\n");
-            	std::fflush(stdout);
-        	}
+            if (gFrontendDebugEnable) std::printf("[SEEK SYSTEM] Browser streaming from absolute beginning.\n");
             std::snprintf(header, sizeof(header),
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: video/mp2t\r\n"
                 "Content-Length: %lld\r\n"
                 "Accept-Ranges: bytes\r\n"
-                "Connection: close\r\n\r\n",
+                "Access-Control-Allow-Origin: *\r\n"
+                "Connection: keep-alive\r\n\r\n", // Keep-alive ensures the web canvas can stream continuously
                 (long long)fileSize
             );
         }
 
-        // Transmit streaming response headers
         send(clientFd, header, std::strlen(header), 0);
 
-        // Pipe chunks smoothly from the file offset straight down into the network card socket
         char chunk[64 * 1024]; 
         std::streamsize bytesRemaining = contentLength;
 
-        // UPDATE: Added gFrontendDlnaEnable config toggle guard to the outer data pool
-        while (bytesRemaining > 0 && file.good() && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
+        while (bytesRemaining > 0 && file.good() && atomic_get(&gStopService) == 0) {
             std::streamsize toRead = sizeof(chunk);
             if (toRead > bytesRemaining) toRead = bytesRemaining;
 
@@ -1320,24 +2011,22 @@ private:
             std::streamsize bytesRead = file.gcount();
             if (bytesRead <= 0) break;
 
-            // Nested loop to ensure the ENTIRE read block is fully pushed to the network socket
-            // UPDATE: Added gFrontendDlnaEnable config toggle guard here as well
             std::streamsize bytesSentTotal = 0;
-            while (bytesSentTotal < bytesRead && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
+            while (bytesSentTotal < bytesRead && atomic_get(&gStopService) == 0) {
                 ssize_t sent = send(clientFd, chunk + bytesSentTotal, bytesRead - bytesSentTotal, 0);
                 if (sent < 0) {
-                    // Client disconnected, closed the window, or skipped away
                     bytesRemaining = 0; 
                     break;
                 }
                 bytesSentTotal += sent;
                 bytesRemaining -= sent;
             }
-            
             if (bytesRemaining <= 0) break;
+            snooze(100); // Tiny pause pacing prevents socket flooding on high bit-rate files
         }
         file.close();
-        
+        close(clientFd); // Method handles its own socket cleanup safely once delivery finishes
+
         if (gFrontendDebugEnable) {
             std::printf("[DLNA STREAM] Finished streaming media block to Client. Socket cleanly closing.\n");
             std::fflush(stdout);

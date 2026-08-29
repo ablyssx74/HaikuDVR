@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.38 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.39 (Haiku OS)";
 }
 
 const uint32 MSG_TOGGLE_DLNA			    = 'dlna';
@@ -355,7 +355,11 @@ static int32 BackgroundUpdateChecker(void* data) {
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/HaikuDVR/refs/heads/main/VERSION";
 
     BString shellCmdString;
-    shellCmdString.SetToFormat("curl -sL \"%s\"", targetUrl);
+    #if defined(__x86_64__)
+        shellCmdString.SetToFormat("curl -sL \"%s\"", targetUrl);
+    #else
+        shellCmdString.SetToFormat("curl-x86 -sL \"%s\"", targetUrl);
+    #endif
 
     BString remoteVersionStr = "";
     
@@ -4120,9 +4124,45 @@ public:
         optionsMenu->AddSeparatorItem(); 
         
         BMessage* msgDlnaOn = new BMessage(MSG_TOGGLE_DLNA);
-        fDlnaOnItem = new BMenuItem("Enable Dlna Server", msgDlnaOn);        
+        BString labelString;
+
+        if (cfg.dlnaEnable) {
+            int32 boundPort = 8081; // Fallback default
+            
+            // Loop through the 9 fallback port tries to see which socket is listening
+            for (int32 port = 8081; port <= 8090; port++) {
+                int socketFd = socket(AF_INET, SOCK_STREAM, 0);
+                if (socketFd >= 0) {
+                    struct sockaddr_in addr;
+                    std::memset(&addr, 0, sizeof(addr));
+                    addr.sin_family = AF_INET;
+                    addr.sin_port = htons(port);
+                    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+                    
+                    // Set a very quick timeout so it doesn't hang the GUI boot sequence
+                    struct timeval tv;
+                    tv.tv_sec = 0;
+                    tv.tv_usec = 10000; // 10ms
+                    setsockopt(socketFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                    
+                    // If connect returns 0, the server is actively running on this port!
+                    if (connect(socketFd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                        boundPort = port;
+                        close(socketFd);
+                        break;
+                    }
+                    close(socketFd);
+                }
+            }
+            labelString.SetToFormat("Enable Http & Dlna Server (Active Port: %d)", boundPort);
+        } else {
+            labelString.SetTo("Enable Http & Dlna Server [Disabled]");
+        }
+
+        fDlnaOnItem = new BMenuItem(labelString.String(), msgDlnaOn);        
         fDlnaOnItem->SetMarked(cfg.dlnaEnable);
         optionsMenu->AddItem(fDlnaOnItem);  
+
             
         optionsMenu->AddSeparatorItem();         
 
@@ -4454,13 +4494,11 @@ public:
             fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
             SaveSchedulesToDisk();
 
-            // Native Haiku Alert Popup with corrected button layout enum
             BAlert* alert = new BAlert("Warning",
                 "Toggling the DLNA server requires restarting the backend service.\n\n"
                 "Any current recordings in progress will be lost! Do you want to proceed?",
                 "Cancel", "Proceed", nullptr, B_WIDTH_FROM_LABEL, B_WARNING_ALERT);
             
-            // Go() blocks until the user interacts with the popup window
             int32 response = alert->Go();
             
             if (response == 0) {
@@ -4469,6 +4507,13 @@ public:
                 fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
                 SaveSchedulesToDisk();
                 break; 
+            }
+
+            // --- FIXED: Provide visual menu label updates immediately on user action ---
+            if (cfg.dlnaEnable) {
+                fDlnaOnItem->SetLabel("Enable Http & Dlna Server [Restarting Backend...]");
+            } else {
+                fDlnaOnItem->SetLabel("Enable Http & Dlna Server [Disabled]");
             }
 
             // User clicked "Proceed" -> Programmatically notify the backend to apply new DLNA settings
