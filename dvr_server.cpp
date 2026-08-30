@@ -899,6 +899,7 @@ static int32 HttpWorkerLoop(void* data) {
 
 private:
     // Endpoint: GET /api/desktop/play?ch=CH — Launches player app natively inside your Haiku desktop environment
+
     void HandleDesktopAppLaunch(int clientFd, const std::string& requestStr) {
         size_t queryPos = requestStr.find("/api/desktop/play?ch=");
         if (queryPos == std::string::npos) {
@@ -909,51 +910,124 @@ private:
         size_t endPos = requestStr.find(" ", queryPos);
         std::string channel = requestStr.substr(queryPos + 21, endPos - (queryPos + 21));
 
-        // 1. Dynamic Tuner IP Discovery Step
+        // 1. Client IP Source Identification via Socket Descriptor
+        std::string clientIpStr = "127.0.0.1";
+        struct sockaddr_storage peerAddr;
+        socklen_t peerAddrLen = sizeof(peerAddr);
+        if (getpeername(clientFd, (struct sockaddr*)&peerAddr, &peerAddrLen) == 0) {
+            if (peerAddr.ss_family == AF_INET) {
+                struct sockaddr_in* s = (struct sockaddr_in*)&peerAddr;
+                char ipBuffer[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(s->sin_addr), ipBuffer, INET_ADDRSTRLEN);
+                clientIpStr = ipBuffer;
+            }
+        }
+
+        // 2. Dynamic Tuner IP Discovery Step (DECLARATION FIRST)
         std::string tunerIp = "";
         std::vector<std::string> discoveredDevices = DiscoverAllTuners();        
         if (!discoveredDevices.empty()) {
             tunerIp = discoveredDevices[0];
         } else {
-            tunerIp = "192.168.1.68"; // Fallback to your verified tuner IP address
+            tunerIp = "192.168.1.68"; 
         }
 
-        // Reconstruct the direct raw hardware streaming target link 
+        // 3. NOW SAFE TO USE: Reconstruct the direct raw hardware streaming target link 
         std::string targetUrl = "http://" + tunerIp + ":5004/auto/v" + channel;
 
+        // =========================================================================
+        // AUTOMATIC SERVER IP DETECTION VIA HTTP HOST HEADERS
+        // =========================================================================
+        std::string serverIpStr = "";
+        size_t hostPos = requestStr.find("Host: ");
+        if (hostPos != std::string::npos) {
+            size_t valStart = hostPos + 6;
+            size_t valEnd = requestStr.find("\r\n", valStart);
+            if (valEnd != std::string::npos) {
+                std::string fullHost = requestStr.substr(valStart, valEnd - valStart);
+                size_t colonIndex = fullHost.find(":");
+                serverIpStr = (colonIndex != std::string::npos) ? fullHost.substr(0, colonIndex) : fullHost;
+            }
+        }
+
+        // HYBRID LOGIC BRAIN: Dynamically evaluate alignment boundaries 
+        bool isLocalClient = (clientIpStr == "127.0.0.1" || 
+                              clientIpStr == "localhost" || 
+                              clientIpStr == serverIpStr);
+
+
         if (gFrontendDebugEnable) {
-            std::printf("[DESKTOP REMOTE] Action triggered! Launching player on Haiku for: %s\n", targetUrl.c_str());
+            std::printf("[HYBRID LAUNCHER] Client IP: %s | Detected Server Destination: %s | Match: %s\n", 
+                        clientIpStr.c_str(), serverIpStr.c_str(), isLocalClient ? "LOCAL" : "REMOTE");
             std::fflush(stdout);
         }
 
-        // 2. Fork and Execute Player Environment Process
-        // Fallback loops check for standard Haiku native player binary availability automatically
-        const char* binaryPath = "/boot/system/bin/mpv";
-        
-        // Check if vlc or hTV exist on disk if mpv isn't your preferred launcher
-        if (access("/boot/system/bin/hTV", F_OK) == 0) {
-            binaryPath = "/boot/system/bin/hTV";
-        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
-            binaryPath = "/boot/system/bin/vlc";
+
+        if (isLocalClient) {
+            // =========================================================================
+            // LOCAL MACHINE MODE: Fork and launch player app natively on host screen workspace
+            // =========================================================================
+            if (gFrontendDebugEnable) {
+                std::printf("[HYBRID LAUNCHER] Local environment matched! Initializing system player binaries.\n");
+                std::fflush(stdout);
+            }
+
+            const char* binaryPath = "/boot/system/bin/mpv";
+            if (access("/boot/system/bin/hTV", F_OK) == 0) {
+                binaryPath = "/boot/system/bin/hTV";
+            } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
+                binaryPath = "/boot/system/bin/vlc";
+            }
+
+            pid_t processId = fork();
+            if (processId == 0) {
+                char* playerArgs[3];
+                playerArgs[0] = (char*)binaryPath;
+                playerArgs[1] = (char*)targetUrl.c_str();
+                playerArgs[2] = nullptr; 
+                
+                execv(playerArgs[0], playerArgs);
+                _exit(1); 
+            }
+
+            // Send a tiny clean JSON success back to the local browser tab so it can exit its fetch block
+            json localResp = {{"status", "success"}, {"mode", "local_launch"}};
+            SendJsonResponse(clientFd, 200, "OK", localResp.dump());
+
+        } else {
+            // =========================================================================
+            // REMOTE NETWORK MODE: Package and forward an interactive .pls streaming container
+            // =========================================================================
+            if (gFrontendDebugEnable) {
+                std::printf("[HYBRID LAUNCHER] Remote user context matched! Streaming PLS shortcut file downstream.\n");
+                std::fflush(stdout);
+            }
+
+            std::string plsContent = "[playlist]\r\n";
+            plsContent += "NumberOfEntries=1\r\n";
+            plsContent += "File1=" + targetUrl + "\r\n";
+            plsContent += "Title1=HaikuDVR Live - Channel " + channel + "\r\n";
+            plsContent += "Length1=-1\r\n";
+            plsContent += "Version=2\r\n";
+
+            std::string responseHeaders = 
+                "HTTP/1.1 200 OK\r\n"
+                "Server: HaikuOS HaikuDVR-MediaServer/1.0\r\n"
+                "Content-Type: audio/x-scpls\r\n" 
+                "Content-Disposition: attachment; filename=\"live_stream.pls\"\r\n"
+                "Content-Length: " + std::to_string(plsContent.length()) + "\r\n"
+                "Connection: close\r\n\r\n";
+
+            send(clientFd, responseHeaders.c_str(), responseHeaders.length(), 0);
+            send(clientFd, plsContent.c_str(), plsContent.length(), 0);
+            close(clientFd);
         }
-
-        pid_t processId = fork();
-        if (processId == 0) {
-            // Child scope: Spin up the desktop player overlay
-            char* playerArgs[3];
-            playerArgs[0] = (char*)binaryPath;
-            playerArgs[1] = (char*)targetUrl.c_str();
-            playerArgs[2] = nullptr; 
-            
-            execv(playerArgs[0], playerArgs);
-            _exit(1); 
-        }
-
-
-        // Return a response to the dashboard browser window
-        json resp = {{"status", "success"}, {"message", "Player application fired up on Haiku desktop workspace."}};
-        SendJsonResponse(clientFd, 200, "OK", resp.dump());
     }
+
+
+
+
+
 
 
     // Endpoint: GET / — Serves an in-memory visual web dashboard panel
@@ -1145,16 +1219,34 @@ private:
 			"      };\n"
 
 			"      \n"
-			"      // DESKTOP LAUNCHER BUTTON BANNER\n"
-			"      playerBox.innerHTML = '<button class=\"btn\" style=\"background:#107c41; margin-bottom:10px; width:100%; padding:10pxTrigger;\" id=\"play-live-btn\">Launch Player App Natively on Haiku Screen</button>';\n"
+			"      // CLIENT-SIDE ADAPTIVE HYBRID FETCH ROUTE\n"
+			"      playerBox.innerHTML = '<button class=\"btn\" style=\"background:#107c41; margin-bottom:10px; width:100%; padding:10px;\" id=\"play-live-btn\">Watch Live</button>';\n"
 			"      setTimeout(() => {\n"
 			"        let btn = document.getElementById('play-live-btn');\n"
 			"        if(btn) btn.onclick = () => {\n"
+			"          closeModal();\n"
+			"          \n"
+			"          // FIXED: We handle everything silently via fetch. No window.location.href redirects at the top!\n"
 			"          fetch('/api/desktop/play?ch=' + item.channel)\n"
-			"            .then(r => r.json())\n"
-			"            .then(() => { closeModal(); });\n"
+			"            .then(res => {\n"
+			"              let contentType = res.headers.get('content-type');\n"
+			"              if (contentType && contentType.includes('audio/x-scpls')) {\n"
+			"                // REMOTE CLIENT: Transform payload into an active playlist file trigger\n"
+			"                return res.blob().then(blob => {\n"
+			"                  let url = window.URL.createObjectURL(blob);\n"
+			"                  let a = document.createElement('a');\n"
+			"                  a.href = url; a.download = 'live_stream.pls';\n"
+			"                  document.body.appendChild(a); a.click(); a.remove();\n"
+			"                });\n"
+			"              } else {\n"
+			"                // LOCAL CLIENT: Local fork handled on backend, do nothing on the browser side\n"
+			"                return res.json();\n"
+			"              }\n"
+			"            }).catch(err => console.log('Playback handshake failed', err));\n"
 			"        };\n"
 			"      }, 50);\n"
+
+
 			"    }\n"
 			"    document.getElementById('details-modal').style.display = 'flex';\n"
 			"  }\n"
