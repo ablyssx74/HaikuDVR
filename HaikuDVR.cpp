@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.40 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.41 (Haiku OS)";
 }
 
 const uint32 MSG_TOGGLE_DLNA			    = 'dlna';
@@ -165,14 +165,15 @@ struct RecordingConfig {
 
 struct ScheduleItem {
     std::string startDate;
-    std::string startTime;     // Human-readable serialization string ("19:00")
-    time_t      epochStart;    // Absolute Unix epoch timestamp
-    int64       durationSec;   // Length in integer seconds
-    std::string duration;      // Human-readable serialization string ("10800")
+    std::string startTime;    
+    time_t      epochStart;   
+    int64       durationSec;  
+    std::string duration;      
     std::string channel;
     std::string channelLabel;  
     std::string tunerIp;
     std::string showTitle;
+    std::string showDescription; 
     bool        processed;
 };
 
@@ -180,8 +181,8 @@ struct ScheduleItem {
 struct UpcomingShowItem {
     std::string title;
     std::string startTimeStr; 
-    BString endTimeStr;      
-    BString description;     
+    BString endTimeStr;  
+    BString description;
     int32 durationMinutes; 
 };
 
@@ -192,7 +193,7 @@ struct ChannelGuideItem {
     int32 nowPlayingDurationMinutes; 
     std::vector<UpcomingShowItem> futureLineup; 
     std::string nowPlayingEndTimeStr;
-    std::string nowPlayingDescription;
+    std::string nowPlayingDescription; 
 };
 
 struct GuideProgramBlock {
@@ -201,7 +202,7 @@ struct GuideProgramBlock {
     float cellWidthPixels; 
     int32 durationMinutes; 
     BString endTimeStr;  
-    BString description;  
+    BString description; 
 };
 
 struct GuideRowModel {
@@ -235,11 +236,11 @@ void SaveSchedulesToDisk() {
                 {"date", item.startDate}, 
                 {"time", item.startTime},
                 {"channel", item.channel},
-                {"channel_label", item.channelLabel}, // Preserve UI labels
                 {"duration", item.duration},
                 {"processed", item.processed},       // Track state safely
                 {"tuner_ip", item.tunerIp},
-                {"show_title", item.showTitle}
+                {"show_title", item.showTitle},
+                {"show_description", item.showDescription} // FIXED: Exports split catalog descriptions cleanly to JSON disk space
             });
         }
     }
@@ -252,6 +253,7 @@ void SaveSchedulesToDisk() {
         file.close();
     }
 }
+
 
 
 
@@ -294,11 +296,15 @@ void LoadSchedulesFromDisk() {
                     item.startDate    = entry.value("date", "2026-06-23"); 
                     item.startTime    = entry.value("time", "12:00");
                     item.channel      = entry.value("channel", "5.1");
-                    item.channelLabel = entry.value("channel_label", ""); // Added
+                    //item.channelLabel = entry.value("channel_label", ""); 
                     item.duration     = entry.value("duration", "1800");
                     item.tunerIp      = entry.value("tuner_ip", ""); 
                     item.showTitle    = entry.value("show_title", "Unknown_Show");
-                    item.processed    = entry.value("processed", false);   // Added
+                    
+                    // FIXED: Read description strings safely out of object collections
+                    item.showDescription = entry.value("show_description", "No description available.");
+                    
+                    item.processed    = entry.value("processed", false);   
 
                     // Added computation conversions for our layout math engine
                     item.durationSec  = std::atoll(item.duration.c_str());
@@ -321,11 +327,15 @@ void LoadSchedulesFromDisk() {
                 item.startDate    = entry.value("date", "2026-06-23"); 
                 item.startTime    = entry.value("time", "12:00");
                 item.channel      = entry.value("channel", "5.1");
-                item.channelLabel = entry.value("channel_label", ""); // Added
+               // item.channelLabel = entry.value("channel_label", ""); 
                 item.duration     = entry.value("duration", "1800");
                 item.tunerIp      = entry.value("tuner_ip", "");
                 item.showTitle    = entry.value("show_title", "Unknown_Show"); 
-                item.processed    = entry.value("processed", false);   // Added
+                
+                // FIXED: Read description strings safely out of legacy arrays
+                item.showDescription = entry.value("show_description", "No description available.");
+                
+                item.processed    = entry.value("processed", false);   
 
                 // Added computation conversions for our layout math engine
                 item.durationSec  = std::atoll(item.duration.c_str());
@@ -341,6 +351,7 @@ void LoadSchedulesFromDisk() {
     }
     file.close();
 }
+
 
 
 
@@ -1965,7 +1976,8 @@ public:
                 const auto& selectedProg = fData.programs[targetCellIndex];
 
                 BMessage selectionBroadcast(MSG_PREFILL_RECORD_SCHEDULE);
-                selectionBroadcast.AddString("show_title", selectedProg.title.String());
+                selectionBroadcast.AddString("show_title", selectedProg.title.String());                
+                selectionBroadcast.AddString("show_description", selectedProg.description.String());                
                 selectionBroadcast.AddString("channel_label", fData.channelLabel.String());
                 selectionBroadcast.AddInt32("duration_minutes", selectedProg.durationMinutes);
                 
@@ -2006,6 +2018,7 @@ public:
                 } else {
                     standardized24HourTime = rawDisplayTime; 
                 }
+
 
                 // Pack both formats so all backend versions extract it flawlessly
                 selectionBroadcast.AddString("start_time", standardized24HourTime.c_str());
@@ -2636,12 +2649,36 @@ public:
                         }
 
                         if (matchingActiveIndex != -1) {
-                            removeItem = new BMenuItem("Remove Queue", NULL);
+                            BMessage* delMsg = new BMessage(MSG_REMOVE_SCHEDULE);
+                            delMsg->AddInt32("list_index", matchingActiveIndex);
+                            
+                            removeItem = new BMenuItem("Remove Queue", delMsg);
                             contextMenu->AddItem(removeItem);
                         } else {
-                            queueItem = new BMenuItem("Add to Queue", NULL);
+                            const auto& targetProgramBlock = item->fData.programs[cellIndex];
+                            
+                            BMessage* queueMsg = new BMessage(MSG_PREFILL_RECORD_SCHEDULE);
+                            queueMsg->AddString("show_title", targetProgramBlock.title.String());
+                            
+                            // FIXED KEY NAME ALIGNMENT TO SYNC WITH THE AUTOMATED ENGINE
+                            queueMsg->AddString("show_description", targetProgramBlock.description.String());
+                            
+                            queueMsg->AddString("start_time", targetProgramBlock.timeDisplay.String());
+                            queueMsg->AddString("numeric_subchannel", cleanNumberOnly.String());
+                            queueMsg->AddInt32("duration_minutes", targetProgramBlock.durationMinutes);
+                            queueMsg->AddBool("auto_commit_queue", true); 
+
+                            bool advanceDay = (cellIndex > 0 && 
+                                               targetProgramBlock.timeDisplay.IFindFirst("AM") != B_ERROR && 
+                                               item->fData.programs[0].timeDisplay.IFindFirst("PM") != B_ERROR);
+                            
+                            queueMsg->AddBool("advance_calendar_day", advanceDay);
+
+                            queueItem = new BMenuItem("Add to Queue", queueMsg);
                             contextMenu->AddItem(queueItem);
                         }
+
+
 
                         contextMenu->AddSeparatorItem();
                         BMenuItem* viewRecsItem = new BMenuItem("Open Recordings", new BMessage(MSG_VIEW_RECORDINGS));
@@ -2690,9 +2727,11 @@ public:
                             const auto& targetProg = item->fData.programs[rootCellIndex];
 
                             BMessage selectionBroadcast(MSG_PREFILL_RECORD_SCHEDULE);
-                            selectionBroadcast.AddString("show_title", targetProg.title.String());
+                            selectionBroadcast.AddString("show_title", targetProg.title.String());                            
+                            selectionBroadcast.AddString("show_description", targetProg.description.String());                            
                             selectionBroadcast.AddString("channel_label", item->fData.channelLabel.String());
                             selectionBroadcast.AddInt32("duration_minutes", targetProg.durationMinutes);
+
                             
                             BString targetSubchannel = item->fData.channelLabel;
                             int32 spaceIndex = targetSubchannel.FindFirst(" ");
@@ -3000,6 +3039,7 @@ public:
 		            liveChan.nowPlayingDurationMinutes,
 		            liveChan.nowPlayingEndTimeStr.c_str(),  
 		            SanitizeTextEngine(liveChan.nowPlayingDescription.c_str()).String() // Sanitized Description
+		            
 		        });
 		        
 		        for (const auto& nextShow : liveChan.futureLineup) {
@@ -3020,6 +3060,7 @@ public:
 		                nextShow.durationMinutes,
 		                nextShow.endTimeStr.String(),     
 		                SanitizeTextEngine(nextShow.description.String()).String() // Sanitized Description
+		                
 		            });
 		        }
 		        
@@ -5319,13 +5360,12 @@ public:
 
 
 
-    case MSG_PREFILL_RECORD_SCHEDULE: {
+ case MSG_PREFILL_RECORD_SCHEDULE: {
         BString showTitle, startTime, channelLabel, numericSubchannel;
         int32 durationMinutes = 0;
         
         if (message->FindString("show_title", &showTitle) == B_OK &&
             message->FindString("start_time", &startTime) == B_OK &&
-            message->FindString("channel_label", &channelLabel) == B_OK &&
             message->FindString("numeric_subchannel", &numericSubchannel) == B_OK &&
             message->FindInt32("duration_minutes", &durationMinutes) == B_OK) {
             
@@ -5429,7 +5469,7 @@ public:
             trackingNotice << showTitle;
             fStatusLabel->SetText(trackingNotice.String());
 
-                     bool autoCommit = false;
+            bool autoCommit = false;
             if (message->FindBool("auto_commit_queue", &autoCommit) == B_OK && autoCommit) {
                 std::string rawTime = processedTime.String();
 
@@ -5437,10 +5477,6 @@ public:
                     rawTime.insert(2, ":");
                 }
 
-                if (rawTime.length() == 5 && rawTime.at(0) == '0') {
-                    // rawTime = rawTime.substr(1); 
-                }
-                
                 if (fTimeInput != nullptr) {
                     fTimeInput->SetText(rawTime.c_str());
                 }
@@ -5464,6 +5500,7 @@ public:
                     }
                 }
 
+                // Parse out trailing 's' modifiers if any existed inside fSelectedDurationSeconds
                 size_t sPos = fSelectedDurationSeconds.find('s');
                 if (sPos != std::string::npos) {
                     fSelectedDurationSeconds = fSelectedDurationSeconds.substr(0, sPos); 
@@ -5513,36 +5550,71 @@ public:
                 // =========================================================================
 
                 ScheduleItem item;
-                item.startDate = finalizedRecordDate.String(); // Clean tomorrow target applied safely
-                item.startTime = rawTime; 
-                item.channel = fChannelInput->Text();
-                item.duration = fSelectedDurationSeconds; 
-                item.showTitle = showTitle.String(); 
-                item.processed = false;
-                
-                BMenuItem* markedTuner = fTunerMenu->FindMarked();
-                if (markedTuner != nullptr) {
-                    item.tunerIp = markedTuner->Label();
-                } else {
-                    item.tunerIp = fSelectedIp;
-                }
-                
-                gScheduleLocker.Lock();
-                gScheduleList.push_back(item);
-                gScheduleLocker.Unlock();
-                
-                SaveSchedulesToDisk(); 
-                RefreshScheduleListView(); 
-                if (fChannelListView != nullptr) {
-                     fChannelListView->Invalidate(); 
-                }
-                std::string confMsg = "Queued for " + item.startTime + " (Ch " + item.channel + ")";
-                fStatusLabel->SetText(confMsg.c_str());
-            }
+ 				item.startDate = finalizedRecordDate.String(); // Clean tomorrow target applied safely
+					item.startTime = rawTime;
+					item.channel = fChannelInput->Text();
+					item.duration = fSelectedDurationSeconds;
+					item.processed = false;
+					
+                // SANITIZE TITLE ENTITIES (NO UNDERSCORES)
+                BString cleanTitle(showTitle);
+                cleanTitle.Trim();
+                cleanTitle.ReplaceAll("&amp;",  "&");
+                cleanTitle.ReplaceAll("&quot;", "\"");
+                cleanTitle.ReplaceAll("&apos;", "'");
+                item.showTitle = cleanTitle.IsEmpty() ? "Live Stream" : cleanTitle.String();
 
-        }
-        break;
-    }
+					
+				// SANITIZE DESCRIPTION ENTITIES COMPLETELY BEFORE DISK ENTRY
+                BString showDesc;
+                if (message->FindString("show_description", &showDesc) == B_OK || 
+                    message->FindString("description", &showDesc) == B_OK) {
+                    showDesc.Trim();
+                    showDesc.ReplaceAll("&quot;", "\""); 
+                    showDesc.ReplaceAll("&amp;",  "&");
+                    showDesc.ReplaceAll("&apos;", "'");
+                    showDesc.ReplaceAll("&lt;",   "<");
+                    showDesc.ReplaceAll("&gt;",   ">");
+                    showDesc.Trim();
+                    item.showDescription = showDesc.IsEmpty() ? "No description available." : showDesc.String();
+                } else {
+                    item.showDescription = "No description available.";
+                }
+
+				
+				// Compute epoch metrics using our safe top-level math converter utility
+				item.durationSec = std::atoll(item.duration.c_str());
+				item.epochStart = CalculateEpoch(item.startDate, item.startTime);
+				BMenuItem* markedTuner = fTunerMenu->FindMarked();
+					if (markedTuner != nullptr) {
+						item.tunerIp = markedTuner->Label();
+						} else {
+						item.tunerIp = fSelectedIp;
+				}
+					if (!channelLabel.IsEmpty()) {
+						item.channelLabel = channelLabel.String();
+							} else {
+						item.channelLabel = "Ch_" + item.channel;
+				}
+					gScheduleLocker.Lock();
+					gScheduleList.push_back(item);
+					gScheduleLocker.Unlock();
+					SaveSchedulesToDisk();
+					RefreshScheduleListView();
+					
+					if (fChannelListView != nullptr) {
+						fChannelListView->Invalidate();
+					}
+					std::string confMsg = "Queued for " + item.startTime + " (Ch " + item.channel + ")";
+					fStatusLabel->SetText(confMsg.c_str());
+						}
+					}
+			break;
+		}               
+                
+                
+                
+                
 
 
   case MSG_DURATION_SELECTED: {
@@ -5554,7 +5626,7 @@ public:
    }
       
      
-    case MSG_ADD_SCHEDULE: {
+      case MSG_ADD_SCHEDULE: {
         std::string rawTime = fTimeInput->Text();
          
         // Format missing colon automatically if typed as a raw 4-digit number
@@ -5575,30 +5647,24 @@ public:
         item.epochStart  = CalculateEpoch(item.startDate, item.startTime);
 
         // =========================================================================
-        // 1. EXTRACT PROGRAM SHOW TITLE VIA TEXT SLICING HOOKS
+        // 1. EXTRACT PROGRAM AND DESCRIPTION DIRECTLY FROM THE LOADED CHANNELS CACHE
         // =========================================================================
         BString extractedTitle;
+        BString extractedDesc;
+
         if (fChannelListView != nullptr) {
             int32 selectedIndex = fChannelListView->CurrentSelection();
-            if (selectedIndex >= 0) {
-                ChannelListItem* listItem = (ChannelListItem*)fChannelListView->ItemAt(selectedIndex);
-                if (listItem != nullptr) {
-                    BString listRowText(listItem->textDisplay.c_str()); 
-                    
-                    int32 nowStart = listRowText.FindFirst("(Now: ");
-                    if (nowStart != B_ERROR) {
-                        int32 titleStart = nowStart + 6; 
-                        int32 nowEnd = listRowText.FindFirst(")", titleStart);
-                        
-                        if (nowEnd != B_ERROR) {
-                            listRowText.CopyInto(extractedTitle, titleStart, nowEnd - titleStart);
-                        }
-                    }
-                }
+            
+            // Safe bounds check against your actual channel data layout vector
+            if (selectedIndex >= 0 && (size_t)selectedIndex < fLoadedChannels.size()) {
+                const ChannelGuideItem& activeChannelData = fLoadedChannels[selectedIndex];
+                
+                extractedTitle = activeChannelData.nowPlaying.c_str();
+                extractedDesc  = activeChannelData.nowPlayingDescription.c_str();
             }
         }
 
-        // Status bar fallback lookup sequence if nothing was selected in the quick list
+        // Status bar text-parsing fallback routine if nothing was chosen in the list box
         if (extractedTitle.IsEmpty() && fStatusLabel != nullptr) {
             BString fullStatus = fStatusLabel->Text();
             
@@ -5626,55 +5692,44 @@ public:
         }
 
         // =========================================================================
-        // 2. SANITIZE STRING CHARACTERS AND BUILD FILE-SAFE LABEL FIELDS
+        // 2. SANITIZE FIELDS INDEPENDENTLY (No global underscore replacements!)
         // =========================================================================
         extractedTitle.Trim();
-
-        // Standardize raw XML/HTML escaped character parameters
         extractedTitle.ReplaceAll("&amp;",  "&");
         extractedTitle.ReplaceAll("&quot;", "\"");
         extractedTitle.ReplaceAll("&apos;", "'");
-        extractedTitle.ReplaceAll("&#39;",  "'");
         extractedTitle.Trim();
 
-        // Strip out any legacy manual tag strings entirely if pulled from UI fields
+        // FIXED: Clean out raw XML/HTML entities from description tags before writing to disk
+        extractedDesc.Trim();
+        extractedDesc.ReplaceAll("&quot;", "\"");
+        extractedDesc.ReplaceAll("&amp;",  "&");
+        extractedDesc.ReplaceAll("&apos;", "'");
+        extractedDesc.ReplaceAll("&lt;",   "<");
+        extractedDesc.ReplaceAll("&gt;",   ">");
+        extractedDesc.Trim();
+
+        // Strip out legacy manual tag fragments completely
         extractedTitle.ReplaceAll("Manual_Recording_", "");
         extractedTitle.ReplaceAll("Manual_Recording", "");
         extractedTitle.Trim();
 
-        BString cleanTitle = extractedTitle;
-        cleanTitle.ReplaceAll("/", "-");
-        cleanTitle.ReplaceAll(":", "-");
-        cleanTitle.ReplaceAll("\\", "-");
-        cleanTitle.ReplaceAll("*", "");
-        cleanTitle.ReplaceAll("?", "");
-        cleanTitle.ReplaceAll(" ", "_"); 
-        
-        // Squeeze out consecutive duplicate underscores
-        while (cleanTitle.FindFirst("__") != B_ERROR) {
-            cleanTitle.ReplaceAll("__", "_");
-        }
-        cleanTitle.Trim();
-
-        // =========================================================================
-        // 3. SINGLE-FIELD ASSIGNMENT (USING YOUR EXISTING showTitle)
-        // =========================================================================
-        if (cleanTitle.IsEmpty() || cleanTitle == "_") {
-            item.showTitle = "Live_Stream"; // Disk filename-safe fallback token
+        // Assign clean values natively to data types to match web configurations
+        if (extractedTitle.IsEmpty()) {
+            item.showTitle = "Live Stream";
         } else {
-            item.showTitle = cleanTitle.String(); // e.g., "American_Ninja_Warrior"
+            item.showTitle = extractedTitle.String(); // e.g. "American Ninja Warrior"
         }
 
-        // =========================================================================
-        // 4. TUNER MAPPING & METRIC COMMIT PIPELINES
-        // =========================================================================
-        BString channelLabel;
-        if (message->FindString("channel_label", &channelLabel) == B_OK) {
-            item.channelLabel = channelLabel.String();
+        if (extractedDesc.IsEmpty()) {
+            item.showDescription = "No description available.";
         } else {
-            item.channelLabel = "Ch_" + item.channel;
+            item.showDescription = extractedDesc.String(); // Pristine text summary field passed safely
         }
 
+        // =========================================================================
+        // 3. TUNER MAPPING & METRIC COMMIT PIPELINES (CLEANED)
+        // =========================================================================
         BMenuItem* markedTuner = fTunerMenu->FindMarked();
         if (markedTuner != nullptr) {
             item.tunerIp = markedTuner->Label();
@@ -5687,13 +5742,16 @@ public:
         gScheduleList.push_back(item);
         gScheduleLocker.Unlock();
          
-        SaveSchedulesToDisk(); 
+        SaveSchedulesToDisk(); // Flushes slimmed down json schema straight to disk
         RefreshScheduleListView(); 
 
         std::string confMsg = "Queued for " + item.startTime + " (Ch " + item.channel + ")";
         fStatusLabel->SetText(confMsg.c_str());
         break;
     }
+
+
+
 
 
      case MSG_START_RECORDING: {
@@ -5799,13 +5857,6 @@ public:
         if (cleanTitle.StartsWith("_")) cleanTitle.Remove(0, 1);
         if (cleanTitle.EndsWith("_")) cleanTitle.Truncate(cleanTitle.Length() - 1);
 
-        BString extractedLabel;
-        if (message->FindString("channel_label", &extractedLabel) == B_OK) {
-            config->channelLabel = extractedLabel.String();
-        } else {
-            config->channelLabel = "Ch_" + config->channel;
-        }
-
         // Assign clean parsed title text directly, avoiding "Manual_Recording" completely
         if (cleanTitle.IsEmpty()) {
             config->showTitle = "Live_Stream"; 
@@ -5815,6 +5866,7 @@ public:
 
         std::vector<std::string> foundTuners = DiscoverAllTuners();
         BMenuItem* markedTuner = fTunerMenu->FindMarked();
+
         
         if (markedTuner != nullptr) {
             config->ip = markedTuner->Label();

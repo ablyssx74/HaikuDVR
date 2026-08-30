@@ -61,9 +61,9 @@ struct ScheduleItem {
     int64       durationSec;   
     std::string duration;      
     std::string channel;
-    std::string channelLabel; 
     std::string tunerIp;
     std::string showTitle;
+    std::string showDescription; 
     bool        processed;
 };
 
@@ -192,10 +192,10 @@ void LoadSchedulesFromDisk() {
                     item.startDate    = entry.value("date", "2026-06-23"); 
                     item.startTime    = entry.value("time", "12:00");
                     item.channel      = entry.value("channel", "5.1");
-                    item.channelLabel = entry.value("channel_label", ""); // Track frontend labels safely
                     item.duration     = entry.value("duration", "1800");                    
                     item.tunerIp      = entry.value("tuner_ip", ""); 
                     item.showTitle    = entry.value("show_title", "Unknown_Show"); 
+                    item.showDescription = entry.value("show_description", "No description available."); 
                     item.processed    = entry.value("processed", false);
                     
                     // Added calculation math metrics generation for background workers
@@ -236,11 +236,11 @@ void SaveSchedulesToDisk() {
             {"date", item.startDate},
             {"time", item.startTime},
             {"channel", item.channel},
-            {"channel_label", item.channelLabel}, // Preserve custom labels on export
             {"duration", item.duration},
             {"processed", item.processed},
             {"tuner_ip", item.tunerIp},
-            {"show_title", item.showTitle} 
+            {"show_title", item.showTitle},
+            {"show_description", item.showDescription}  
         });
     }
     jRoot["schedules"] = jSchedules;
@@ -400,6 +400,35 @@ static std::string GetLiveSystemIP() {
     }
     return detectedIp;
 }
+
+// Standardized utility to turn raw XML/HTML entity codes back into plain text string symbols
+static std::string DecodeHtmlEntities(const std::string& input) {
+    if (input.empty()) return "";
+    
+    std::string result = input;
+    
+    // Create a sequential replace helper structure
+    struct EntityPair { std::string encoded; std::string decoded; };
+    const EntityPair mappings[] = {
+        {"&quot;", "\""},
+        {"&amp;",  "&"},
+        {"&apos;", "'"},
+        {"&#39;",  "'"},
+        {"&lt;",   "<"},
+        {"&gt;",   ">"}
+    };
+
+    for (const auto& pair : mappings) {
+        size_t pos = 0;
+        while ((pos = result.find(pair.encoded, pos)) != std::string::npos) {
+            result.replace(pos, pair.encoded.length(), pair.decoded);
+            pos += pair.decoded.length(); // Advance past the decoded text insertion layout
+        }
+    }
+    
+    return result;
+}
+
 
 static int32 dlna_discovery_worker_thread(void* data) {
     DlnasDiscoveryServer* server = static_cast<DlnasDiscoveryServer*>(data);
@@ -791,84 +820,87 @@ static int32 HttpWorkerLoop(void* data) {
                 }
 
                 // =========================================================================
-                // CLEANED WEB DASHBOARD REMOTE CONTROL ROUTING MATRIX
-                // =========================================================================
-                
-                // --- VISUAL USER WEB INTERFACE CONTROL DASHBOARD PANEL ---
-                if (req.find("GET / ") != std::string::npos || req.find("GET /index.html") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP DASHBOARD] Serving Admin Dashboard View\n");
-                    self->ServeAdminDashboard(clientFd);
-                }         
-                // --- CUSTOM INTEGRATED DESKTOP REMOTE PLAYER ENDPOINT ---
-                else if (req.find("GET /api/desktop/play?ch=") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/desktop/play\n");
-                    self->HandleDesktopAppLaunch(clientFd, req);
-                }
-                // --- CUSTOM INTEGRATED ADMIN API ENDPOINTS ---
-                else if (req.find("GET /api/guide") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/guide\n");
-                    self->HandleGetTvGuide(clientFd, req); 
-                } 
-
-                else if (req.find("GET /api/search?q=") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/search\n");
-                    self->HandleApiSearch(clientFd, req);
-                }
-                else if (req.find("GET /api/schedules") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: GET /api/schedules\n");
-                    self->HandleGetSchedules(clientFd);
-                } 
-                else if (req.find("POST /api/schedules/add") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: POST /api/schedules/add\n");
-                    self->HandleAddSchedule(clientFd, req);
-                } 
-                else if (req.find("POST /api/schedules/delete") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: POST /api/schedules/delete\n");
-                    self->HandleDeleteSchedule(clientFd, req);
-                }
-
-                // --- ORIGINAL DLNA MEDIA ENGINE DISPATCHERS (Protected by your runtime flag) ---
-                else if (req.find("GET /description.xml") != std::string::npos) {
-                    if (!gFrontendDlnaEnable) {
-                        const char* serviceUnavailable = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        send(clientFd, serviceUnavailable, std::strlen(serviceUnavailable), 0);
-                    } else {
-                        if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET description.xml\n");
-                        self->ServeDescription(clientFd);                    
-                    }
-                } 
-                else if (req.find("GET /ContentDirectory/scpd.xml") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET scpd.xml\n");
-                    self->ServeScpd(clientFd);   
-                } 
-                else if ((req.find("POST ") == 0 || req.find("\nPOST ") != std::string::npos) && 
-                           (req.find("/ContentDirectory/control") != std::string::npos || 
-                            req.find("/ctl/ContentDir") != std::string::npos)) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched safely: POST ContentDirectory\n");
-                    self->ServeContentDirectory(clientFd, req);
-                } 
-                else if (req.find("GET /video/") != std::string::npos) {
-                    if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET Video Streaming\n");
-                    self->StreamVideoFile(clientFd, req);
-                } 
-                
-                // --- UNKNOWN ENDPOINT FALLBACK ---
-                else {
-                    const char* notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    send(clientFd, notFound, std::strlen(notFound), 0);
-                    close(clientFd);
-                }
-
-                // =========================================================================
-                // SIMPLIFIED ROUTE TERMINATION GUARD
-                // =========================================================================
-                // Delegates socket life cycles ONLY to your active long-running library file streams
-                if (req.find("GET /video/") == std::string::npos) {
-                    close(clientFd);
-                }
-            });
-            handler.detach();
-        }
+	            // CLEANED WEB DASHBOARD REMOTE CONTROL ROUTING MATRIX
+	            // =========================================================================
+	            
+	            // --- VISUAL USER WEB INTERFACE CONTROL DASHBOARD PANEL ---
+	            if (req.find("GET / ") != std::string::npos || req.find("GET /index.html") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP DASHBOARD] Serving Admin Dashboard View\n");
+	                self->ServeAdminDashboard(clientFd);
+	            }         
+	            // --- CUSTOM INTEGRATED DESKTOP REMOTE PLAYER ENDPOINT ---
+	            else if (req.find("GET /api/desktop/play?ch=") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/desktop/play\n");
+	                self->HandleDesktopAppLaunch(clientFd, req);
+	            }
+	            // --- CUSTOM INTEGRATED ADMIN API ENDPOINTS ---
+	            else if (req.find("GET /api/guide") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/guide\n");
+	                self->HandleGetTvGuide(clientFd, req); 
+	            } 
+	            else if (req.find("GET /api/search?q=") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/search\n");
+	                self->HandleApiSearch(clientFd, req);
+	            }
+	            else if (req.find("GET /api/schedules") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: GET /api/schedules\n");
+	                self->HandleGetSchedules(clientFd);
+	            } 
+	            else if (req.find("GET /api/tuners") != std::string::npos) { 
+	                if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: GET /api/tuners\n");
+	                self->HandleGetTuners(clientFd);
+	            }
+	            else if (req.find("POST /api/schedules/add") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: POST /api/schedules/add\n");
+	                self->HandleAddSchedule(clientFd, req);
+	            } 
+	            else if (req.find("POST /api/schedules/delete") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: POST /api/schedules/delete\n");
+	                self->HandleDeleteSchedule(clientFd, req);
+	            }
+	
+	            // --- ORIGINAL DLNA MEDIA ENGINE DISPATCHERS (Protected by your runtime flag) ---
+	            else if (req.find("GET /description.xml") != std::string::npos) {
+	                if (!gFrontendDlnaEnable) {
+	                    const char* serviceUnavailable = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	                    send(clientFd, serviceUnavailable, std::strlen(serviceUnavailable), 0);
+	                } else {
+	                    if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET description.xml\n");
+	                    self->ServeDescription(clientFd);                    
+	                }
+	            } 
+	            else if (req.find("GET /ContentDirectory/scpd.xml") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET scpd.xml\n");
+	                self->ServeScpd(clientFd);   
+	            } 
+	            else if ((req.find("POST ") == 0 || req.find("\nPOST ") != std::string::npos) && 
+	                       (req.find("/ContentDirectory/control") != std::string::npos || 
+	                        req.find("/ctl/ContentDir") != std::string::npos)) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched safely: POST ContentDirectory\n");
+	                self->ServeContentDirectory(clientFd, req);
+	            } 
+	            else if (req.find("GET /video/") != std::string::npos) {
+	                if (gFrontendDebugEnable) std::printf("[HTTP THREAD] Route matched: GET Video Streaming\n");
+	                self->StreamVideoFile(clientFd, req);
+	            } 
+	            
+	            // --- UNKNOWN ENDPOINT FALLBACK ---
+	            else {
+	                const char* notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	                send(clientFd, notFound, std::strlen(notFound), 0);
+	                close(clientFd);
+	            }
+	
+	            // =========================================================================
+	            // SIMPLIFIED ROUTE TERMINATION GUARD
+	            // =========================================================================
+	            // Delegates socket life cycles ONLY to your active long-running library file streams
+	            if (req.find("GET /video/") == std::string::npos) {
+	                close(clientFd);
+	            }
+	        });
+	        handler.detach();
+	    }
 
 
 
@@ -1074,25 +1106,36 @@ private:
             "      <div id='guide-target'>Loading guide rows from engine...</div>\n"
             "    </div>\n"
             "    <div>\n"
-            "      <div class='card' style='margin-bottom: 20px;'>\n"
-            "        <h2>Quick-Schedule Recording</h2>\n"
-            "        <form id='sched-form'>\n"
-            "          <div class='form-group'><label>Show Title</label><input type='text' id='title' required value='Web Scheduled Recording'></div>\n"
-            "          <div class='form-group'><label>Channel (LCN)</label><input type='text' id='channel' placeholder='e.g. 5.1' required></div>\n"
-            "          <div class='form-group'><label>Start Date</label><input type='date' id='date' required></div>\n"
-            "          <div class='form-group'><label>Start Time</label><input type='time' id='time' required></div>\n"
-            "          <div class='form-group'><label>Duration</label>"
-            "            <select id='duration'>\n"
-            "              <option value='1800'>30 Minutes</option>\n"
-            "              <option value='3600' selected>1 Hour</option>\n"
-            "              <option value='7200'>2 Hours</option>\n"
-            "              <option value='10800'>3 Hours</option>\n" 
-            "              <option value='14400'>4 Hours</option>\n" 
-            "            </select>\n"
-            "          </div>\n"
-            "          <button type='submit' class='btn'>Add Active Recording Task</button>\n"
-            "        </form>\n"
-            "      </div>\n"
+
+			"      <div class='card' style='margin-bottom: 20px;'>\n"
+			"        <h2>Quick-Schedule Recording</h2>\n"
+			"        <form id='sched-form'>\n"
+			"          <!-- HIDDEN FIELD FOR SHOW DESCRIPTIONS -->\n"
+			"          <input type='hidden' id='hidden-desc' value=''>\n"
+			"          <div class='form-group'><label>Show Title</label><input type='text' id='title' required value='Web Scheduled Recording'></div>\n"
+			"          <div class='form-group'><label>Channel (LCN)</label><input type='text' id='channel' placeholder='e.g. 5.1' required></div>\n"
+
+			"          <div class='form-group'><label>Start Date</label><input type='date' id='date' required></div>\n"
+			"          <div class='form-group'><label>Start Time</label><input type='time' id='time' required></div>\n"
+			"          <div class='form-group'><label>Target Tuner Hardware (HDHomeRun)</label>\n"
+			"            <select id='tuner-ip'>\n"
+			"              <option value=''>Auto-Select (Default)</option>\n"
+			"              <!-- Populated dynamically via the libhdhomerun endpoint -->\n"
+			"            </select>\n"
+			"          </div>\n"
+			"          <div class='form-group'><label>Duration</label>"
+			"            <select id='duration'>\n"
+			"              <option value='1800'>30 Minutes</option>\n"
+			"              <option value='3600' selected>1 Hour</option>\n"
+			"              <option value='7200'>2 Hours</option>\n"
+			"              <option value='10800'>3 Hours</option>\n" 
+			"              <option value='14400'>4 Hours</option>\n" 
+			"            </select>\n"
+			"          </div>\n"
+			"          <button type='submit' class='btn'>Add Active Recording Task</button>\n"
+			"        </form>\n"
+			"      </div>\n"
+
             "      <div class='card'>\n"
             "        <h2>Active Task Schedules</h2>\n"
             "        <div id='schedule-target'>No active tasks recorded.</div>\n"
@@ -1117,6 +1160,25 @@ private:
             "  let guideCache = [];\n"
             "  let scheduleCache = [];\n"
             "  let activeLivePlayer = null;\n"
+            "  let currentSelectedDescription = '';\n" 
+            "\n"
+            "  function loadGuide() {\n"
+            "    let dt = document.getElementById('guide-date').value;\n"
+            "    let tm = document.getElementById('guide-time').value;\n"
+            "    let url = '/api/guide';\n"
+            "    if(dt && tm) { url += '?dt=' + dt + '&tm=' + encodeURIComponent(tm); }\n"
+            "    \n"
+            "    fetch(url).then(r => r.json()).then(data => {\n"
+            "      guideCache = data;\n"
+            "      let html = '';\n"
+            "      if(data.length === 0) { html = '<p style=\"color:#888; padding:10px;\">No broadcasts found for this time slot.</p>'; }\n"
+            "      data.forEach((p, idx) => {\n"
+            "        let displayDate = p.air_date ? p.air_date + ' | ' : '';\n"
+            "        html += '<div class=\"program-row\" onclick=\"showProgramDetails(' + idx + ', false)\"><div><strong>' + p.title + '</strong><br><small style=\"color:#888;\">' + displayDate + p.start_time + ' - ' + p.end_time + '</small></div><div style=\"text-align:right;\"><span class=\"badge\">Ch ' + p.channel + '</span></div></div>';\n"
+            "      });\n"
+            "      document.getElementById('guide-target').innerHTML = html;\n"
+            "    });\n"
+            "  }\n"
             "\n"
 			"  function loadGuide() {\n"
 			"    let dt = document.getElementById('guide-date').value;\n"
@@ -1191,6 +1253,9 @@ private:
 			"        document.getElementById('title').value = title;\n"
 			"        document.getElementById('channel').value = item.channel;\n"
 			"        \n"
+			"        // FIXED: Push description info cleanly into the form storage right here\n"
+			"        document.getElementById('hidden-desc').value = item.description || item.show_description || 'No description available.';\n"
+			"        \n"
 			"        if (item.air_date) {\n"
 			"          document.getElementById('date').value = item.air_date;\n"
 			"        }\n"
@@ -1217,6 +1282,7 @@ private:
 			"        closeModal(); \n"
 			"        document.getElementById('title').focus();\n"
 			"      };\n"
+
 
 			"      \n"
 			"      // CLIENT-SIDE ADAPTIVE HYBRID FETCH ROUTE\n"
@@ -1245,12 +1311,10 @@ private:
 			"            }).catch(err => console.log('Playback handshake failed', err));\n"
 			"        };\n"
 			"      }, 50);\n"
-
-
 			"    }\n"
+			
 			"    document.getElementById('details-modal').style.display = 'flex';\n"
 			"  }\n"
-
             "  \n"
 			"  function destroyActivePlayer() {\n"
 			"      if(activeLivePlayer !== null) {\n"
@@ -1275,7 +1339,7 @@ private:
 			"    }\n"
 			"  }\n"
 			"  \n"
-			"  // FIXED: Form listener no longer overwrites or resets titles unexpectedly\n"
+			
 			"  document.getElementById('sched-form').addEventListener('submit', (e) => {\n"
 			"    e.preventDefault();\n"
 			"    let payload = {\n"
@@ -1283,8 +1347,11 @@ private:
 			"      channel: document.getElementById('channel').value,\n"
 			"      date: document.getElementById('date').value,\n"
 			"      time: document.getElementById('time').value,\n"
-			"      duration: document.getElementById('duration').value\n"
+			"      tuner_ip: document.getElementById('tuner-ip').value,\n"
+			"      duration: document.getElementById('duration').value,\n"
+			"      description: document.getElementById('hidden-desc').value\n" 
 			"    };\n"
+			"    \n"
 			"    fetch('/api/schedules/add', {\n"
 			"      method: 'POST',\n"
 			"      headers: { 'Content-Type': 'application/json' },\n"
@@ -1292,34 +1359,42 @@ private:
 			"    }).then(r => {\n"
 			"      if(r.ok) {\n"
 			"        loadSchedules();\n"
-			"        // Clear the form fields naturally instead of hardcoding a placeholder text\n"
 			"        document.getElementById('title').value = '';\n"
 			"        document.getElementById('channel').value = '';\n"
+			"        document.getElementById('tuner-ip').value = '';\n"
+			"        document.getElementById('hidden-desc').value = '';\n" 
 			"      } else {\n"
 			"        alert('Failed to save schedule on server.');\n"
 			"      }\n"
 			"    });\n"
 			"  });\n"
+
+			
 			"  \n"
-			"  // Updated Asynchronous Live Search Input Listener\n"
-			"  document.getElementById('search-box').addEventListener('input', (e) => {\n"
-			"    let query = e.target.value.trim();\n"
-			"    if (query.length < 2) {\n"
-			"      loadGuide();\n"
-			"      return;\n"
-			"    }\n"
-			"    fetch('/api/search?q=' + encodeURIComponent(query))\n"
-			"      .then(r => r.json())\n"
-			"      .then(data => {\n"
-			"        let html = '';\n"
-			"        if (data.length === 0) { html = '<p style=\"color:#888; padding:10px;\">No matching programs discovered.</p>'; }\n"
-			"        data.forEach((p, idx) => {\n"
-			"          let displayDate = p.air_date ? p.air_date + ' | ' : '';\n"
-			"          html += '<div class=\"program-row\" onclick=\"showProgramDetails(\' + idx + \', false)\"><div><strong>' + p.title + '</strong><br><small style=\"color:#888;\">' + displayDate + p.start_time + ' - ' + p.end_time + '</small></div><div style=\"text-align:right;\"><span class=\"badge\">Ch ' + p.channel + '</span></div></div>';\n"
-			"        });\n"
-			"        document.getElementById('guide-target').innerHTML = html;\n"
-			"      });\n"
-			"  });\n"
+
+            "  document.getElementById('search-box').addEventListener('input', (e) => {\n"
+            "      let query = e.target.value.trim();\n"
+            "      if (query.length < 2) {\n"
+            "        loadGuide();\n"
+            "        return;\n"
+            "      }\n"
+            "      fetch('/api/search?q=' + encodeURIComponent(query))\n"
+            "        .then(r => r.json())\n"
+            "        .then(data => {\n"
+            "          guideCache = data;\n"
+            "          let html = '';\n"
+            "          if (data.length === 0) { html = '<p style=\"color:#888; padding:10px;\">No matching programs discovered.</p>'; }\n"
+            "          data.forEach((p, idx) => {\n"
+            "            let displayDate = p.air_date ? p.air_date + ' | ' : '';\n"
+            "            html += `<div class=\"program-row\" onclick=\"showProgramDetails(${idx}, false)\"><div><strong>${p.title}</strong><br><small style=\"color:#888;\">${displayDate}${p.start_time} - ${p.end_time}</small></div><div style=\"text-align:right;\"><span class=\"badge\">Ch ${p.channel}</span></div></div>`;\n"
+            "          });\n"
+            "          document.getElementById('guide-target').innerHTML = html;\n"
+            "        });\n"
+            "  });\n"
+
+
+
+
 			"  \n"
 			"  try {\n"
 			"    let now = new Date();\n"
@@ -1336,6 +1411,53 @@ private:
 			"    document.getElementById('guide-time').value = localISOTime;\n"
 			"  } catch(err) {}\n"
 			"  \n"
+			  // Tuner IP Function
+			"	  function loadTuners() {\n"
+			"	    fetch('/api/tuners')\n"
+			"	      .then(r => r.json())\n"
+			"	      .then(tunerList => {\n"
+			"	        let select = document.getElementById('tuner-ip');\n"
+				        // Clear previous state and reset the fallback choice anchor
+			"	        select.innerHTML = '<option value="">Auto-Select (Default)</option>';\n"
+				        
+			"	        if (!tunerList || tunerList.length === 0) {\n"
+			"	          let opt = document.createElement('option');\n"
+			"	          opt.value = '';\n"
+			"	          opt.innerText = 'No HDHomeRun hardware detected';\n"
+			"	          opt.disabled = true;\n"
+			"	          select.appendChild(opt);\n"
+			"	          return;\n"
+			"	        }\n"
+				
+			"	        tunerList.forEach(ip => {\n"
+			"	          let opt = document.createElement('option');\n"
+			"	          opt.value = ip;\n"
+			"	          opt.innerText = 'HDHomeRun Unit (' + ip + ')';\n"
+			"	          select.appendChild(opt);\n"
+			"	        });\n"
+			"	      })\n"
+			"	      .catch(err => console.error('Could not communicate with HDHomeRun tuner API', err));\n"
+			"	  }\n"
+				
+				  // Find your boot sequence line and register it:
+			"	  try {\n"
+			"	    let now = new Date();\n"
+			"	    let localISODate = now.toLocaleDateString('sv');\n"
+			"	    let hh = String(now.getHours()).padStart(2, '0');\n"
+			"	    let mm = String(now.getMinutes()).padStart(2, '0');\n"
+			"	    let localISOTime = hh + ':' + mm;\n"
+				    
+			"	    document.getElementById('date').value = localISODate;\n"
+			"	    document.getElementById('guide-date').value = localISODate;\n"
+			"	    document.getElementById('guide-time').value = localISOTime;\n"
+			"	  } catch(err) {}\n"
+				  
+				  // RUN HARDWARE DISCOVERY ON PAGE LOAD
+			"	  loadGuide();\n"
+			"	  loadSchedules();\n" 
+			"	  loadTuners();\n" // <-- Populates tuner addresses directly on page entrance
+			"	  setInterval(loadSchedules, 6000);\n"
+
 			"  loadGuide(); loadSchedules();\n"
 			"  setInterval(loadSchedules, 6000);\n"
 
@@ -1441,29 +1563,49 @@ private:
         json jResults = json::array();
 
         if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                const char* title   = (const char*)sqlite3_column_text(stmt, 0);
-                const char* lcn     = (const char*)sqlite3_column_text(stmt, 1);
-                const char* start   = (const char*)sqlite3_column_text(stmt, 2);
-                const char* end     = (const char*)sqlite3_column_text(stmt, 3);
-                const char* desc    = (const char*)sqlite3_column_text(stmt, 4);
-                const char* airDate = (const char*)sqlite3_column_text(stmt, 5); 
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* title   = (const char*)sqlite3_column_text(stmt, 0);
+            const char* lcn     = (const char*)sqlite3_column_text(stmt, 1);
+            const char* start   = (const char*)sqlite3_column_text(stmt, 2);
+            const char* end     = (const char*)sqlite3_column_text(stmt, 3);
+            const char* desc    = (const char*)sqlite3_column_text(stmt, 4); 
+            const char* airDate = (const char*)sqlite3_column_text(stmt, 5); 
 
-                // Extract epoch timestamps from columns 6 and 7
-                int64_t startEpoch = (int64_t)sqlite3_column_int64(stmt, 6);
-                int64_t endEpoch   = (int64_t)sqlite3_column_int64(stmt, 7);
-                int64_t durationSec = endEpoch - startEpoch;
+            int64_t startEpoch = (int64_t)sqlite3_column_int64(stmt, 6);
+            int64_t endEpoch   = (int64_t)sqlite3_column_int64(stmt, 7);
+            int64_t durationSec = endEpoch - startEpoch;
 
-                jResults.push_back({
-                    {"title", title ? title : "Unknown"},
-                    {"channel", lcn ? lcn : "??"},
-                    {"start_time", start ? start : "--:--"},
-                    {"end_time", end ? end : "--:--"},
-                    {"description", desc ? desc : "No description available."},
-                    {"air_date", airDate ? airDate : ""},
-                    {"duration", durationSec} // Sent down cleanly to frontend matcher
-                });
+            // FIXED: Clean title and description strings completely before packaging
+            std::string cleanTitle = title ? DecodeHtmlEntities(title) : "Unknown";
+            std::string cleanDesc  = desc ? DecodeHtmlEntities(desc) : "No description available.";
+            std::string sLcn = lcn ? lcn : "??";
+            std::string sAirDate = airDate ? airDate : "";
+            std::string sStart = start ? start : "--:--";
+
+            // Maintain your gScheduleList cross-matching tuner loops normally here...
+            std::string pairedTunerIp = ""; 
+            gScheduleLocker.Lock();
+            for (const auto& item : gScheduleList) {
+                if (item.channel == sLcn && item.startDate == sAirDate && item.startTime == sStart) {
+                    pairedTunerIp = item.tunerIp;
+                    break;
+                }
             }
+            gScheduleLocker.Unlock();
+
+            jResults.push_back({
+                {"title", cleanTitle},
+                {"channel", sLcn},
+                {"start_time", sStart},
+                {"end_time", end ? end : "--:--"},
+                {"description", cleanDesc}, // Pure human-readable quotation characters
+                {"show_description", cleanDesc},
+                {"air_date", sAirDate},
+                {"duration", durationSec},
+                {"tuner_ip", pairedTunerIp}
+            });
+        }
+
         }
 
         sqlite3_finalize(stmt);
@@ -1538,23 +1680,28 @@ private:
                 const char* lcn     = (const char*)sqlite3_column_text(stmt, 1);
                 const char* start   = (const char*)sqlite3_column_text(stmt, 2);
                 const char* end     = (const char*)sqlite3_column_text(stmt, 3);
-                const char* desc    = (const char*)sqlite3_column_text(stmt, 4);
+                const char* desc    = (const char*)sqlite3_column_text(stmt, 4); 
                 const char* airDate = (const char*)sqlite3_column_text(stmt, 5); 
 
                 int64_t startEpoch  = (int64_t)sqlite3_column_int64(stmt, 6);
                 int64_t endEpoch    = (int64_t)sqlite3_column_int64(stmt, 7);
                 int64_t durationSec = endEpoch - startEpoch;
 
+                // FIXED: Clean your text fields before serializing down to array models
+                std::string cleanTitle = title ? DecodeHtmlEntities(title) : "Unknown";
+                std::string cleanDesc  = desc ? DecodeHtmlEntities(desc) : "No description available.";
+
                 jResults.push_back({
-                    {"title", title ? title : "Unknown"},
+                    {"title", cleanTitle},
                     {"channel", lcn ? lcn : "??"},
                     {"start_time", start ? start : "--:--"},
                     {"end_time", end ? end : "--:--"},
-                    {"description", desc ? desc : "No description available."},
+                    {"description", cleanDesc},
                     {"air_date", airDate ? airDate : ""},
                     {"duration", durationSec} 
                 });
             }
+
         }
 
         sqlite3_finalize(stmt);
@@ -1563,6 +1710,19 @@ private:
     }
 
 
+    // Endpoint: GET /api/tuners — Dynamically pulls live HDHomeRun IPs via libhdhomerun
+    void HandleGetTuners(int clientFd) {
+        // Query your existing device discovery library wrapper
+        std::vector<std::string> discoveredList = DiscoverAllTuners();
+        
+        json jTuners = json::array();
+        for (const auto& tunerIp : discoveredList) {
+            jTuners.push_back(tunerIp);
+        }
+
+        // Output JSON back to frontend with wide CORS allowances
+        SendJsonResponse(clientFd, 200, "OK", jTuners.dump());
+    }
 
 
     // Endpoint: GET /api/schedules — Exports current memory schedules as JSON strings
@@ -1574,48 +1734,65 @@ private:
                 {"date", item.startDate},
                 {"time", item.startTime},
                 {"channel", item.channel},
-                {"channel_label", item.channelLabel},
                 {"duration", item.duration},
                 {"processed", item.processed},
                 {"tuner_ip", item.tunerIp},
-                {"show_title", item.showTitle}
+                {"show_title", item.showTitle},
+                {"description", item.showDescription},    
+    			{"show_description", item.showDescription} 
             });
         }
         gScheduleLocker.Unlock();
         SendJsonResponse(clientFd, 200, "OK", jSchedules.dump(4));
     }
 
-    // Endpoint: POST /api/schedules/add — Adds a new task over the network
-    void HandleAddSchedule(int clientFd, const std::string& requestStr) {
-        std::string body = ExtractHttpRequestBody(requestStr);
-        try {
-            json jIn = json::parse(body);
-            ScheduleItem item;
-            item.startDate    = jIn.at("date").get<std::string>();
-            item.startTime    = jIn.at("time").get<std::string>();
-            item.channel      = jIn.at("channel").get<std::string>();
-            item.channelLabel = jIn.value("channel_label", "");
-            item.duration     = jIn.at("duration").get<std::string>();
-            item.tunerIp      = jIn.value("tuner_ip", "");
-            item.showTitle    = jIn.value("title", "Remote Web Record");
-            item.processed    = 0; 
-            
-            item.durationSec  = std::atoll(item.duration.c_str());
-            item.epochStart   = CalculateEpoch(item.startDate, item.startTime);
+	// Endpoint: POST /api/schedules/add — Adds a new task over the network
+	void HandleAddSchedule(int clientFd, const std::string& requestStr) {
+	    std::string body = ExtractHttpRequestBody(requestStr);
+	    try {
+	        json jIn = json::parse(body);
+	        ScheduleItem item;
+	        item.startDate    = jIn.at("date").get<std::string>();
+	        item.startTime    = jIn.at("time").get<std::string>();
+	        item.channel      = jIn.at("channel").get<std::string>();
+	        item.duration     = jIn.at("duration").get<std::string>();
+		
+			item.tunerIp = jIn.value("tuner_ip", "");			
+			if (item.tunerIp.empty()) {
+			    std::vector<std::string> liveTuners = DiscoverAllTuners();
+			    if (!liveTuners.empty()) {
+			        item.tunerIp = liveTuners[0]; 
+			        if (gFrontendDebugEnable) {
+			            std::printf("[SCHEDULE AUTO-DETECT] Resolved empty tuner_ip to live unit: %s\n", item.tunerIp.c_str());
+			        }
+			    } else {
+			        if (gFrontendDebugEnable) {
+			            std::printf("[SCHEDULE WARNING] No live tuners found on network. Please Fix.");
+			        }
+			    }
+			}
 
-            gScheduleLocker.Lock();
-            gScheduleList.push_back(item);
-            gScheduleLocker.Unlock();
-            
-            SaveSchedulesToDisk(); // Serializes straight down to your persistent JSON file
+	        item.showTitle    = jIn.value("title", "Remote Web Record");
+	        item.showDescription = jIn.value("description", ""); 
+	        item.processed    = 0; 
+	        
+	        item.durationSec  = std::atoll(item.duration.c_str());
+	        item.epochStart   = CalculateEpoch(item.startDate, item.startTime);
+	
+	        gScheduleLocker.Lock();
+	        gScheduleList.push_back(item);
+	        gScheduleLocker.Unlock();
+	        
+	        SaveSchedulesToDisk(); // Serializes straight down to your persistent JSON file
+	
+	        json resp = {{"status", "success"}, {"message", "Schedule appended successfully"}};
+	        SendJsonResponse(clientFd, 201, "Created", resp.dump());
+	    } catch (const std::exception& e) {
+	        json errorJson = {{"status", "error"}, {"message", std::string("JSON Validation Fail: ") + e.what()}};
+	        SendJsonResponse(clientFd, 400, "Bad Request", errorJson.dump());
+	    }
+	}
 
-            json resp = {{"status", "success"}, {"message", "Schedule appended successfully"}};
-            SendJsonResponse(clientFd, 201, "Created", resp.dump());
-        } catch (const std::exception& e) {
-            json errorJson = {{"status", "error"}, {"message", std::string("JSON Validation Fail: ") + e.what()}};
-            SendJsonResponse(clientFd, 400, "Bad Request", errorJson.dump());
-        }
-    }
 
     // Endpoint: POST /api/schedules/delete — Removes a task via network matching properties
     void HandleDeleteSchedule(int clientFd, const std::string& requestStr) {
