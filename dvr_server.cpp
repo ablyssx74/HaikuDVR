@@ -4,6 +4,11 @@
  */
 
 #include <Application.h>
+#include <Entry.h>
+#include <Path.h>
+#include <Volume.h>
+#include <Directory.h>
+#include <FindDirectory.h>
 #include <OS.h>
 #include <SupportDefs.h>
 #include <Locker.h>
@@ -55,6 +60,14 @@ BLocker                                 gRunningWorkersLocker("RunningWorkersLoc
 using json = nlohmann::json;
 
 const char* kSettingsFilePath = "/boot/home/config/settings/HaikuDVR_schedules.json";
+
+void ensure_config_dir() {
+    BPath path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+        path.Append("HaikuDVR/icons");
+        create_directory(path.Path(), 0755);
+    }
+}
 
 int32 gStopService = 0;
 int32 gCancelRecording = 0; 
@@ -3515,6 +3528,7 @@ void SignalExitInterceptor(int signalType) {
 }
 
 int main() {
+	ensure_config_dir();
     DVRServiceApp app;
     app.Run();
     return 0;
