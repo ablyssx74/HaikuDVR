@@ -8,6 +8,7 @@
 #include <SupportDefs.h>
 #include <Locker.h>
 #include <curl/curl.h>
+#include <iostream>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -35,6 +36,10 @@
 #include <sqlite3.h>
 #include <cstdlib> 
 #include <netinet/tcp.h> 
+
+
+
+
 
 const uint32 MSG_ABORT_SPECIFIC_RECORDING = 'absp';
 
@@ -430,6 +435,230 @@ static std::string DecodeHtmlEntities(const std::string& input) {
 }
 
 
+
+bool IngestMasterXmlToSqlite(const std::string& masterXmlPath) {
+    const std::string dbPath = "/boot/home/config/settings/HaikuDVR/guide.db";
+    sqlite3* db = nullptr;
+    if (sqlite3_open(dbPath.c_str(), &db) != SQLITE_OK) {
+        std::printf("[DVR DB ERROR] Failed to open database.\n");
+        return false;
+    }
+
+    // 1. Establish the database structures and performance options
+    sqlite3_exec(db, "PRAGMA synchronous = NORMAL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, "PRAGMA cache_size = -8000;", nullptr, nullptr, nullptr); 
+    
+    const char* schema = 
+        "CREATE TABLE IF NOT EXISTS channels (xml_id TEXT PRIMARY KEY, lcn TEXT, icon_url TEXT);"
+        "CREATE TABLE IF NOT EXISTS programs (channel_id TEXT, title TEXT, desc TEXT, start_epoch INTEGER, end_epoch INTEGER);"
+        "CREATE INDEX IF NOT EXISTS idx_channels_lcn_lookup ON channels (lcn, xml_id, icon_url);"
+        "CREATE INDEX IF NOT EXISTS idx_programs_timeline_covering ON programs (start_epoch, end_epoch, channel_id, title, [desc]);";
+    
+    if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+
+    // Clear old guide schedules to prepare for fresh data injection
+    sqlite3_exec(db, "DELETE FROM programs;", nullptr, nullptr, nullptr);
+
+    std::ifstream masterStream(masterXmlPath.c_str());
+    if (!masterStream.is_open()) {
+        sqlite3_close(db);
+        return false;
+    }
+
+    auto parseXmlTimeToEpoch = [](const std::string& rawXmlTime) -> std::time_t {
+        if (rawXmlTime.length() < 14) return 0;
+        int y = 0, mo = 0, d = 0, h = 0, m = 0, s = 0;
+        std::sscanf(rawXmlTime.substr(0, 4).c_str(), "%4d", &y);
+        std::sscanf(rawXmlTime.substr(4, 2).c_str(), "%2d", &mo);
+        std::sscanf(rawXmlTime.substr(6, 2).c_str(), "%2d", &d);
+        std::sscanf(rawXmlTime.substr(8, 2).c_str(), "%2d", &h);
+        std::sscanf(rawXmlTime.substr(10, 2).c_str(), "%2d", &m);
+        std::sscanf(rawXmlTime.substr(12, 2).c_str(), "%2d", &s);
+
+        std::tm tmTime = {0};
+        tmTime.tm_year  = y - 1900;
+        tmTime.tm_mon   = mo - 1;
+        tmTime.tm_mday  = d;
+        tmTime.tm_hour  = h;
+        tmTime.tm_min   = m;
+        tmTime.tm_sec   = s;
+        tmTime.tm_isdst = -1;
+
+        std::time_t utcEpoch = timegm(&tmTime);
+        if (utcEpoch == (std::time_t)-1) return 0;
+        
+        long providerOffsetSeconds = 0;
+        size_t spacePos = rawXmlTime.find(' ');
+        if (spacePos != std::string::npos && spacePos + 5 <= rawXmlTime.length()) {
+            int sign = (rawXmlTime[spacePos + 1] == '-') ? -1 : 1;
+            int oh = 0, om = 0;
+            std::sscanf(rawXmlTime.substr(spacePos + 2, 2).c_str(), "%2d", &oh);
+            std::sscanf(rawXmlTime.substr(spacePos + 4, 2).c_str(), "%2d", &om);
+            providerOffsetSeconds = sign * ((oh * 3600) + (om * 60));
+        }
+        return utcEpoch - providerOffsetSeconds;
+    };
+
+    // Prepare separate compiled statements for independent, high-performance insertion/updates
+    sqlite3_stmt* chanInitStmt = nullptr;
+    sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO channels (xml_id) VALUES (?);", -1, &chanInitStmt, nullptr);
+
+    sqlite3_stmt* chanLcnStmt = nullptr;
+    sqlite3_prepare_v2(db, "UPDATE channels SET lcn = ? WHERE xml_id = ?;", -1, &chanLcnStmt, nullptr);
+
+    sqlite3_stmt* chanIconStmt = nullptr;
+    sqlite3_prepare_v2(db, "UPDATE channels SET icon_url = ? WHERE xml_id = ?;", -1, &chanIconStmt, nullptr);
+
+    sqlite3_stmt* progStmt = nullptr;
+    sqlite3_prepare_v2(db, "INSERT INTO programs VALUES (?, ?, ?, ?, ?);", -1, &progStmt, nullptr);
+
+    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+
+    std::string line;
+    std::string currentChannelId = "";
+    std::string progChanId = "", progStartRaw = "", progEndRaw = "", titleText = "", descText = "";
+    bool insideProgramme = false;
+    std::time_t current_time = std::time(nullptr);
+
+    while (std::getline(masterStream, line)) {
+        // Parse channels
+        size_t chanPos = line.find("<channel id=\"");
+        if (chanPos != std::string::npos) {
+            size_t startIdx = chanPos + 13;
+            size_t endIdx = line.find("\"", startIdx);
+            if (endIdx != std::string::npos) {
+                currentChannelId = line.substr(startIdx, endIdx - startIdx);
+                
+                // Initialize the channel entry safely without touching old records
+                sqlite3_bind_text(chanInitStmt, 1, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(chanInitStmt);
+                sqlite3_reset(chanInitStmt);
+            }
+            continue;
+        }
+
+        size_t lcnPos = line.find("<lcn>");
+        if (lcnPos != std::string::npos && !currentChannelId.empty()) {
+            size_t endIdx = line.find("</lcn>");
+            if (endIdx != std::string::npos) {
+                std::string lcnVal = line.substr(lcnPos + 5, endIdx - (lcnPos + 5));
+                
+                // Update LCN cleanly
+                sqlite3_bind_text(chanLcnStmt, 1, lcnVal.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(chanLcnStmt, 2, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(chanLcnStmt);
+                sqlite3_reset(chanLcnStmt);
+            }
+            continue;
+        }
+
+        size_t iconPos = line.find("<icon src=\"");
+        if (iconPos != std::string::npos && !currentChannelId.empty()) {
+            size_t endIdx = line.find("\"", iconPos + 11);
+            if (endIdx != std::string::npos) {
+                std::string iconUrl = line.substr(iconPos + 11, endIdx - (iconPos + 11));
+                
+                // Update Icon URL cleanly without disturbing the LCN value
+                sqlite3_bind_text(chanIconStmt, 1, iconUrl.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(chanIconStmt, 2, currentChannelId.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(chanIconStmt);
+                sqlite3_reset(chanIconStmt);
+            }
+            currentChannelId = "";
+            continue;
+        }
+
+        // =========================================================================
+        // PRESERVED SECURE PROGRAM NODE PARSING MATRIX
+        // =========================================================================
+        size_t progPos = line.find("<programme start=\"");
+        if (progPos != std::string::npos) {
+            insideProgramme = true;
+            titleText = ""; descText = "";
+            
+            size_t sEnd = line.find("\"", progPos + 18);
+            if (sEnd != std::string::npos) progStartRaw = line.substr(progPos + 18, sEnd - (progPos + 18));
+
+            size_t stopPos = line.find("stop=\"");
+            if (stopPos != std::string::npos) {
+                size_t eEnd = line.find("\"", stopPos + 6);
+                if (eEnd != std::string::npos) progEndRaw = line.substr(stopPos + 6, eEnd - (stopPos + 6));
+            }
+
+            size_t chanAttrPos = line.find("channel=\"");
+            if (chanAttrPos != std::string::npos) {
+                size_t cEnd = line.find("\"", chanAttrPos + 9);
+                if (cEnd != std::string::npos) progChanId = line.substr(chanAttrPos + 9, cEnd - (chanAttrPos + 9));
+            }
+            continue;
+        }
+
+        if (insideProgramme) {
+            size_t titlePos = line.find("<title");
+            if (titlePos != std::string::npos) {
+                size_t valStart = line.find(">", titlePos) + 1;
+                size_t valEnd = line.find("</title>", valStart);
+                if (valEnd != std::string::npos) titleText = line.substr(valStart, valEnd - valStart);
+            }
+            size_t descPos = line.find("<desc");
+            if (descPos != std::string::npos) {
+                size_t valStart = line.find(">", descPos) + 1;
+                size_t valEnd = line.find("</desc>", valStart);
+                if (valEnd != std::string::npos) descText = line.substr(valStart, valEnd - valStart);
+            }
+
+            if (line.find("</programme>") != std::string::npos) {
+                insideProgramme = false;
+                std::time_t startEp = parseXmlTimeToEpoch(progStartRaw);
+                std::time_t endEp   = parseXmlTimeToEpoch(progEndRaw);
+
+                if (endEp < startEp) endEp += 86400; // Account for overnight date boundary wraps
+
+                // THE FILTER PASS: If the show's end time is in the past, skip SQLite execution
+                if (endEp < current_time) {
+                    continue; 
+                }
+
+                if (!progChanId.empty() && !titleText.empty()) {
+                    sqlite3_bind_text(progStmt, 1, progChanId.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(progStmt, 2, titleText.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(progStmt, 3, descText.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(progStmt, 4, static_cast<sqlite3_int64>(startEp));
+                    sqlite3_bind_int64(progStmt, 5, static_cast<sqlite3_int64>(endEp));
+                    sqlite3_step(progStmt);
+                    sqlite3_reset(progStmt);
+                }
+            }
+        }
+    }
+
+    // Close transaction and finalize all prepared statements
+    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
+    
+    // Finalize all three distinct channel statement resources
+    sqlite3_finalize(chanInitStmt);
+    sqlite3_finalize(chanLcnStmt);
+    sqlite3_finalize(chanIconStmt);
+    sqlite3_finalize(progStmt);
+
+    // Run internal structural analysis optimization before releasing file lock
+    sqlite3_exec(db, "PRAGMA optimize;", nullptr, nullptr, nullptr);
+
+    sqlite3_close(db);
+    masterStream.close();
+    return true;
+}
+
+
+
+
+
+
+
 static int32 dlna_discovery_worker_thread(void* data) {
     DlnasDiscoveryServer* server = static_cast<DlnasDiscoveryServer*>(data);
     if (!server) return B_BAD_VALUE;
@@ -598,362 +827,367 @@ public:
     DlnasHttpStreamingServer() : serverThread(-1), listenFd(-1), port(8081) {}
     
 
-// Endpoint: GET /api/recordings/play?file=FILENAME — Smart local/remote hybrid playback engine
-void HandlePlayRecording(int clientFd, const std::string& requestStr) {
-    size_t queryPos = requestStr.find("/api/recordings/play?file=");
-    if (queryPos == std::string::npos) {
-        SendJsonResponse(clientFd, 400, "Bad Request", "{\"error\":\"Missing file parameter\"}");
-        return;
-    }
-
-    size_t endPos = requestStr.find(" ", queryPos);
-    std::string filename = requestStr.substr(queryPos + 26, endPos - (queryPos + 26));
-
-    gScheduleLocker.Lock();
-    std::string baseDir = gGlobalSaveDirectory;
-    gScheduleLocker.Unlock();
-
-    std::string fullPath = baseDir + "/" + filename;
-
-    // Security verify: Block file access out-of-bounds traversal
-    if (!IsPathSafeAndContained(fullPath, baseDir) || access(fullPath.c_str(), F_OK) != 0) {
-        SendJsonResponse(clientFd, 404, "Not Found", "{\"error\":\"Recording file not found or inaccessible\"}");
-        return;
-    }
-
-    // 1. Identify Client and Server IPs to evaluate boundaries
-    std::string clientIpStr = "127.0.0.1";
-    struct sockaddr_storage peerAddr;
-    socklen_t peerAddrLen = sizeof(peerAddr);
-    if (getpeername(clientFd, (struct sockaddr*)&peerAddr, &peerAddrLen) == 0) {
-        if (peerAddr.ss_family == AF_INET) {
-            struct sockaddr_in* s = (struct sockaddr_in*)&peerAddr;
-            char ipBuffer[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &(s->sin_addr), ipBuffer, INET_ADDRSTRLEN);
-            clientIpStr = ipBuffer;
-        }
-    }
-
-    std::string serverIpStr = "";
-    size_t hostPos = requestStr.find("Host: ");
-    if (hostPos != std::string::npos) {
-        size_t valStart = hostPos + 6;
-        size_t valEnd = requestStr.find("\r\n", valStart);
-        if (valEnd != std::string::npos) {
-            std::string fullHost = requestStr.substr(valStart, valEnd - valStart);
-            size_t colonIndex = fullHost.find(":");
-            serverIpStr = (colonIndex != std::string::npos) ? fullHost.substr(0, colonIndex) : fullHost;
-        }
-    }
-
-    bool isLocalClient = (clientIpStr == "127.0.0.1" || clientIpStr == "localhost" || clientIpStr == serverIpStr);
-    std::string streamingUrl = "http://" + (serverIpStr.empty() ? GetLiveHttpSystemIP() : serverIpStr) + ":" + std::to_string(port) + "/video/" + filename;
-
-    if (isLocalClient) {
-        // =========================================================================
-        // LOCAL WORKSPACE WORKSTATION MODE: Native host desktop process fork 
-        // =========================================================================
-        if (gFrontendDebugEnable) {
-            std::printf("[LIBRARY LAUNCHER] Local environment matched! Spinning native desktop playback process context.\n");
-            std::fflush(stdout);
-        }
-
-        const char* binaryPath = "/boot/system/bin/mpv";
-        if (access("/boot/system/bin/hTV", F_OK) == 0) {
-            binaryPath = "/boot/system/bin/hTV";
-        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
-            binaryPath = "/boot/system/bin/vlc";
-        }
-
-        pid_t processId = fork();
-        if (processId == 0) {
-            char* playerArgs[3];
-            playerArgs[0] = (char*)binaryPath;
-            playerArgs[1] = (char*)fullPath.c_str(); // Pass local file directly for zero-latency local IO play
-            playerArgs[2] = nullptr; 
-            
-            execv(playerArgs[0], playerArgs);
-            _exit(1); 
-        }
-
-        SendJsonResponse(clientFd, 200, "OK", "{\"status\":\"success\",\"mode\":\"local_launch\"}");
-    } else {
-        // =========================================================================
-        // REMOTE NETWORK CLIENT MODE: Package dynamic streaming .pls playlist file
-        // =========================================================================
-        if (gFrontendDebugEnable) {
-            std::printf("[LIBRARY LAUNCHER] Remote environment context matched. Sending PLS video playlist stream back.\n");
-            std::fflush(stdout);
-        }
-
-        std::string plsContent = "[playlist]\r\n";
-        plsContent += "NumberOfEntries=1\r\n";
-        plsContent += "File1=" + streamingUrl + "\r\n";
-        plsContent += "Title1=" + filename + "\r\n";
-        plsContent += "Length1=-1\r\n";
-        plsContent += "Version=2\r\n";
-
-        std::string responseHeaders = 
-            "HTTP/1.1 200 OK\r\n"
-            "Server: HaikuOS HaikuDVR-MediaServer/1.0\r\n"
-            "Content-Type: audio/x-scpls\r\n" 
-            "Content-Disposition: attachment; filename=\"" + filename + ".pls\"\r\n"
-            "Content-Length: " + std::to_string(plsContent.length()) + "\r\n"
-            "Connection: close\r\n\r\n";
-
-        send(clientFd, responseHeaders.c_str(), responseHeaders.length(), 0);
-        send(clientFd, plsContent.c_str(), plsContent.length(), 0);
-        close(clientFd);
-    }
-}
-
-
-// Endpoint: GET /api/recordings — Dynamically scans disk and injects active recording status flags
-void HandleGetRecordings(int clientFd) {
-    gScheduleLocker.Lock();
-    std::string baseDir = gGlobalSaveDirectory;
-    gScheduleLocker.Unlock();
-
-    json jList = json::array();
-    DIR* dir = opendir(baseDir.c_str());
-    if (dir == nullptr) {
-        SendJsonResponse(clientFd, 500, "Internal Server Error", "{\"error\":\"Cannot open save directory\"}");
-        return;
-    }
-
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        std::string fileName(entry->d_name);
-        
-        // Only catalog our Transport Stream files
-        if (fileName.length() > 3 && fileName.substr(fileName.length() - 3) == ".ts") {
-            std::string fullPath = baseDir + "/" + fileName;
-            
-            struct stat fileStat;
-            if (stat(fullPath.c_str(), &fileStat) == 0) {
-                double fileSizeMB = static_cast<double>(fileStat.st_size) / (1024.0 * 1024.0);
-                
-                // Parse out Title, Date, and Channel tokens
-                std::string title = fileName;
-                std::string dateStr = "Unknown Date";
-                std::string channelStr = "Unknown Ch";
-                
-                size_t lastDot = fileName.find_last_of(".");
-                std::string nameWithoutExt = fileName.substr(0, lastDot);
-                
-                std::vector<std::string> tokens;
-                std::stringstream ss(nameWithoutExt);
-                std::string token;
-                while (std::getline(ss, token, '_')) {
-                    tokens.push_back(token);
-                }
-                
-                if (tokens.size() >= 3) {
-                    channelStr = tokens.back();
-                    tokens.pop_back();
-                    dateStr = tokens.back();
-                    tokens.pop_back();
-                    
-                    title = "";
-                    for (size_t i = 0; i < tokens.size(); i++) {
-                        title += tokens[i] + (i + 1 < tokens.size() ? " " : "");
-                    }
-                }
-
-                // --- NEW: CROSS-REFERENCE ACTIVE WORKERS ---
-                bool isCurrentlyRecording = false;
-                gRunningWorkersLocker.Lock();
-                if (gRunningWorkersMap.find(fullPath) != gRunningWorkersMap.end()) {
-                    isCurrentlyRecording = true;
-                }
-                gRunningWorkersLocker.Unlock();
-
-                jList.push_back({
-                    {"filename", fileName},
-                    {"title", title},
-                    {"date", dateStr},
-                    {"channel", channelStr},
-                    {"size_mb", MathRoundToTwoDecimals(fileSizeMB)},
-                    {"modified", fileStat.st_mtime},
-                    {"is_recording", isCurrentlyRecording} // <-- Injected active flag status hook
-                });
-            }
-        }
-    }
-    closedir(dir);
-
-    // Sort recordings by newest timestamp first
-    std::sort(jList.begin(), jList.end(), [](const json& a, const json& b) {
-        return a.value("modified", 0LL) > b.value("modified", 0LL);
-    });
-
-    SendJsonResponse(clientFd, 200, "OK", jList.dump());
-}
 
 
 
-// Small helper utility for size formatting string presentation
-double MathRoundToTwoDecimals(double val) {
-    return std::round(val * 100.0) / 100.0;
-}
+
+
+	// Endpoint: GET /api/recordings/play?file=FILENAME — Smart local/remote hybrid playback engine
+	void HandlePlayRecording(int clientFd, const std::string& requestStr) {
+	    size_t queryPos = requestStr.find("/api/recordings/play?file=");
+	    if (queryPos == std::string::npos) {
+	        SendJsonResponse(clientFd, 400, "Bad Request", "{\"error\":\"Missing file parameter\"}");
+	        return;
+	    }
+	
+	    size_t endPos = requestStr.find(" ", queryPos);
+	    std::string filename = requestStr.substr(queryPos + 26, endPos - (queryPos + 26));
+	
+	    gScheduleLocker.Lock();
+	    std::string baseDir = gGlobalSaveDirectory;
+	    gScheduleLocker.Unlock();
+	
+	    std::string fullPath = baseDir + "/" + filename;
+	
+	    // Security verify: Block file access out-of-bounds traversal
+	    if (!IsPathSafeAndContained(fullPath, baseDir) || access(fullPath.c_str(), F_OK) != 0) {
+	        SendJsonResponse(clientFd, 404, "Not Found", "{\"error\":\"Recording file not found or inaccessible\"}");
+	        return;
+	    }
+	
+	    // 1. Identify Client and Server IPs to evaluate boundaries
+	    std::string clientIpStr = "127.0.0.1";
+	    struct sockaddr_storage peerAddr;
+	    socklen_t peerAddrLen = sizeof(peerAddr);
+	    if (getpeername(clientFd, (struct sockaddr*)&peerAddr, &peerAddrLen) == 0) {
+	        if (peerAddr.ss_family == AF_INET) {
+	            struct sockaddr_in* s = (struct sockaddr_in*)&peerAddr;
+	            char ipBuffer[INET_ADDRSTRLEN];
+	            inet_ntop(AF_INET, &(s->sin_addr), ipBuffer, INET_ADDRSTRLEN);
+	            clientIpStr = ipBuffer;
+	        }
+	    }
+	
+	    std::string serverIpStr = "";
+	    size_t hostPos = requestStr.find("Host: ");
+	    if (hostPos != std::string::npos) {
+	        size_t valStart = hostPos + 6;
+	        size_t valEnd = requestStr.find("\r\n", valStart);
+	        if (valEnd != std::string::npos) {
+	            std::string fullHost = requestStr.substr(valStart, valEnd - valStart);
+	            size_t colonIndex = fullHost.find(":");
+	            serverIpStr = (colonIndex != std::string::npos) ? fullHost.substr(0, colonIndex) : fullHost;
+	        }
+	    }
+	
+	    bool isLocalClient = (clientIpStr == "127.0.0.1" || clientIpStr == "localhost" || clientIpStr == serverIpStr);
+	    std::string streamingUrl = "http://" + (serverIpStr.empty() ? GetLiveHttpSystemIP() : serverIpStr) + ":" + std::to_string(port) + "/video/" + filename;
+	
+	    if (isLocalClient) {
+	        // =========================================================================
+	        // LOCAL WORKSPACE WORKSTATION MODE: Native host desktop process fork 
+	        // =========================================================================
+	        if (gFrontendDebugEnable) {
+	            std::printf("[LIBRARY LAUNCHER] Local environment matched! Spinning native desktop playback process context.\n");
+	            std::fflush(stdout);
+	        }
+	
+	        const char* binaryPath = "/boot/system/bin/mpv";
+	        if (access("/boot/system/bin/hTV", F_OK) == 0) {
+	            binaryPath = "/boot/system/bin/hTV";
+	        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
+	            binaryPath = "/boot/system/bin/vlc";
+	        }
+	
+	        pid_t processId = fork();
+	        if (processId == 0) {
+	            char* playerArgs[3];
+	            playerArgs[0] = (char*)binaryPath;
+	            playerArgs[1] = (char*)fullPath.c_str(); // Pass local file directly for zero-latency local IO play
+	            playerArgs[2] = nullptr; 
+	            
+	            execv(playerArgs[0], playerArgs);
+	            _exit(1); 
+	        }
+	
+	        SendJsonResponse(clientFd, 200, "OK", "{\"status\":\"success\",\"mode\":\"local_launch\"}");
+	    } else {
+	        // =========================================================================
+	        // REMOTE NETWORK CLIENT MODE: Package dynamic streaming .pls playlist file
+	        // =========================================================================
+	        if (gFrontendDebugEnable) {
+	            std::printf("[LIBRARY LAUNCHER] Remote environment context matched. Sending PLS video playlist stream back.\n");
+	            std::fflush(stdout);
+	        }
+	
+	        std::string plsContent = "[playlist]\r\n";
+	        plsContent += "NumberOfEntries=1\r\n";
+	        plsContent += "File1=" + streamingUrl + "\r\n";
+	        plsContent += "Title1=" + filename + "\r\n";
+	        plsContent += "Length1=-1\r\n";
+	        plsContent += "Version=2\r\n";
+	
+	        std::string responseHeaders = 
+	            "HTTP/1.1 200 OK\r\n"
+	            "Server: HaikuOS HaikuDVR-MediaServer/1.0\r\n"
+	            "Content-Type: audio/x-scpls\r\n" 
+	            "Content-Disposition: attachment; filename=\"" + filename + ".pls\"\r\n"
+	            "Content-Length: " + std::to_string(plsContent.length()) + "\r\n"
+	            "Connection: close\r\n\r\n";
+	
+	        send(clientFd, responseHeaders.c_str(), responseHeaders.length(), 0);
+	        send(clientFd, plsContent.c_str(), plsContent.length(), 0);
+	        close(clientFd);
+	    }
+	}
+
+
+	// Endpoint: GET /api/recordings — Dynamically scans disk and injects active recording status flags
+	void HandleGetRecordings(int clientFd) {
+	    gScheduleLocker.Lock();
+	    std::string baseDir = gGlobalSaveDirectory;
+	    gScheduleLocker.Unlock();
+	
+	    json jList = json::array();
+	    DIR* dir = opendir(baseDir.c_str());
+	    if (dir == nullptr) {
+	        SendJsonResponse(clientFd, 500, "Internal Server Error", "{\"error\":\"Cannot open save directory\"}");
+	        return;
+	    }
+	
+	    struct dirent* entry;
+	    while ((entry = readdir(dir)) != nullptr) {
+	        std::string fileName(entry->d_name);
+	        
+	        // Only catalog our Transport Stream files
+	        if (fileName.length() > 3 && fileName.substr(fileName.length() - 3) == ".ts") {
+	            std::string fullPath = baseDir + "/" + fileName;
+	            
+	            struct stat fileStat;
+	            if (stat(fullPath.c_str(), &fileStat) == 0) {
+	                double fileSizeMB = static_cast<double>(fileStat.st_size) / (1024.0 * 1024.0);
+	                
+	                // Parse out Title, Date, and Channel tokens
+	                std::string title = fileName;
+	                std::string dateStr = "Unknown Date";
+	                std::string channelStr = "Unknown Ch";
+	                
+	                size_t lastDot = fileName.find_last_of(".");
+	                std::string nameWithoutExt = fileName.substr(0, lastDot);
+	                
+	                std::vector<std::string> tokens;
+	                std::stringstream ss(nameWithoutExt);
+	                std::string token;
+	                while (std::getline(ss, token, '_')) {
+	                    tokens.push_back(token);
+	                }
+	                
+	                if (tokens.size() >= 3) {
+	                    channelStr = tokens.back();
+	                    tokens.pop_back();
+	                    dateStr = tokens.back();
+	                    tokens.pop_back();
+	                    
+	                    title = "";
+	                    for (size_t i = 0; i < tokens.size(); i++) {
+	                        title += tokens[i] + (i + 1 < tokens.size() ? " " : "");
+	                    }
+	                }
+	
+	                // --- NEW: CROSS-REFERENCE ACTIVE WORKERS ---
+	                bool isCurrentlyRecording = false;
+	                gRunningWorkersLocker.Lock();
+	                if (gRunningWorkersMap.find(fullPath) != gRunningWorkersMap.end()) {
+	                    isCurrentlyRecording = true;
+	                }
+	                gRunningWorkersLocker.Unlock();
+	
+	                jList.push_back({
+	                    {"filename", fileName},
+	                    {"title", title},
+	                    {"date", dateStr},
+	                    {"channel", channelStr},
+	                    {"size_mb", MathRoundToTwoDecimals(fileSizeMB)},
+	                    {"modified", fileStat.st_mtime},
+	                    {"is_recording", isCurrentlyRecording} // <-- Injected active flag status hook
+	                });
+	            }
+	        }
+	    }
+	    closedir(dir);
+	
+	    // Sort recordings by newest timestamp first
+	    std::sort(jList.begin(), jList.end(), [](const json& a, const json& b) {
+	        return a.value("modified", 0LL) > b.value("modified", 0LL);
+	    });
+	
+	    SendJsonResponse(clientFd, 200, "OK", jList.dump());
+	}
+
+
+
+	// Small helper utility for size formatting string presentation
+	double MathRoundToTwoDecimals(double val) {
+	    return std::round(val * 100.0) / 100.0;
+	}
 
  
 
-// Helper utility to grab the actual system IP address
-static std::string GetLiveHttpSystemIP() {
-    std::string detectedIp = "0.0.0.0";
-    struct ifaddrs* interfaces = nullptr;
-    
-    if (getifaddrs(&interfaces) == 0) {
-        for (struct ifaddrs* ifa = interfaces; ifa != nullptr; ifa = ifa->ifa_next) {
-            if (!ifa->ifa_name || !ifa->ifa_addr || !(ifa->ifa_flags & IFF_UP)) continue;
-            
-            if (ifa->ifa_addr->sa_family == AF_INET && !(ifa->ifa_flags & IFF_LOOPBACK)) {
-                struct sockaddr_in* ethAddr = (struct sockaddr_in*)ifa->ifa_addr;
-                char ipBuffer[INET_ADDRSTRLEN];
-                if (inet_ntop(AF_INET, &(ethAddr->sin_addr), ipBuffer, INET_ADDRSTRLEN)) {
-                    detectedIp = ipBuffer;
-                    if (detectedIp != "0.0.0.0" && !detectedIp.empty()) break; 
-                }
-            }
-        }
-        freeifaddrs(interfaces);
-    }
-    return detectedIp;
-}
-
-static int32 HttpWorkerLoop(void* data) {
-    DlnasHttpStreamingServer* self = static_cast<DlnasHttpStreamingServer*>(data);
-    if (!self) return B_BAD_VALUE;
-
-    // UPDATE: Fast-abort if DLNA was disabled before the thread finished spawning
-    if (!gFrontendDlnaEnable) {
-        return B_OK;
-    }
-
-    if (gFrontendDebugEnable) {
-    	std::printf("[HTTP DEBUG] Creating master TCP stream socket...\n");
-    	std::fflush(stdout);
-    }
-    
-    self->listenFd = socket(AF_INET, SOCK_STREAM, 0);
-    if (self->listenFd < 0) {
-    		if (gFrontendDebugEnable) {
-        		std::printf("[HTTP DEBUG ERROR] Failed to create socket: %s\n", strerror(errno));
-        		std::fflush(stdout);
-    		}
-        return B_ERROR;
-    }
-
-    int reuse = 1;
-    setsockopt(self->listenFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    // UPDATE: Set a non-blocking timeout of 5 seconds on the master stream socket.
-    // This lets accept() periodically wake up to check gStopService and gFrontendDlnaEnable.
-    struct timeval tv;
-    tv.tv_sec = 5;
-    tv.tv_usec = 0;
-    setsockopt(self->listenFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    struct sockaddr_in srvAddr{};
-    srvAddr.sin_family = AF_INET;
-    srvAddr.sin_port = htons(self->port);
-    srvAddr.sin_addr.s_addr = INADDR_ANY; // Listening on all interfaces is correct
-	if (gFrontendDebugEnable) {
-    	std::printf("[HTTP DEBUG] Attempting to bind TCP server to port %d...\n", self->port);
-    	std::fflush(stdout);
+	// Helper utility to grab the actual system IP address
+	static std::string GetLiveHttpSystemIP() {
+	    std::string detectedIp = "0.0.0.0";
+	    struct ifaddrs* interfaces = nullptr;
+	    
+	    if (getifaddrs(&interfaces) == 0) {
+	        for (struct ifaddrs* ifa = interfaces; ifa != nullptr; ifa = ifa->ifa_next) {
+	            if (!ifa->ifa_name || !ifa->ifa_addr || !(ifa->ifa_flags & IFF_UP)) continue;
+	            
+	            if (ifa->ifa_addr->sa_family == AF_INET && !(ifa->ifa_flags & IFF_LOOPBACK)) {
+	                struct sockaddr_in* ethAddr = (struct sockaddr_in*)ifa->ifa_addr;
+	                char ipBuffer[INET_ADDRSTRLEN];
+	                if (inet_ntop(AF_INET, &(ethAddr->sin_addr), ipBuffer, INET_ADDRSTRLEN)) {
+	                    detectedIp = ipBuffer;
+	                    if (detectedIp != "0.0.0.0" && !detectedIp.empty()) break; 
+	                }
+	            }
+	        }
+	        freeifaddrs(interfaces);
+	    }
+	    return detectedIp;
 	}
-    if (bind(self->listenFd, (struct sockaddr*)&srvAddr, sizeof(srvAddr)) < 0) {
-    	if (gFrontendDebugEnable) {
-        	std::printf("[HTTP DEBUG ERROR] Bind to port %d failed: %s\n", self->port, strerror(errno));
-        	std::fflush(stdout);
-    	}
-        close(self->listenFd);
-        self->listenFd = -1;
-        return B_ERROR;
-    }
-    
-    listen(self->listenFd, 10);
-    if (gFrontendDebugEnable) {
-    	std::printf("[HTTP DEBUG] Server socket bound! Actively listening for TV requests...\n");
-    	std::fflush(stdout);
-    }
 
-     // --- LIVE IP HEALING AND ACQUISITION ---
-    // If we booted with a stale or blank IP address configuration, poll until one arrives
-    // UPDATE: Now aborts immediately if DLNA is toggled off
-    while ((self->localIp == "0.0.0.0" || self->localIp.empty()) && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
-        std::string checkedIp = GetLiveHttpSystemIP();
-        if (checkedIp != "0.0.0.0" && !checkedIp.empty()) {
-            self->localIp = checkedIp;
-            if (gFrontendDebugEnable) {
-            	std::printf("[HTTP DEBUG] Dynamic IP discovered and assigned: %s\n", self->localIp.c_str());
-            	std::fflush(stdout);
-            }
-            break;
-        }
-        
-        // Check for application shutdown or toggle requests while waiting for the network links
-        for (int i = 0; i < 4 && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable; i++) {
-            usleep(500000); // 2-second polling increments split up safely
-        }
-    }
-    // --- END OF IP HEALING ---
+	static int32 HttpWorkerLoop(void* data) {
+	    DlnasHttpStreamingServer* self = static_cast<DlnasHttpStreamingServer*>(data);
+	    if (!self) return B_BAD_VALUE;
+	
+	    // UPDATE: Fast-abort if DLNA was disabled before the thread finished spawning
+	    if (!gFrontendDlnaEnable) {
+	        return B_OK;
+	    }
+	
+	    if (gFrontendDebugEnable) {
+	    	std::printf("[HTTP DEBUG] Creating master TCP stream socket...\n");
+	    	std::fflush(stdout);
+	    }
+	    
+	    self->listenFd = socket(AF_INET, SOCK_STREAM, 0);
+	    if (self->listenFd < 0) {
+	    		if (gFrontendDebugEnable) {
+	        		std::printf("[HTTP DEBUG ERROR] Failed to create socket: %s\n", strerror(errno));
+	        		std::fflush(stdout);
+	    		}
+	        return B_ERROR;
+	    }
+	
+	    int reuse = 1;
+	    setsockopt(self->listenFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+	
+	    // UPDATE: Set a non-blocking timeout of 5 seconds on the master stream socket.
+	    // This lets accept() periodically wake up to check gStopService and gFrontendDlnaEnable.
+	    struct timeval tv;
+	    tv.tv_sec = 5;
+	    tv.tv_usec = 0;
+	    setsockopt(self->listenFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	
+	    struct sockaddr_in srvAddr{};
+	    srvAddr.sin_family = AF_INET;
+	    srvAddr.sin_port = htons(self->port);
+	    srvAddr.sin_addr.s_addr = INADDR_ANY; // Listening on all interfaces is correct
+		if (gFrontendDebugEnable) {
+	    	std::printf("[HTTP DEBUG] Attempting to bind TCP server to port %d...\n", self->port);
+	    	std::fflush(stdout);
+		}
+	    if (bind(self->listenFd, (struct sockaddr*)&srvAddr, sizeof(srvAddr)) < 0) {
+	    	if (gFrontendDebugEnable) {
+	        	std::printf("[HTTP DEBUG ERROR] Bind to port %d failed: %s\n", self->port, strerror(errno));
+	        	std::fflush(stdout);
+	    	}
+	        close(self->listenFd);
+	        self->listenFd = -1;
+	        return B_ERROR;
+	    }
+	    
+	    listen(self->listenFd, 10);
+	    if (gFrontendDebugEnable) {
+	    	std::printf("[HTTP DEBUG] Server socket bound! Actively listening for TV requests...\n");
+	    	std::fflush(stdout);
+	    }
 
-    // UPDATE: Master loop now continuously monitors the DLNA configuration flag
-    while (atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
-        struct sockaddr_in cliAddr{};
-        socklen_t cliLen = sizeof(cliAddr);
-        
-        // This call will unblock every 5 seconds (due to our previously set SO_RCVTIMEO) 
-        // to re-evaluate the while loop conditions (shutdown or feature toggle off).
-        int clientFd = accept(self->listenFd, (struct sockaddr*)&cliAddr, &cliLen);
-        if (clientFd < 0) {
-            // FIX: Include ETIMEDOUT for Haiku OS compliance
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
-                continue;
-            }
-            
-            // Check if we dropped out due to system shutdown or feature disablement
-            if (atomic_get(&gStopService) != 0 || !gFrontendDlnaEnable) break;
-            
-            if (gFrontendDebugEnable) {
-            	std::printf("[HTTP DEBUG WARNING] Accept connection failed: %s\n", strerror(errno));
-            	std::fflush(stdout);
-            }
-            continue;
-        }
-
-
-        // Heartbeat verification: If the system IP shifted, dynamically re-update it on the fly
-        std::string validationIp = GetLiveHttpSystemIP();
-        if (validationIp != "0.0.0.0" && validationIp != self->localIp) {
-            self->localIp = validationIp;
-            if (gFrontendDebugEnable) {
-            	std::printf("[HTTP DEBUG] Network interface modified. Synchronizing server tracking to: %s\n", self->localIp.c_str());
-            	std::fflush(stdout);
-            }
-        }
-
-        char clientIpStr[INET_ADDRSTRLEN] = {0};
-        inet_ntop(AF_INET, &(cliAddr.sin_addr), clientIpStr, INET_ADDRSTRLEN);
-        if (gFrontendDebugEnable) {
-        	std::printf("\n--------------------------------------------------\n");
-        	std::printf("[HTTP DEBUG] TCP Handshake SUCCESS! Connected client IP: %s\n", clientIpStr);
-        	std::printf("[HTTP DEBUG] Spawning background handler thread...\n");
-        	std::fflush(stdout);
-        }
-
-        std::thread handler([self, clientFd, clientIpStr]() {
-        	if (gFrontendDebugEnable) {
-            	std::printf("[HTTP THREAD] Thread started for client: %s\n", clientIpStr);
-            	std::fflush(stdout);
-        	}
-
-            std::string req;
-            char chunk[2048];
-            ssize_t bytesRecv = 0;
-            int totalBytes = 0;
+	    // --- LIVE IP HEALING AND ACQUISITION ---
+	    // If we booted with a stale or blank IP address configuration, poll until one arrives
+	    // UPDATE: Now aborts immediately if DLNA is toggled off
+	    while ((self->localIp == "0.0.0.0" || self->localIp.empty()) && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
+	        std::string checkedIp = GetLiveHttpSystemIP();
+	        if (checkedIp != "0.0.0.0" && !checkedIp.empty()) {
+	            self->localIp = checkedIp;
+	            if (gFrontendDebugEnable) {
+	            	std::printf("[HTTP DEBUG] Dynamic IP discovered and assigned: %s\n", self->localIp.c_str());
+	            	std::fflush(stdout);
+	            }
+	            break;
+	        }
+	        
+	        // Check for application shutdown or toggle requests while waiting for the network links
+	        for (int i = 0; i < 4 && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable; i++) {
+	            usleep(500000); // 2-second polling increments split up safely
+	        }
+	    }
+	    // --- END OF IP HEALING ---
+	
+	    // UPDATE: Master loop now continuously monitors the DLNA configuration flag
+	    while (atomic_get(&gStopService) == 0 && gFrontendDlnaEnable) {
+	        struct sockaddr_in cliAddr{};
+	        socklen_t cliLen = sizeof(cliAddr);
+	        
+	        // This call will unblock every 5 seconds (due to our previously set SO_RCVTIMEO) 
+	        // to re-evaluate the while loop conditions (shutdown or feature toggle off).
+	        int clientFd = accept(self->listenFd, (struct sockaddr*)&cliAddr, &cliLen);
+	        if (clientFd < 0) {
+	            // FIX: Include ETIMEDOUT for Haiku OS compliance
+	            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
+	                continue;
+	            }
+	            
+	            // Check if we dropped out due to system shutdown or feature disablement
+	            if (atomic_get(&gStopService) != 0 || !gFrontendDlnaEnable) break;
+	            
+	            if (gFrontendDebugEnable) {
+	            	std::printf("[HTTP DEBUG WARNING] Accept connection failed: %s\n", strerror(errno));
+	            	std::fflush(stdout);
+	            }
+	            continue;
+	        }
+	
+	
+	        // Heartbeat verification: If the system IP shifted, dynamically re-update it on the fly
+	        std::string validationIp = GetLiveHttpSystemIP();
+	        if (validationIp != "0.0.0.0" && validationIp != self->localIp) {
+	            self->localIp = validationIp;
+	            if (gFrontendDebugEnable) {
+	            	std::printf("[HTTP DEBUG] Network interface modified. Synchronizing server tracking to: %s\n", self->localIp.c_str());
+	            	std::fflush(stdout);
+	            }
+	        }
+	
+	        char clientIpStr[INET_ADDRSTRLEN] = {0};
+	        inet_ntop(AF_INET, &(cliAddr.sin_addr), clientIpStr, INET_ADDRSTRLEN);
+	        if (gFrontendDebugEnable) {
+	        	std::printf("\n--------------------------------------------------\n");
+	        	std::printf("[HTTP DEBUG] TCP Handshake SUCCESS! Connected client IP: %s\n", clientIpStr);
+	        	std::printf("[HTTP DEBUG] Spawning background handler thread...\n");
+	        	std::fflush(stdout);
+	        }
+	
+	        std::thread handler([self, clientFd, clientIpStr]() {
+	        	if (gFrontendDebugEnable) {
+	            	std::printf("[HTTP THREAD] Thread started for client: %s\n", clientIpStr);
+	            	std::fflush(stdout);
+	        	}
+	
+	            std::string req;
+	            char chunk[2048];
+	            ssize_t bytesRecv = 0;
+	            int totalBytes = 0;
 
                 // =========================================================================
                 // HIGH-PERFORMANCE UNIFIED REQUEST STREAM READER
@@ -1259,11 +1493,6 @@ private:
             close(clientFd);
         }
     }
-
-
-
-
-
 
 
     // Endpoint: GET / — Serves an in-memory visual web dashboard panel
@@ -1828,144 +2057,145 @@ private:
 	    return (strTarget.rfind(strBase, 0) == 0);
 	}
 	
-void HandleDeleteSchedule(int clientFd, const std::string& requestStr) {
-    std::string body = ExtractHttpRequestBody(requestStr);
-    
-    // DEBUG STEP 1: Verify incoming raw network payload string data
-    std::printf("\n================ [DEBUG DELETION] ================\n");
-    std::printf("[DEBUG] Incoming Request Body: %s\n", body.empty() ? "EMPTY" : body.c_str());
-    std::fflush(stdout);
-
-    if (body.empty()) {
-        SendJsonResponse(clientFd, 400, "Bad Request", "{\"status\":\"error\",\"message\":\"Empty JSON payload\"}");
-        return;
-    }
-
-    try {
-        auto jIn = json::parse(body);
-        
-        // Check for required elements
-        if (!jIn.contains("date") || !jIn.contains("channel")) {
-            std::printf("[DEBUG ERROR] Missing basic JSON fields (date or channel).\n");
-            std::fflush(stdout);
-            SendJsonResponse(clientFd, 400, "Bad Request", "{\"status\":\"error\",\"message\":\"Missing required fields\"}");
-            return;
-        }
-
-        std::string date = jIn["date"];
-        std::string channel = jIn["channel"];
-        std::string time = jIn.value("time", "00:00");
-        
-        // Handle optional frontend fields gracefully
-        std::string titleOverride = jIn.value("title_override", "");
-
-        std::printf("[DEBUG] Parsed Fields -> Date: %s | Time: %s | Channel: %s | Title Override: %s\n", 
-                    date.c_str(), time.c_str(), channel.c_str(), titleOverride.empty() ? "NONE" : titleOverride.c_str());
-        std::fflush(stdout);
-
-        bool foundInSchedule = false;
-        std::string targetFilePath = "";
-        
-        // Lock and attempt to match an active schedule item first
-        gScheduleLocker.Lock();
-        for (auto it = gScheduleList.begin(); it != gScheduleList.end(); ++it) {
-            if (it->startDate == date && it->startTime == time && it->channel == channel) {
-                foundInSchedule = true;
-                
-                std::string cleanTitle = it->showTitle;
-                std::replace(cleanTitle.begin(), cleanTitle.end(), ' ', '_');
-                targetFilePath = gGlobalSaveDirectory + "/" + cleanTitle + "_" + it->startDate + "_" + it->channel + ".ts";
-                
-                std::printf("[DEBUG] Found item match inside gScheduleList array!\n");
-                std::printf("[DEBUG] Generated target file path from schedule metadata: %s\n", targetFilePath.c_str());
-                std::fflush(stdout);
-
-                // Check and kill active curl streaming threads
-                gRunningWorkersLocker.Lock();
-                auto workerIt = gRunningWorkersMap.find(targetFilePath);
-                if (workerIt != gRunningWorkersMap.end()) {
-                    std::printf("[DEBUG ALERT] This file is currently recording! Triggering cancellation flag context.\n");
-                    if (workerIt->second.cancellationFlag != nullptr) {
-                        atomic_set(workerIt->second.cancellationFlag, 1);
-                    }
-                }
-                gRunningWorkersLocker.Unlock();
-
-                gScheduleList.erase(it);
-                break;
-            }
-        }
-        gScheduleLocker.Unlock();
-
-        // FALLBACK: If it wasn't found in memory schedules list, it's an old file or finished recording.
-        // We use our clean title override from the library panel array directly!
-        if (!foundInSchedule) {
-            std::printf("[DEBUG] Item not found inside active schedule RAM lists. Dropping down to library fallback lookup style.\n");
-            if (!titleOverride.empty()) {
-                targetFilePath = gGlobalSaveDirectory + "/" + titleOverride + "_" + date + "_" + channel + ".ts";
-                std::printf("[DEBUG] Generated fallback library file target path: %s\n", targetFilePath.c_str());
-            } else {
-                std::printf("[DEBUG WARNING] Deletion target missing from schedule and no title_override was supplied by frontend.\n");
-            }
-            std::fflush(stdout);
-        }
-
-        // Save modification changes down onto disk state
-        SaveSchedulesToDisk();
-
-        // FILE DISK ERASURE LAYER
-        bool physicalFileDeleted = false;
-        if (!targetFilePath.empty()) {
-            std::printf("[DEBUG] Testing filesystem access checks for path: %s\n", targetFilePath.c_str());
-            std::fflush(stdout);
-
-            if (access(targetFilePath.c_str(), F_OK) == 0) {
-                std::printf("[DEBUG] File exists on hard drive filesystem! Running path safety container check...\n");
-                std::fflush(stdout);
-
-                if (IsPathSafeAndContained(targetFilePath, gGlobalSaveDirectory)) {
-                    std::printf("[DEBUG] Safety boundary pass! Running POSIX unlink() on device file now.\n");
-                    std::fflush(stdout);
-
-                    if (unlink(targetFilePath.c_str()) == 0) {
-                        physicalFileDeleted = true;
-                        std::printf("[DEBUG SUCCESS] Physical file completely deleted from system hard disk!\n");
-                    } else {
-                        std::printf("[DEBUG ERROR] POSIX unlink system call failed with error text: %s\n", strerror(errno));
-                    }
-                } else {
-                    std::printf("[DEBUG SECURITY FAIL] Path safety evaluation rejected the target path modification!\n");
-                }
-            } else {
-                std::printf("[DEBUG ERROR] File check skipped. access(F_OK) reported that file does not exist or is inaccessible.\n");
-            }
-            std::fflush(stdout);
-        }
-
-        std::printf("==================================================\n\n");
-        std::fflush(stdout);
-
-        json jOut = {
-            {"status", "success"},
-            {"message", foundInSchedule ? "Schedule dropped" : "Completed item processed"},
-            {"file_deleted", physicalFileDeleted}
-        };
-        SendJsonResponse(clientFd, 200, "OK", jOut.dump());
-
-    } catch (const std::exception& e) {
-        std::printf("[DEBUG EXCEPTION CRASH] JSON processing caught error logic: %s\n", e.what());
-        std::printf("==================================================\n\n");
-        std::fflush(stdout);
-        
-        json err = {{"status", "error"}, {"message", e.what()}};
-        SendJsonResponse(clientFd, 500, "Internal Server Error", err.dump());
-    }
-}
+	void HandleDeleteSchedule(int clientFd, const std::string& requestStr) {
+	    std::string body = ExtractHttpRequestBody(requestStr);
+	    
+	    // DEBUG STEP 1: Verify incoming raw network payload string data
+	    std::printf("\n================ [DEBUG DELETION] ================\n");
+	    std::printf("[DEBUG] Incoming Request Body: %s\n", body.empty() ? "EMPTY" : body.c_str());
+	    std::fflush(stdout);
+	
+	    if (body.empty()) {
+	        SendJsonResponse(clientFd, 400, "Bad Request", "{\"status\":\"error\",\"message\":\"Empty JSON payload\"}");
+	        return;
+	    }
+	
+	    try {
+	        auto jIn = json::parse(body);
+	        
+	        // Check for required elements
+	        if (!jIn.contains("date") || !jIn.contains("channel")) {
+	            std::printf("[DEBUG ERROR] Missing basic JSON fields (date or channel).\n");
+	            std::fflush(stdout);
+	            SendJsonResponse(clientFd, 400, "Bad Request", "{\"status\":\"error\",\"message\":\"Missing required fields\"}");
+	            return;
+	        }
+	
+	        std::string date = jIn["date"];
+	        std::string channel = jIn["channel"];
+	        std::string time = jIn.value("time", "00:00");
+	        
+	        // Handle optional frontend fields gracefully
+	        std::string titleOverride = jIn.value("title_override", "");
+	
+	        std::printf("[DEBUG] Parsed Fields -> Date: %s | Time: %s | Channel: %s | Title Override: %s\n", 
+	                    date.c_str(), time.c_str(), channel.c_str(), titleOverride.empty() ? "NONE" : titleOverride.c_str());
+	        std::fflush(stdout);
+	
+	        bool foundInSchedule = false;
+	        std::string targetFilePath = "";
+	        
+	        // Lock and attempt to match an active schedule item first
+	        gScheduleLocker.Lock();
+	        for (auto it = gScheduleList.begin(); it != gScheduleList.end(); ++it) {
+	            if (it->startDate == date && it->startTime == time && it->channel == channel) {
+	                foundInSchedule = true;
+	                
+	                std::string cleanTitle = it->showTitle;
+	                std::replace(cleanTitle.begin(), cleanTitle.end(), ' ', '_');
+	                targetFilePath = gGlobalSaveDirectory + "/" + cleanTitle + "_" + it->startDate + "_" + it->channel + ".ts";
+	                
+	                std::printf("[DEBUG] Found item match inside gScheduleList array!\n");
+	                std::printf("[DEBUG] Generated target file path from schedule metadata: %s\n", targetFilePath.c_str());
+	                std::fflush(stdout);
+	
+	                // Check and kill active curl streaming threads
+	                gRunningWorkersLocker.Lock();
+	                auto workerIt = gRunningWorkersMap.find(targetFilePath);
+	                if (workerIt != gRunningWorkersMap.end()) {
+	                    std::printf("[DEBUG ALERT] This file is currently recording! Triggering cancellation flag context.\n");
+	                    if (workerIt->second.cancellationFlag != nullptr) {
+	                        atomic_set(workerIt->second.cancellationFlag, 1);
+	                    }
+	                }
+	                gRunningWorkersLocker.Unlock();
+	
+	                gScheduleList.erase(it);
+	                break;
+	            }
+	        }
+	        gScheduleLocker.Unlock();
+	
+	        // FALLBACK: If it wasn't found in memory schedules list, it's an old file or finished recording.
+	        // We use our clean title override from the library panel array directly!
+	        if (!foundInSchedule) {
+	            std::printf("[DEBUG] Item not found inside active schedule RAM lists. Dropping down to library fallback lookup style.\n");
+	            if (!titleOverride.empty()) {
+	                targetFilePath = gGlobalSaveDirectory + "/" + titleOverride + "_" + date + "_" + channel + ".ts";
+	                std::printf("[DEBUG] Generated fallback library file target path: %s\n", targetFilePath.c_str());
+	            } else {
+	                std::printf("[DEBUG WARNING] Deletion target missing from schedule and no title_override was supplied by frontend.\n");
+	            }
+	            std::fflush(stdout);
+	        }
+	
+	        // Save modification changes down onto disk state
+	        SaveSchedulesToDisk();
+	
+	        // FILE DISK ERASURE LAYER
+	        bool physicalFileDeleted = false;
+	        if (!targetFilePath.empty()) {
+	            std::printf("[DEBUG] Testing filesystem access checks for path: %s\n", targetFilePath.c_str());
+	            std::fflush(stdout);
+	
+	            if (access(targetFilePath.c_str(), F_OK) == 0) {
+	                std::printf("[DEBUG] File exists on hard drive filesystem! Running path safety container check...\n");
+	                std::fflush(stdout);
+	
+	                if (IsPathSafeAndContained(targetFilePath, gGlobalSaveDirectory)) {
+	                    std::printf("[DEBUG] Safety boundary pass! Running POSIX unlink() on device file now.\n");
+	                    std::fflush(stdout);
+	
+	                    if (unlink(targetFilePath.c_str()) == 0) {
+	                        physicalFileDeleted = true;
+	                        std::printf("[DEBUG SUCCESS] Physical file completely deleted from system hard disk!\n");
+	                    } else {
+	                        std::printf("[DEBUG ERROR] POSIX unlink system call failed with error text: %s\n", strerror(errno));
+	                    }
+	                } else {
+	                    std::printf("[DEBUG SECURITY FAIL] Path safety evaluation rejected the target path modification!\n");
+	                }
+	            } else {
+	                std::printf("[DEBUG ERROR] File check skipped. access(F_OK) reported that file does not exist or is inaccessible.\n");
+	            }
+	            std::fflush(stdout);
+	        }
+	
+	        std::printf("==================================================\n\n");
+	        std::fflush(stdout);
+	
+	        json jOut = {
+	            {"status", "success"},
+	            {"message", foundInSchedule ? "Schedule dropped" : "Completed item processed"},
+	            {"file_deleted", physicalFileDeleted}
+	        };
+	        SendJsonResponse(clientFd, 200, "OK", jOut.dump());
+	
+	    } catch (const std::exception& e) {
+	        std::printf("[DEBUG EXCEPTION CRASH] JSON processing caught error logic: %s\n", e.what());
+	        std::printf("==================================================\n\n");
+	        std::fflush(stdout);
+	        
+	        json err = {{"status", "error"}, {"message", e.what()}};
+	        SendJsonResponse(clientFd, 500, "Internal Server Error", err.dump());
+	    }
+	}
 
 
 	bool VerifyAndRefreshGuideCache() {
 	    const std::string localPath = "/boot/home/config/settings/HaikuDVR/guide.db";
-	    const std::string cacheControlPath = localPath + ".cache";
+	    // Synchronized perfectly with your frontend's layout timestamp tracker file
+	    const std::string cacheControlPath = "/boot/home/config/settings/HaikuDVR/guide_master.xml.cache";
 	    
 	    if (gFrontendDebugEnable) std::printf("[DVR DEBUG] Checking backend time-window cache status...\n");
 	
@@ -2039,15 +2269,142 @@ void HandleDeleteSchedule(int clientFd, const std::string& requestStr) {
 	    }
 	    // =========================================================================
 	
-	    // Update the timestamp log in guide.db.cache so the timer safely resets
+	    // Update the timestamp log in guide_master.xml.cache so the timer safely resets
 	    std::ofstream cacheOut(cacheControlPath);
 	    if (cacheOut.is_open()) {
-	        cacheOut << currentTime;
+	        cacheOut << currentTime << "\n";
 	        cacheOut.close();
 	    }
 	
-	    return true; // Cache was refreshed/invalidated
+	    return true; 
 	}
+
+
+// Static network payload callback wrapper to capture text vectors safely over cURL
+static size_t NetworkStringCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    std::string* s = static_cast<std::string*>(userp);
+    size_t totalSize = size * nmemb;
+    s->append(static_cast<char*>(contents), totalSize);
+    return totalSize;
+}
+
+// Complete combined asynchronous schedule downloader thread loop
+static int32 AsyncUpdateGuideWorker(void* data) {
+    if (gFrontendDebugEnable) {
+        std::printf("[GUIDE TRACKER] Asynchronous background update sync worker thread initialized.\n");
+        std::fflush(stdout);
+    }
+
+    // 1. DYNAMIC NETWORK TUNER IDENTIFICATION PASS
+    std::string targetIp = "";
+    std::vector<std::string> tuners = DiscoverAllTuners();
+    if (!tuners.empty()) {
+        targetIp = tuners[0];
+    } else {
+        std::printf("[GUIDE TRACKER ERROR] Sync aborted. No hardware tuners found on subnet.\n");
+        std::fflush(stdout);
+        return B_ERROR;
+    }
+
+    // 2. DISCOVER LOCAL DEVICE AUTHENTICATION TOKEN (discover.json)
+    std::string discoveryUrl = "http://" + targetIp + "/discover.json";
+    std::string discoverPayload = "";
+    
+    if (gFrontendDebugEnable) {
+        std::printf("[GUIDE TRACKER] Querying device profile metrics via: %s\n", discoveryUrl.c_str());
+        std::fflush(stdout);
+    }
+
+    CURL* curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 HaikuDVR/1.0");
+        curl_easy_setopt(curl, CURLOPT_URL, discoveryUrl.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NetworkStringCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &discoverPayload);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L); // 5-second timeout safeguard
+        
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        
+        if (res != CURLE_OK) {
+            std::printf("[GUIDE TRACKER ERROR] Failed to connect to local tuner hardware discovery profile endpoint.\n");
+            std::fflush(stdout);
+            return B_ERROR;
+        }
+    }
+
+    std::string deviceAuthToken = "";
+    try {
+        auto jDisc = json::parse(discoverPayload);
+        if (jDisc.is_object() && jDisc.contains("DeviceAuth")) {
+            deviceAuthToken = jDisc["DeviceAuth"].get<std::string>();
+        }
+    } catch (...) {
+        std::printf("[GUIDE TRACKER ERROR] Failed to parse JSON dictionary tokens from discovery file payload.\n");
+        std::fflush(stdout);
+        return B_ERROR;
+    }
+
+    if (deviceAuthToken.empty()) {
+        std::printf("[GUIDE TRACKER ERROR] Tuner device reported an empty or unauthorized DeviceAuth token parameter key.\n");
+        std::fflush(stdout);
+        return B_ERROR;
+    }
+
+    // 3. GENERATE TARGET INFRASTRUCTURE FILENAMES AND ENDPOINT LINKS
+    std::string xmltvUrl = "https://api.hdhomerun.com/api/xmltv?DeviceAuth=" + deviceAuthToken;
+    std::string masterXmlPath = "/boot/home/config/settings/HaikuDVR/guide_master.xml";
+
+    if (gFrontendDebugEnable) {
+        std::printf("[GUIDE TRACKER] Token match success! Running upstream cURL channel download payload from cloud link: %s\n", xmltvUrl.c_str());
+        std::fflush(stdout);
+    }
+
+    // 4. DOWNSTREAM MASTER SECURE TRANSMISSION
+    std::FILE* xmlFilePtr = std::fopen(masterXmlPath.c_str(), "wb");
+    if (!xmlFilePtr) {
+        std::printf("[GUIDE TRACKER ERROR] Failed to open master XML destination handle file configuration on system disk storage filesystem.\n");
+        std::fflush(stdout);
+        return B_ERROR;
+    }
+
+    curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, xmltvUrl.c_str());
+        // Mirroring your exact user-agent string signature parameters
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 HaikuDVR/1.0");
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip"); // Enforces lightning fast hardware link compression pipelines
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, xmlFilePtr);
+        curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L); // 1-minute streaming time threshold window
+        
+        CURLcode res = curl_easy_perform(curl);
+        std::fclose(xmlFilePtr);
+        curl_easy_cleanup(curl);
+
+        if (res == CURLE_OK) {
+            if (gFrontendDebugEnable) {
+                std::printf("[GUIDE TRACKER] XML Schedule download completed successfully. Initializing local database processing block tables...\n");
+                std::fflush(stdout);
+            }
+
+            // 5. PROCESS XML MATRIX STREAM DATA DIRECTLY ONTO SQLITE STORAGE
+            bool ingestSuccess = IngestMasterXmlToSqlite(masterXmlPath);
+            
+            if (ingestSuccess && gFrontendDebugEnable) {
+                std::printf("[GUIDE TRACKER SUCCESS] System database tables synchronized cleanly! Background thread safe-closing.\n");
+                std::fflush(stdout);
+            }
+        } else {
+            std::printf("[GUIDE TRACKER ERROR] SiliconDust secure cloud connection transmission collapsed: %s\n", curl_easy_strerror(res));
+            std::fflush(stdout);
+            return B_ERROR;
+        }
+    }
+
+    return B_OK;
+}
+
 
 
     // Endpoint: GET /api/guide — Queries your live SQLite guide.db directly
@@ -2057,13 +2414,23 @@ void HandleDeleteSchedule(int clientFd, const std::string& requestStr) {
 	    if (dataNeedsSync) {
 	        if (gFrontendDebugEnable) {
 	            std::printf("[DVR INTERFACE] Notice: System needs to trigger an external upstream XML schedule download sync.\n");
+	            std::fflush(stdout);
 	        }
-	        // Optional: Call  internal backend HDHomeRun network downloader subroutine function here if desired!
+	
+	        // --- SPAWN THE ASYNC WORKER THREAD ---
+	        // Uses Haiku OS native thread spawning primitives to avoid locking up your web dashboard
+	        thread_id syncThread = spawn_thread(AsyncUpdateGuideWorker, "DVR_GuideSync_Worker", B_NORMAL_PRIORITY, nullptr);
+	        if (syncThread >= 0) {
+	            resume_thread(syncThread);
+	        } else {
+	            std::printf("[DVR INTERFACE ERROR] Failed to spawn background guide update sync worker thread.\n");
+	            std::fflush(stdout);
+	        }
 	    }
 	
 	    std::string targetDate = "";
-	    std::string targetTime = "";
-    
+	    std::string targetTime = "";   
+
         
         // 1. Safe extraction of ?dt= and &tm= parameters
         size_t dtPos = requestStr.find("dt=");

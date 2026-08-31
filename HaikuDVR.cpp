@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.42 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.43 (Haiku OS)";
 }
 
 const uint32 MSG_TOGGLE_DLNA			    = 'dlna';
@@ -4162,51 +4162,68 @@ public:
         fDebugOnItem->SetMarked(cfg.debugEnable);
         optionsMenu->AddItem(fDebugOnItem);  
             
-        optionsMenu->AddSeparatorItem(); 
-        
-        BMessage* msgDlnaOn = new BMessage(MSG_TOGGLE_DLNA);
-        BString labelString;
-
-        if (cfg.dlnaEnable) {
-            int32 boundPort = 8081; // Fallback default
-            
-            // Loop through the 9 fallback port tries to see which socket is listening
-            for (int32 port = 8081; port <= 8090; port++) {
-                int socketFd = socket(AF_INET, SOCK_STREAM, 0);
-                if (socketFd >= 0) {
-                    struct sockaddr_in addr;
-                    std::memset(&addr, 0, sizeof(addr));
-                    addr.sin_family = AF_INET;
-                    addr.sin_port = htons(port);
-                    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-                    
-                    // Set a very quick timeout so it doesn't hang the GUI boot sequence
-                    struct timeval tv;
-                    tv.tv_sec = 0;
-                    tv.tv_usec = 10000; // 10ms
-                    setsockopt(socketFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-                    
-                    // If connect returns 0, the server is actively running on this port!
-                    if (connect(socketFd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-                        boundPort = port;
-                        close(socketFd);
-                        break;
-                    }
-                    close(socketFd);
-                }
-            }
-            labelString.SetToFormat("Enable Http & Dlna Server (Active Port: %d)", boundPort);
-        } else {
-            labelString.SetTo("Enable Http & Dlna Server [Disabled]");
-        }
-
-        fDlnaOnItem = new BMenuItem(labelString.String(), msgDlnaOn);        
-        fDlnaOnItem->SetMarked(cfg.dlnaEnable);
-        optionsMenu->AddItem(fDlnaOnItem);  
-
-            
-        optionsMenu->AddSeparatorItem();         
-
+		optionsMenu->AddSeparatorItem(); 
+		
+		BMessage* msgDlnaOn = new BMessage(MSG_TOGGLE_DLNA);
+		BString labelString;
+		
+		if (cfg.dlnaEnable) {
+		    int32 boundPort = -1; // Default to -1 (not found)
+		    
+		    for (int32 port = 8081; port <= 8090; port++) {
+		        int socketFd = socket(AF_INET, SOCK_STREAM, 0);
+		        if (socketFd >= 0) {
+		            struct sockaddr_in addr;
+		            std::memset(&addr, 0, sizeof(addr));
+		            addr.sin_family = AF_INET;
+		            addr.sin_port = htons(port);
+		            addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+		            
+		            // Allow up to 100ms so slow server thread responses aren't dropped
+		            struct timeval tv;
+		            tv.tv_sec = 0;
+		            tv.tv_usec = 100000; // 100ms
+		            setsockopt(socketFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+		            setsockopt(socketFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+		            
+		            if (connect(socketFd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+		                // Use GET instead of HEAD - some simple embedded HTTP servers fail on HEAD
+		                const char* httpRequest = "GET / HTTP/1.0\r\n\r\n";
+		                send(socketFd, httpRequest, strlen(httpRequest), 0);
+		
+		                char response[256] = {0};
+		                ssize_t bytesRead = recv(socketFd, response, sizeof(response) - 1, 0);
+		                
+		                if (bytesRead > 0) {
+		                    response[bytesRead] = '\0';
+		                    BString respStr(response);
+		                    
+		                    // If port responds with ANY valid HTTP status line, it's our HTTP/DLNA server
+		                    if (respStr.FindFirst("HTTP/1.") != B_ERROR) {
+		                        boundPort = port;
+		                        close(socketFd);
+		                        break;
+		                    }
+		                }
+		            }
+		            close(socketFd);
+		        }
+		    }
+		
+		    if (boundPort != -1) {
+		        labelString.SetToFormat("Enable Http & Dlna Server (Active Port: %" B_PRId32 ")", boundPort);
+		    } else {
+		        labelString.SetTo("Enable Http & Dlna Server (Not Detected)");
+		    }
+		} else {
+		    labelString.SetTo("Enable Http & Dlna Server [Disabled]");
+		}
+		
+		fDlnaOnItem = new BMenuItem(labelString.String(), msgDlnaOn);        
+		fDlnaOnItem->SetMarked(cfg.dlnaEnable);
+		optionsMenu->AddItem(fDlnaOnItem);  
+		
+		optionsMenu->AddSeparatorItem();
         BMessage* msgOpenGuide = new BMessage(MSG_OPEN_GUIDE);
         BMenuItem* guideItem = new BMenuItem("Open Guide...", msgOpenGuide);
         optionsMenu->AddItem(guideItem);
