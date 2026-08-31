@@ -597,6 +597,206 @@ public:
 	
     DlnasHttpStreamingServer() : serverThread(-1), listenFd(-1), port(8081) {}
     
+
+// Endpoint: GET /api/recordings/play?file=FILENAME — Smart local/remote hybrid playback engine
+void HandlePlayRecording(int clientFd, const std::string& requestStr) {
+    size_t queryPos = requestStr.find("/api/recordings/play?file=");
+    if (queryPos == std::string::npos) {
+        SendJsonResponse(clientFd, 400, "Bad Request", "{\"error\":\"Missing file parameter\"}");
+        return;
+    }
+
+    size_t endPos = requestStr.find(" ", queryPos);
+    std::string filename = requestStr.substr(queryPos + 26, endPos - (queryPos + 26));
+
+    gScheduleLocker.Lock();
+    std::string baseDir = gGlobalSaveDirectory;
+    gScheduleLocker.Unlock();
+
+    std::string fullPath = baseDir + "/" + filename;
+
+    // Security verify: Block file access out-of-bounds traversal
+    if (!IsPathSafeAndContained(fullPath, baseDir) || access(fullPath.c_str(), F_OK) != 0) {
+        SendJsonResponse(clientFd, 404, "Not Found", "{\"error\":\"Recording file not found or inaccessible\"}");
+        return;
+    }
+
+    // 1. Identify Client and Server IPs to evaluate boundaries
+    std::string clientIpStr = "127.0.0.1";
+    struct sockaddr_storage peerAddr;
+    socklen_t peerAddrLen = sizeof(peerAddr);
+    if (getpeername(clientFd, (struct sockaddr*)&peerAddr, &peerAddrLen) == 0) {
+        if (peerAddr.ss_family == AF_INET) {
+            struct sockaddr_in* s = (struct sockaddr_in*)&peerAddr;
+            char ipBuffer[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(s->sin_addr), ipBuffer, INET_ADDRSTRLEN);
+            clientIpStr = ipBuffer;
+        }
+    }
+
+    std::string serverIpStr = "";
+    size_t hostPos = requestStr.find("Host: ");
+    if (hostPos != std::string::npos) {
+        size_t valStart = hostPos + 6;
+        size_t valEnd = requestStr.find("\r\n", valStart);
+        if (valEnd != std::string::npos) {
+            std::string fullHost = requestStr.substr(valStart, valEnd - valStart);
+            size_t colonIndex = fullHost.find(":");
+            serverIpStr = (colonIndex != std::string::npos) ? fullHost.substr(0, colonIndex) : fullHost;
+        }
+    }
+
+    bool isLocalClient = (clientIpStr == "127.0.0.1" || clientIpStr == "localhost" || clientIpStr == serverIpStr);
+    std::string streamingUrl = "http://" + (serverIpStr.empty() ? GetLiveHttpSystemIP() : serverIpStr) + ":" + std::to_string(port) + "/video/" + filename;
+
+    if (isLocalClient) {
+        // =========================================================================
+        // LOCAL WORKSPACE WORKSTATION MODE: Native host desktop process fork 
+        // =========================================================================
+        if (gFrontendDebugEnable) {
+            std::printf("[LIBRARY LAUNCHER] Local environment matched! Spinning native desktop playback process context.\n");
+            std::fflush(stdout);
+        }
+
+        const char* binaryPath = "/boot/system/bin/mpv";
+        if (access("/boot/system/bin/hTV", F_OK) == 0) {
+            binaryPath = "/boot/system/bin/hTV";
+        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
+            binaryPath = "/boot/system/bin/vlc";
+        }
+
+        pid_t processId = fork();
+        if (processId == 0) {
+            char* playerArgs[3];
+            playerArgs[0] = (char*)binaryPath;
+            playerArgs[1] = (char*)fullPath.c_str(); // Pass local file directly for zero-latency local IO play
+            playerArgs[2] = nullptr; 
+            
+            execv(playerArgs[0], playerArgs);
+            _exit(1); 
+        }
+
+        SendJsonResponse(clientFd, 200, "OK", "{\"status\":\"success\",\"mode\":\"local_launch\"}");
+    } else {
+        // =========================================================================
+        // REMOTE NETWORK CLIENT MODE: Package dynamic streaming .pls playlist file
+        // =========================================================================
+        if (gFrontendDebugEnable) {
+            std::printf("[LIBRARY LAUNCHER] Remote environment context matched. Sending PLS video playlist stream back.\n");
+            std::fflush(stdout);
+        }
+
+        std::string plsContent = "[playlist]\r\n";
+        plsContent += "NumberOfEntries=1\r\n";
+        plsContent += "File1=" + streamingUrl + "\r\n";
+        plsContent += "Title1=" + filename + "\r\n";
+        plsContent += "Length1=-1\r\n";
+        plsContent += "Version=2\r\n";
+
+        std::string responseHeaders = 
+            "HTTP/1.1 200 OK\r\n"
+            "Server: HaikuOS HaikuDVR-MediaServer/1.0\r\n"
+            "Content-Type: audio/x-scpls\r\n" 
+            "Content-Disposition: attachment; filename=\"" + filename + ".pls\"\r\n"
+            "Content-Length: " + std::to_string(plsContent.length()) + "\r\n"
+            "Connection: close\r\n\r\n";
+
+        send(clientFd, responseHeaders.c_str(), responseHeaders.length(), 0);
+        send(clientFd, plsContent.c_str(), plsContent.length(), 0);
+        close(clientFd);
+    }
+}
+
+
+// Endpoint: GET /api/recordings — Dynamically scans disk and injects active recording status flags
+void HandleGetRecordings(int clientFd) {
+    gScheduleLocker.Lock();
+    std::string baseDir = gGlobalSaveDirectory;
+    gScheduleLocker.Unlock();
+
+    json jList = json::array();
+    DIR* dir = opendir(baseDir.c_str());
+    if (dir == nullptr) {
+        SendJsonResponse(clientFd, 500, "Internal Server Error", "{\"error\":\"Cannot open save directory\"}");
+        return;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string fileName(entry->d_name);
+        
+        // Only catalog our Transport Stream files
+        if (fileName.length() > 3 && fileName.substr(fileName.length() - 3) == ".ts") {
+            std::string fullPath = baseDir + "/" + fileName;
+            
+            struct stat fileStat;
+            if (stat(fullPath.c_str(), &fileStat) == 0) {
+                double fileSizeMB = static_cast<double>(fileStat.st_size) / (1024.0 * 1024.0);
+                
+                // Parse out Title, Date, and Channel tokens
+                std::string title = fileName;
+                std::string dateStr = "Unknown Date";
+                std::string channelStr = "Unknown Ch";
+                
+                size_t lastDot = fileName.find_last_of(".");
+                std::string nameWithoutExt = fileName.substr(0, lastDot);
+                
+                std::vector<std::string> tokens;
+                std::stringstream ss(nameWithoutExt);
+                std::string token;
+                while (std::getline(ss, token, '_')) {
+                    tokens.push_back(token);
+                }
+                
+                if (tokens.size() >= 3) {
+                    channelStr = tokens.back();
+                    tokens.pop_back();
+                    dateStr = tokens.back();
+                    tokens.pop_back();
+                    
+                    title = "";
+                    for (size_t i = 0; i < tokens.size(); i++) {
+                        title += tokens[i] + (i + 1 < tokens.size() ? " " : "");
+                    }
+                }
+
+                // --- NEW: CROSS-REFERENCE ACTIVE WORKERS ---
+                bool isCurrentlyRecording = false;
+                gRunningWorkersLocker.Lock();
+                if (gRunningWorkersMap.find(fullPath) != gRunningWorkersMap.end()) {
+                    isCurrentlyRecording = true;
+                }
+                gRunningWorkersLocker.Unlock();
+
+                jList.push_back({
+                    {"filename", fileName},
+                    {"title", title},
+                    {"date", dateStr},
+                    {"channel", channelStr},
+                    {"size_mb", MathRoundToTwoDecimals(fileSizeMB)},
+                    {"modified", fileStat.st_mtime},
+                    {"is_recording", isCurrentlyRecording} // <-- Injected active flag status hook
+                });
+            }
+        }
+    }
+    closedir(dir);
+
+    // Sort recordings by newest timestamp first
+    std::sort(jList.begin(), jList.end(), [](const json& a, const json& b) {
+        return a.value("modified", 0LL) > b.value("modified", 0LL);
+    });
+
+    SendJsonResponse(clientFd, 200, "OK", jList.dump());
+}
+
+
+
+// Small helper utility for size formatting string presentation
+double MathRoundToTwoDecimals(double val) {
+    return std::round(val * 100.0) / 100.0;
+}
+
  
 
 // Helper utility to grab the actual system IP address
@@ -833,6 +1033,15 @@ static int32 HttpWorkerLoop(void* data) {
 	                if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/desktop/play\n");
 	                self->HandleDesktopAppLaunch(clientFd, req);
 	            }
+	            else if (req.find("GET /api/recordings/play?file=") != std::string::npos) {
+				    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: GET /api/recordings/play\n");
+				    self->HandlePlayRecording(clientFd, req);				
+				}
+	            else if (req.find("GET /api/recordings") != std::string::npos) {
+				    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: GET /api/recordings\n");
+				    self->HandleGetRecordings(clientFd);
+				}
+
 	            // --- CUSTOM INTEGRATED ADMIN API ENDPOINTS ---
 	            else if (req.find("GET /api/guide") != std::string::npos) {
 	                if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/guide\n");
@@ -901,12 +1110,7 @@ static int32 HttpWorkerLoop(void* data) {
 	        });
 	        handler.detach();
 	    }
-
-
-
-
-
-        
+       
         if (gFrontendDebugEnable) {
             std::printf("[HTTP DEBUG] Shutting down HTTP loop container.\n");
             std::fflush(stdout);
@@ -1088,6 +1292,9 @@ private:
             "  .modal-content { background: #1e1e1e; border: 1px solid #3a3a3a; padding: 20px; border-radius: 8px; max-width: 600px; width: 95%; position: relative; }\n"
             "  .close-btn { position: absolute; right: 15px; top: 10px; color: #aaa; font-size: 24px; cursor: pointer; }\n"
             "  video { width: 100%; border-radius: 4px; margin-top: 15px; background: #000; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }\n"
+            "  /* RED PULSATING RECORDING BADGE STYLES */\n"
+            "  .badge-rec { background: #a80000; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; animation: pulseRed 1.8s infinite ease-in-out; margin-left: 8px; display: inline-flex; align-items: center; gap: 4px; }\n"
+            "  @keyframes pulseRed { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }\n"
             "</style>\n"
             "</head>\n<body>\n"
             "<div class='container'>\n"
@@ -1136,12 +1343,20 @@ private:
 			"        </form>\n"
 			"      </div>\n"
 
-            "      <div class='card'>\n"
+            "      <div class='card' style='margin-bottom: 20px;'>\n"
             "        <h2>Active Task Schedules</h2>\n"
             "        <div id='schedule-target'>No active tasks recorded.</div>\n"
             "      </div>\n"
+
+            "      <!-- NEW: RECORDINGS LIBRARY PANEL CARD -->\n"
+            "      <div class='card'>\n"
+            "        <h2>Completed Recordings Library</h2>\n"
+            "        <div id='recordings-target'>Scanning disk for media assets...</div>\n"
+            "      </div>\n"
+
             "    </div>\n"
-            "  </div>\n" // Ends your master grid panel container layout block safely
+            "  </div>\n" // Ends master grid panel container layout block safely
+
             "</div>\n"
             "\n"
             "<!-- NATIVE INFRASTRUCTURE FOR PROGRAM VISUAL MODALS -->\n"
@@ -1283,7 +1498,6 @@ private:
 			"        document.getElementById('title').focus();\n"
 			"      };\n"
 
-
 			"      \n"
 			"      // CLIENT-SIDE ADAPTIVE HYBRID FETCH ROUTE\n"
 			"      playerBox.innerHTML = '<button class=\"btn\" style=\"background:#107c41; margin-bottom:10px; width:100%; padding:10px;\" id=\"play-live-btn\">Watch Live</button>';\n"
@@ -1368,7 +1582,6 @@ private:
 			"      }\n"
 			"    });\n"
 			"  });\n"
-
 			
 			"  \n"
 
@@ -1391,9 +1604,6 @@ private:
             "          document.getElementById('guide-target').innerHTML = html;\n"
             "        });\n"
             "  });\n"
-
-
-
 
 			"  \n"
 			"  try {\n"
@@ -1439,7 +1649,7 @@ private:
 			"	      .catch(err => console.error('Could not communicate with HDHomeRun tuner API', err));\n"
 			"	  }\n"
 				
-				  // Find your boot sequence line and register it:
+				  // Find boot sequence line and register it:
 			"	  try {\n"
 			"	    let now = new Date();\n"
 			"	    let localISODate = now.toLocaleDateString('sv');\n"
@@ -1450,20 +1660,128 @@ private:
 			"	    document.getElementById('date').value = localISODate;\n"
 			"	    document.getElementById('guide-date').value = localISODate;\n"
 			"	    document.getElementById('guide-time').value = localISOTime;\n"
-			"	  } catch(err) {}\n"
-				  
-				  // RUN HARDWARE DISCOVERY ON PAGE LOAD
-			"	  loadGuide();\n"
-			"	  loadSchedules();\n" 
-			"	  loadTuners();\n" // <-- Populates tuner addresses directly on page entrance
-			"	  setInterval(loadSchedules, 6000);\n"
+			"	  } catch(err) {}\n"				  
 
-			"  loadGuide(); loadSchedules();\n"
+			  // RUN HARDWARE DISCOVERY ON PAGE LOAD
+			"  loadGuide();\n"
+			"  loadSchedules();\n" 
+			"  loadTuners();\n" 
+			"  loadRecordings();\n"
 			"  setInterval(loadSchedules, 6000);\n"
+			"  setInterval(loadRecordings, 6000);\n" 
+
+			  // Unified deleteSched hook handles task teardowns, cancellations, and binary drop cleanups natively
+			"  function deleteSched(date, time, channel) {\n"
+			"    if(confirm('Are you sure you want to drop this recording schedule and permanently delete any associated video files from storage?')) {\n"
+			"      fetch('/api/schedules/delete', {\n"
+			"        method: 'POST',\n"
+			"        headers: { 'Content-Type': 'application/json' },\n"
+			"        body: JSON.stringify({ date, time, channel })\n"
+			"      })\n"
+			"      .then(res => res.json())\n"
+			"      .then(data => {\n"
+			"        if (data.status === 'success') {\n"
+			"          loadSchedules();\n"
+			"          loadRecordings();\n"
+			"          if (data.file_deleted) {\n"
+			"             console.log('Physical recording file cleaned up successfully from Haiku media storage.');\n"
+			"          }\n"
+			"        } else {\n"
+			"          alert('Error from server: ' + (data.message || 'Failed to complete deletion task.'));\n"
+			"        }\n"
+			"      })\n"
+			"      .catch(err => {\n"
+			"         console.error('Network failure connecting to HaikuDVR deletion endpoint:', err);\n"
+			"         alert('Network error encountered while deleting record.');\n"
+			"      });\n"
+			"    }\n"
+			"  }\n"
+
+			  // --- LIVE HYBRID STREAMING PLAYBACK METHOD CONTROLLERS ---
+			"  function loadRecordings() {\n"
+			"    fetch('/api/recordings')\n"
+			"      .then(r => r.json())\n"
+			"      .then(data => {\n"
+			"        let target = document.getElementById('recordings-target');\n"
+			"        target.innerHTML = '';\n"
+			"        if(!data || data.length === 0) {\n"
+			"          target.innerHTML = '<p style=\"color:#888; padding:5px;\">No recorded .ts video streams found on hard disk.</p>';\n"
+			"          return;\n"
+			"        }\n"
+			"        data.forEach(rec => {\n"
+			"          let row = document.createElement('div');\n"
+			"          row.className = 'program-row';\n"
+			"          row.style.display = 'flex';\n"
+			"          row.style.justifyContent = 'space-between';\n"
+			"          row.style.alignItems = 'center';\n"
+			"          row.style.padding = '10px 0';\n"
+			
+			"          let recBadge = rec.is_recording ? '<span class=\"badge-rec\">&bull; REC</span>' : '';\n"
+			"          let deleteBtnLabel = rec.is_recording ? 'Abort' : 'Delete File';\n"
+			
+			"          row.innerHTML = '<div>' +\n"
+			"                          '<strong>' + rec.title + recBadge + '</strong><br>' +\n"
+			"                          '<small style=\"color:#aaa;\">Ch ' + rec.channel + ' | ' + rec.date + ' &bull; <span style=\"color:#0078d7;\">' + rec.size_mb + ' MB</span></small>' +\n"
+			"                          '</div>' +\n"
+			"                          '<div style=\"display:flex; gap:6px;\">' +\n" // Button container flex spacer
+			"                            '<button class=\"btn btn-play\" style=\"background:#107c41; padding: 4px 8px; font-size: 0.85em;\">Play</button>' +\n"
+			"                            '<button class=\"btn btn-del\" style=\"padding: 4px 8px; font-size: 0.85em;\">' + deleteBtnLabel + '</button>' +\n"
+			"                          '</div>';\n"
+			
+			              // Play Button Handling 
+			"          let playBtn = row.querySelector('.btn-play');\n"
+			"          playBtn.onclick = (e) => {\n"
+			"            e.stopPropagation();\n"
+			"            fetch('/api/recordings/play?file=' + encodeURIComponent(rec.filename))\n"
+			"              .then(res => {\n"
+			"                let contentType = res.headers.get('content-type');\n"
+			"                if (contentType && contentType.includes('audio/x-scpls')) {\n"
+			"                  return res.blob().then(blob => {\n"
+			"                    let url = window.URL.createObjectURL(blob);\n"
+			"                    let a = document.createElement('a');\n"
+			"                    a.href = url; a.download = rec.filename + '.pls';\n"
+			"                    document.body.appendChild(a); a.click(); a.remove();\n"
+			"                  });\n"
+			"                }\n"
+			"              }).catch(err => console.error('Library media handshake verification failed', err));\n"
+			"          };\n"
+
+			              // Delete Button Handling
+			"          let delBtn = row.querySelector('.btn-del');\n"
+			"          delBtn.onclick = (e) => {\n"
+			"            e.stopPropagation();\n"
+			"            deletePhysicalFileRecord(rec.date, rec.channel, rec.title);\n"
+			"          };\n"
+			
+			"          target.appendChild(row);\n"
+			"        });\n"
+			"      })\n"
+			"      .catch(err => {\n"
+			"         document.getElementById('recordings-target').innerHTML = '<p style=\"color:#a80000;\">Failed to fetch library asset updates.</p>';\n"
+			"      });\n"
+			"  }\n"
+
+			  // --- LINK BACKEND DELETION FOR DISK ASSETS ---
+			"  function deletePhysicalFileRecord(date, channel, rawTitle) {\n"
+			"    if(confirm('Permanently delete this physical video file recording from your Haiku system workspace? This action cannot be reversed.')) {\n"
+			"      let formattedTitle = rawTitle.replace(/ /g, '_');\n"
+			"      fetch('/api/schedules/delete', {\n"
+			"        method: 'POST',\n"
+			"        headers: { 'Content-Type': 'application/json' },\n"
+			"        body: JSON.stringify({ date: date, time: \"00:00\", channel: channel, title_override: formattedTitle })\n"
+			"      })\n"
+			"      .then(res => res.json())\n"
+			"      .then(data => {\n"
+			"         loadSchedules();\n"
+			"         loadRecordings();\n"
+			"      });\n"
+			"    }\n"
+			"  }\n"
 
 			"</script>\n"
 			"\n"
 			"</body>\n</html>\n";
+
 
 
         std::string response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + std::to_string(html.length()) + "\r\nConnection: close\r\n\r\n" + html;
@@ -1477,21 +1795,275 @@ private:
         return "";
     }
 
-    // Standardized helper utility to dispatch clean RESTful JSON responses
-    void SendJsonResponse(int clientFd, int statusCode, const std::string& statusMessage, const std::string& jsonContent) {
-        std::string response = 
-            "HTTP/1.1 " + std::to_string(statusCode) + " " + statusMessage + "\r\n"
-            "Content-Type: application/json; charset=utf-8\r\n"
-            "Content-Length: " + std::to_string(jsonContent.length()) + "\r\n"
-            "Access-Control-Allow-Origin: *\r\n" // Allows easy third-party web panel interfaces
-            "Connection: close\r\n\r\n" + jsonContent;
-        send(clientFd, response.c_str(), response.length(), 0);
+
+
+	// Standardized helper utility to dispatch clean RESTful JSON responses
+	void SendJsonResponse(int clientFd, int statusCode, const std::string& statusMessage, const std::string& jsonContent) {
+	    std::string response = 
+	        "HTTP/1.1 " + std::to_string(statusCode) + " " + statusMessage + "\r\n"
+	        "Content-Type: application/json; charset=utf-8\r\n"
+	        "Content-Length: " + std::to_string(jsonContent.length()) + "\r\n"
+	        "Access-Control-Allow-Origin: *\r\n" // Allows easy third-party web panel interfaces
+	        "Connection: close\r\n\r\n" + jsonContent;
+	    send(clientFd, response.c_str(), response.length(), 0);
+	}
+	
+	// Security Helper to avoid path traversal out of bounds (e.g. /../boot/system)
+	bool IsPathSafeAndContained(const std::string& targetPath, const std::string& baseDir) {
+	    char resolvedTarget[PATH_MAX];
+	    char resolvedBase[PATH_MAX];
+	    
+	    if (realpath(baseDir.c_str(), resolvedBase) == nullptr) return false;
+	    
+	    // If file doesn't exist yet, check its containing directory path boundary instead
+	    if (realpath(targetPath.c_str(), resolvedTarget) == nullptr) {
+	        size_t lastSlash = targetPath.find_last_of("/");
+	        if (lastSlash == std::string::npos) return false;
+	        std::string dirPart = targetPath.substr(0, lastSlash);
+	        if (realpath(dirPart.c_str(), resolvedTarget) == nullptr) return false;
+	    }
+	    
+	    std::string strTarget(resolvedTarget);
+	    std::string strBase(resolvedBase);
+	    return (strTarget.rfind(strBase, 0) == 0);
+	}
+	
+void HandleDeleteSchedule(int clientFd, const std::string& requestStr) {
+    std::string body = ExtractHttpRequestBody(requestStr);
+    
+    // DEBUG STEP 1: Verify incoming raw network payload string data
+    std::printf("\n================ [DEBUG DELETION] ================\n");
+    std::printf("[DEBUG] Incoming Request Body: %s\n", body.empty() ? "EMPTY" : body.c_str());
+    std::fflush(stdout);
+
+    if (body.empty()) {
+        SendJsonResponse(clientFd, 400, "Bad Request", "{\"status\":\"error\",\"message\":\"Empty JSON payload\"}");
+        return;
     }
 
+    try {
+        auto jIn = json::parse(body);
+        
+        // Check for required elements
+        if (!jIn.contains("date") || !jIn.contains("channel")) {
+            std::printf("[DEBUG ERROR] Missing basic JSON fields (date or channel).\n");
+            std::fflush(stdout);
+            SendJsonResponse(clientFd, 400, "Bad Request", "{\"status\":\"error\",\"message\":\"Missing required fields\"}");
+            return;
+        }
+
+        std::string date = jIn["date"];
+        std::string channel = jIn["channel"];
+        std::string time = jIn.value("time", "00:00");
+        
+        // Handle optional frontend fields gracefully
+        std::string titleOverride = jIn.value("title_override", "");
+
+        std::printf("[DEBUG] Parsed Fields -> Date: %s | Time: %s | Channel: %s | Title Override: %s\n", 
+                    date.c_str(), time.c_str(), channel.c_str(), titleOverride.empty() ? "NONE" : titleOverride.c_str());
+        std::fflush(stdout);
+
+        bool foundInSchedule = false;
+        std::string targetFilePath = "";
+        
+        // Lock and attempt to match an active schedule item first
+        gScheduleLocker.Lock();
+        for (auto it = gScheduleList.begin(); it != gScheduleList.end(); ++it) {
+            if (it->startDate == date && it->startTime == time && it->channel == channel) {
+                foundInSchedule = true;
+                
+                std::string cleanTitle = it->showTitle;
+                std::replace(cleanTitle.begin(), cleanTitle.end(), ' ', '_');
+                targetFilePath = gGlobalSaveDirectory + "/" + cleanTitle + "_" + it->startDate + "_" + it->channel + ".ts";
+                
+                std::printf("[DEBUG] Found item match inside gScheduleList array!\n");
+                std::printf("[DEBUG] Generated target file path from schedule metadata: %s\n", targetFilePath.c_str());
+                std::fflush(stdout);
+
+                // Check and kill active curl streaming threads
+                gRunningWorkersLocker.Lock();
+                auto workerIt = gRunningWorkersMap.find(targetFilePath);
+                if (workerIt != gRunningWorkersMap.end()) {
+                    std::printf("[DEBUG ALERT] This file is currently recording! Triggering cancellation flag context.\n");
+                    if (workerIt->second.cancellationFlag != nullptr) {
+                        atomic_set(workerIt->second.cancellationFlag, 1);
+                    }
+                }
+                gRunningWorkersLocker.Unlock();
+
+                gScheduleList.erase(it);
+                break;
+            }
+        }
+        gScheduleLocker.Unlock();
+
+        // FALLBACK: If it wasn't found in memory schedules list, it's an old file or finished recording.
+        // We use our clean title override from the library panel array directly!
+        if (!foundInSchedule) {
+            std::printf("[DEBUG] Item not found inside active schedule RAM lists. Dropping down to library fallback lookup style.\n");
+            if (!titleOverride.empty()) {
+                targetFilePath = gGlobalSaveDirectory + "/" + titleOverride + "_" + date + "_" + channel + ".ts";
+                std::printf("[DEBUG] Generated fallback library file target path: %s\n", targetFilePath.c_str());
+            } else {
+                std::printf("[DEBUG WARNING] Deletion target missing from schedule and no title_override was supplied by frontend.\n");
+            }
+            std::fflush(stdout);
+        }
+
+        // Save modification changes down onto disk state
+        SaveSchedulesToDisk();
+
+        // FILE DISK ERASURE LAYER
+        bool physicalFileDeleted = false;
+        if (!targetFilePath.empty()) {
+            std::printf("[DEBUG] Testing filesystem access checks for path: %s\n", targetFilePath.c_str());
+            std::fflush(stdout);
+
+            if (access(targetFilePath.c_str(), F_OK) == 0) {
+                std::printf("[DEBUG] File exists on hard drive filesystem! Running path safety container check...\n");
+                std::fflush(stdout);
+
+                if (IsPathSafeAndContained(targetFilePath, gGlobalSaveDirectory)) {
+                    std::printf("[DEBUG] Safety boundary pass! Running POSIX unlink() on device file now.\n");
+                    std::fflush(stdout);
+
+                    if (unlink(targetFilePath.c_str()) == 0) {
+                        physicalFileDeleted = true;
+                        std::printf("[DEBUG SUCCESS] Physical file completely deleted from system hard disk!\n");
+                    } else {
+                        std::printf("[DEBUG ERROR] POSIX unlink system call failed with error text: %s\n", strerror(errno));
+                    }
+                } else {
+                    std::printf("[DEBUG SECURITY FAIL] Path safety evaluation rejected the target path modification!\n");
+                }
+            } else {
+                std::printf("[DEBUG ERROR] File check skipped. access(F_OK) reported that file does not exist or is inaccessible.\n");
+            }
+            std::fflush(stdout);
+        }
+
+        std::printf("==================================================\n\n");
+        std::fflush(stdout);
+
+        json jOut = {
+            {"status", "success"},
+            {"message", foundInSchedule ? "Schedule dropped" : "Completed item processed"},
+            {"file_deleted", physicalFileDeleted}
+        };
+        SendJsonResponse(clientFd, 200, "OK", jOut.dump());
+
+    } catch (const std::exception& e) {
+        std::printf("[DEBUG EXCEPTION CRASH] JSON processing caught error logic: %s\n", e.what());
+        std::printf("==================================================\n\n");
+        std::fflush(stdout);
+        
+        json err = {{"status", "error"}, {"message", e.what()}};
+        SendJsonResponse(clientFd, 500, "Internal Server Error", err.dump());
+    }
+}
+
+
+	bool VerifyAndRefreshGuideCache() {
+	    const std::string localPath = "/boot/home/config/settings/HaikuDVR/guide.db";
+	    const std::string cacheControlPath = localPath + ".cache";
+	    
+	    if (gFrontendDebugEnable) std::printf("[DVR DEBUG] Checking backend time-window cache status...\n");
+	
+	    struct stat attrib;
+	    // If the master database file itself is completely missing, force a refresh/sync instantly
+	    if (stat(localPath.c_str(), &attrib) != 0) {
+	        if (gFrontendDebugEnable) std::printf("[DVR DEBUG] Local master guide database missing. Forcing sync trigger.\n");
+	        return true; 
+	    }
+	
+	    uint32 savedSyncTime = 0;
+	    std::ifstream cacheIn(cacheControlPath);
+	    if (cacheIn.is_open()) {
+	        cacheIn >> savedSyncTime;
+	        cacheIn.close();
+	    }
+	
+	    // Set a 3-day expiration window for the master payload database (259200 seconds)
+	    uint32 cacheExpirationWindow = 259200; 
+	    uint32 currentTime = static_cast<uint32>(std::time(nullptr));
+	
+	    if (savedSyncTime > 0 && (currentTime - savedSyncTime) < cacheExpirationWindow) {
+	        if (gFrontendDebugEnable) {
+	            uint32 remainingTime = cacheExpirationWindow - (currentTime - savedSyncTime);
+	            std::printf("[DVR DEBUG] SUCCESS: Backend guide cache is %u secs old (Expires in %u mins). Skipping remote updates.\n", 
+	                        (currentTime - savedSyncTime), remainingTime / 60);
+	        }
+	        return false; // Cache is perfectly fine, don't execute network overhead or downloads
+	    }
+	
+	    if (gFrontendDebugEnable) std::printf("[DVR DEBUG] Cache window expired or invalid for backend payload. Initializing updates.\n");
+	
+	    // =========================================================================
+	    //  AUTOMATED CACHE PURGE ENGINE (REMOVES EXPIRED DAILY CHUNK FILES)
+	    // =========================================================================
+	    std::printf("[DVR PURGE] Running backend storage sweep routine on expired guide chunks...\n");
+	    
+	    std::time_t rawToday = std::time(nullptr);
+	    std::tm* localToday = std::localtime(&rawToday);
+	    char todayBuf[16];
+	    std::strftime(todayBuf, sizeof(todayBuf), "%Y%m%d", localToday);
+	    long todayIntKey = std::atol(todayBuf);
+	
+	    std::string configDirectoryPath = "/boot/home/config/settings/HaikuDVR";
+	    DIR* dir = opendir(configDirectoryPath.c_str());
+	    if (dir != nullptr) {
+	        struct dirent* entry;
+	        uint32 deletedFilesCount = 0;
+	
+	        while ((entry = readdir(dir)) != nullptr) {
+	            std::string filename(entry->d_name);
+	            
+	            // Check for file mask pattern 'guide_YYYYMMDD' (length is exactly 14 characters)
+	            if (filename.rfind("guide_", 0) == 0 && filename.length() == 14) { 
+	                std::string datePart = filename.substr(6, 8);
+	                
+	                if (datePart.find_first_not_of("0123456789") == std::string::npos) {
+	                    long fileDateIntKey = std::atol(datePart.c_str());
+	                    
+	                    if (fileDateIntKey < todayIntKey) {
+	                        std::string fullPathToDelete = configDirectoryPath + "/" + filename;
+	                        if (unlink(fullPathToDelete.c_str()) == 0) {
+	                            deletedFilesCount++;
+	                        }
+	                    }
+	                }
+	            }
+	        }
+	        closedir(dir);
+	        std::printf("[DVR PURGE] Storage sweep complete. Purged %u obsolete history file chunks.\n", deletedFilesCount);
+	    }
+	    // =========================================================================
+	
+	    // Update the timestamp log in guide.db.cache so the timer safely resets
+	    std::ofstream cacheOut(cacheControlPath);
+	    if (cacheOut.is_open()) {
+	        cacheOut << currentTime;
+	        cacheOut.close();
+	    }
+	
+	    return true; // Cache was refreshed/invalidated
+	}
+
+
     // Endpoint: GET /api/guide — Queries your live SQLite guide.db directly
-    void HandleGetTvGuide(int clientFd, const std::string& requestStr) {
-        std::string targetDate = "";
-        std::string targetTime = "";
+	void HandleGetTvGuide(int clientFd, const std::string& requestStr) {
+	    // RUN AUTOMATED DYNAMIC CACHE LOGIC ON EVERY WEB QUERY
+	    bool dataNeedsSync = VerifyAndRefreshGuideCache();
+	    if (dataNeedsSync) {
+	        if (gFrontendDebugEnable) {
+	            std::printf("[DVR INTERFACE] Notice: System needs to trigger an external upstream XML schedule download sync.\n");
+	        }
+	        // Optional: Call  internal backend HDHomeRun network downloader subroutine function here if desired!
+	    }
+	
+	    std::string targetDate = "";
+	    std::string targetTime = "";
+    
         
         // 1. Safe extraction of ?dt= and &tm= parameters
         size_t dtPos = requestStr.find("dt=");
@@ -1794,40 +2366,7 @@ private:
 	}
 
 
-    // Endpoint: POST /api/schedules/delete — Removes a task via network matching properties
-    void HandleDeleteSchedule(int clientFd, const std::string& requestStr) {
-        std::string body = ExtractHttpRequestBody(requestStr);
-        try {
-            json jIn = json::parse(body);
-            std::string targetDate = jIn.at("date").get<std::string>();
-            std::string targetTime = jIn.at("time").get<std::string>();
-            std::string targetChan = jIn.at("channel").get<std::string>();
-
-            bool removed = false;
-            gScheduleLocker.Lock();
-            for (auto it = gScheduleList.begin(); it != gScheduleList.end(); ++it) {
-                if (it->startDate == targetDate && it->startTime == targetTime && it->channel == targetChan) {
-                    gScheduleList.erase(it);
-                    removed = true;
-                    break;
-                }
-            }
-            gScheduleLocker.Unlock();
-
-            if (removed) {
-                SaveSchedulesToDisk();
-                json resp = {{"status", "success"}, {"message", "Schedule dropped successfully"}};
-                SendJsonResponse(clientFd, 200, "OK", resp.dump());
-            } else {
-                json resp = {{"status", "fail"}, {"message", "No matching schedule sequence found"}};
-                SendJsonResponse(clientFd, 404, "Not Found", resp.dump());
-            }
-        } catch (...) {
-            json errorJson = {{"status", "error"}, {"message", "Invalid schedule matching request context"}};
-            SendJsonResponse(clientFd, 400, "Bad Request", errorJson.dump());
-        }
-    }
-
+ 
     void ServeScpd(int clientFd) {
         // Industry-standard UPnP ContentDirectory definition block tracking the "Browse" action
         std::string xml = 
