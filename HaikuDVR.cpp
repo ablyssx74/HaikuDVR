@@ -979,6 +979,64 @@ int32 SerialIconDownloaderThread(void* data) {
 
 
 
+// Helper to find the active local IP address
+BString GetLocalIPAddress() {
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+        struct hostent* host = gethostbyname(hostname);
+        if (host && host->h_addr_list[0]) {
+            struct in_addr addr;
+            std::memcpy(&addr, host->h_addr_list[0], sizeof(struct in_addr));
+            return BString(inet_ntoa(addr));
+        }
+    }
+    return BString("127.0.0.1"); // Fallback to loopback
+}
+
+// Poll ports 8081-8090 with retries to give the restarting backend time to bind
+int32 DetectDlnaPort(int maxRetries = 10, useconds_t delayMs = 100) {
+    for (int retry = 0; retry < maxRetries; retry++) {
+        for (int32 port = 8081; port <= 8090; port++) {
+            int socketFd = socket(AF_INET, SOCK_STREAM, 0);
+            if (socketFd < 0) continue;
+
+            struct sockaddr_in addr;
+            std::memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(port);
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 100000; 
+            setsockopt(socketFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(socketFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+            if (connect(socketFd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                const char* httpRequest = "GET / HTTP/1.0\r\n\r\n";
+                send(socketFd, httpRequest, strlen(httpRequest), 0);
+
+                char response[256] = {0};
+                ssize_t bytesRead = recv(socketFd, response, sizeof(response) - 1, 0);
+
+                if (bytesRead > 0) {
+                    response[bytesRead] = '\0';
+                    BString respStr(response);
+                    if (respStr.FindFirst("HTTP/1.") != B_ERROR) {
+                        close(socketFd);
+                        return port; 
+                    }
+                }
+            }
+            close(socketFd);
+        }
+        usleep(delayMs * 1000);
+    }
+    return -1; // Not detected
+}
+
+
+
 
 enum {
     MSG_PREV_MONTH    = 'PRVM',
@@ -4168,53 +4226,14 @@ public:
 		BString labelString;
 		
 		if (cfg.dlnaEnable) {
-		    int32 boundPort = -1; // Default to -1 (not found)
+		    BString localIP = GetLocalIPAddress();
 		    
-		    for (int32 port = 8081; port <= 8090; port++) {
-		        int socketFd = socket(AF_INET, SOCK_STREAM, 0);
-		        if (socketFd >= 0) {
-		            struct sockaddr_in addr;
-		            std::memset(&addr, 0, sizeof(addr));
-		            addr.sin_family = AF_INET;
-		            addr.sin_port = htons(port);
-		            addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-		            
-		            // Allow up to 100ms so slow server thread responses aren't dropped
-		            struct timeval tv;
-		            tv.tv_sec = 0;
-		            tv.tv_usec = 100000; // 100ms
-		            setsockopt(socketFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-		            setsockopt(socketFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-		            
-		            if (connect(socketFd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-		                // Use GET instead of HEAD - some simple embedded HTTP servers fail on HEAD
-		                const char* httpRequest = "GET / HTTP/1.0\r\n\r\n";
-		                send(socketFd, httpRequest, strlen(httpRequest), 0);
-		
-		                char response[256] = {0};
-		                ssize_t bytesRead = recv(socketFd, response, sizeof(response) - 1, 0);
-		                
-		                if (bytesRead > 0) {
-		                    response[bytesRead] = '\0';
-		                    BString respStr(response);
-		                    
-		                    // If port responds with ANY valid HTTP status line, it's our HTTP/DLNA server
-		                    if (respStr.FindFirst("HTTP/1.") != B_ERROR) {
-		                        boundPort = port;
-		                        close(socketFd);
-		                        break;
-		                    }
-		                }
-		            }
-		            close(socketFd);
-		        }
-		    }
+		    // For initial menu construction, 1 retry with no delay is fine since the server is already running
+		    int32 boundPort = DetectDlnaPort(1, 0); 
 		
 		    if (boundPort != -1) {
-		        labelString.SetToFormat("Enable Http & Dlna Server (Active Port: %" B_PRId32 ")", boundPort);
-		    } else {
-		        labelString.SetTo("Enable Http & Dlna Server (Not Detected)");
-		    }
+		        labelString.SetToFormat("Enable Http & Dlna Server [%s:%" B_PRId32 "]", localIP.String(), boundPort);
+		    } 
 		} else {
 		    labelString.SetTo("Enable Http & Dlna Server [Disabled]");
 		}
@@ -4547,59 +4566,72 @@ public:
             }
      
         
-        case MSG_TOGGLE_DLNA: {
-            cfg.dlnaEnable = !cfg.dlnaEnable;            
-            fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
-            SaveSchedulesToDisk();
-
-            BAlert* alert = new BAlert("Warning",
-                "Toggling the DLNA server requires restarting the backend service.\n\n"
-                "Any current recordings in progress will be lost! Do you want to proceed?",
-                "Cancel", "Proceed", nullptr, B_WIDTH_FROM_LABEL, B_WARNING_ALERT);
-            
-            int32 response = alert->Go();
-            
-            if (response == 0) {
-                // User clicked "Cancel" -> Revert settings and menu state
-                cfg.dlnaEnable = !cfg.dlnaEnable;            
-                fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
-                SaveSchedulesToDisk();
-                break; 
-            }
-
-            // --- FIXED: Provide visual menu label updates immediately on user action ---
-            if (cfg.dlnaEnable) {
-                fDlnaOnItem->SetLabel("Enable Http & Dlna Server [Restarting Backend...]");
-            } else {
-                fDlnaOnItem->SetLabel("Enable Http & Dlna Server [Disabled]");
-            }
-
-            // User clicked "Proceed" -> Programmatically notify the backend to apply new DLNA settings
-            BRoster roster;
-            const char* backendSignature = "x-vnd.haikuhdhomerun-dvr";
+		case MSG_TOGGLE_DLNA: {
+		    cfg.dlnaEnable = !cfg.dlnaEnable;            
+		    fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
+		    SaveSchedulesToDisk();
 		
-            if (roster.IsRunning(backendSignature)) {
-                BMessenger backendMessenger(backendSignature);
-                if (backendMessenger.IsValid()) {
-                    BMessage quitMessage(B_QUIT_REQUESTED);
-                    backendMessenger.SendMessage(&quitMessage);
-                }
-            } else {
-                pid_t pid = fork();
-                if (pid == 0) {
-                    close(STDIN_FILENO); 
-                    char* const args[] = { 
-                        (char*)"/bin/launch_roster", 
-                        (char*)"restart", 
-                        (char*)backendSignature, 
-                        nullptr 
-                    };
-                    execv(args[0], args);
-                    _exit(1); 
-                }
-            }
-            break;
-        }
+		    BAlert* alert = new BAlert("Warning",
+		        "Toggling the DLNA server requires restarting the backend service.\n\n"
+		        "Any current recordings in progress will be lost! Do you want to proceed?",
+		        "Cancel", "Proceed", nullptr, B_WIDTH_FROM_LABEL, B_WARNING_ALERT);
+		    
+		    int32 response = alert->Go();
+		    
+		    if (response == 0) {
+		        // User clicked "Cancel" -> Revert settings and menu state
+		        cfg.dlnaEnable = !cfg.dlnaEnable;            
+		        fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
+		        SaveSchedulesToDisk();
+		        break; 
+		    }
+		
+		    // User clicked "Proceed" -> Programmatically notify backend to apply new DLNA settings
+		    BRoster roster;
+		    const char* backendSignature = "x-vnd.haikuhdhomerun-dvr";
+		
+		    if (roster.IsRunning(backendSignature)) {
+		        BMessenger backendMessenger(backendSignature);
+		        if (backendMessenger.IsValid()) {
+		            BMessage quitMessage(B_QUIT_REQUESTED);
+		            backendMessenger.SendMessage(&quitMessage);
+		        }
+		    } else {
+		        pid_t pid = fork();
+		        if (pid == 0) {
+		            close(STDIN_FILENO); 
+		            char* const args[] = { 
+		                (char*)"/bin/launch_roster", 
+		                (char*)"restart", 
+		                (char*)backendSignature, 
+		                nullptr 
+		            };
+		            execv(args[0], args);
+		            _exit(1); 
+		        }
+		    }
+		
+		    // --- Dynamic Label Update with Active IP & Port ---
+		    if (cfg.dlnaEnable) {
+		        BString localIP = GetLocalIPAddress();
+		        
+		        // Poll for bound port (10 retries, 100ms delay between retries)
+		        int32 boundPort = DetectDlnaPort(10, 100);
+		        
+		        // If not detected within time limit, fallback to default port 8081
+		        if (boundPort == -1) {
+		            boundPort = 8081; 
+		        }
+		
+		        BString label;
+		        label.SetToFormat("Enable Http & Dlna Server [%s:%" B_PRId32 "]", localIP.String(), boundPort);
+		        fDlnaOnItem->SetLabel(label.String());
+		    } else {
+		        fDlnaOnItem->SetLabel("Enable Http & Dlna Server [Disabled]");
+		    }
+		
+		    break;
+		}
 
 
         
