@@ -240,6 +240,7 @@ void SaveSchedulesToDisk() {
     
     // Assign directly since gGlobalSaveDirectory is a standard std::string in the backend
     jRoot["save_directory"] = gGlobalSaveDirectory;
+    jRoot["default_player"] = gFrontendDefaultPlayer.String();
     
     // --- BACKEND INJECT FRONTEND SETTINGS BACK INTO THE JSON OBJECT ---
     jRoot["show_update_notifications"] = gFrontendUpdateNotifications;
@@ -830,6 +831,42 @@ static int32 dlna_discovery_worker_thread(void* data) {
 
 
 class DlnasHttpStreamingServer {
+private:
+    
+    std::string GetSelectedPlayerBinaryPath() {
+    // Default fallback path
+    std::string binaryPath = "/boot/system/bin/mpv";
+
+    // Map player selection (case-insensitive checks) to binary locations
+    BString selectedPlayer = gFrontendDefaultPlayer;
+    selectedPlayer.ToLower();
+
+    if (selectedPlayer == "htv" && access("/boot/system/bin/hTV", F_OK) == 0) {
+        binaryPath = "/boot/system/bin/hTV";
+    } else if (selectedPlayer == "vlc" && access("/boot/system/bin/vlc", F_OK) == 0) {
+        binaryPath = "/boot/system/bin/vlc";
+    } else if (selectedPlayer == "mediaplayer" && access("/boot/system/apps/MediaPlayer", F_OK) == 0) {
+        binaryPath = "/boot/system/apps/MediaPlayer";
+    } else if (selectedPlayer == "mpv" && access("/boot/system/bin/mpv", F_OK) == 0) {
+        binaryPath = "/boot/system/bin/mpv";
+    } else {
+        // Fallback safety check: try requested player path directly, or search common Haiku locations
+        if (access(("/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String())).c_str(), F_OK) == 0) {
+            binaryPath = "/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String());
+        } else if (access("/boot/system/bin/mpv", F_OK) == 0) {
+            binaryPath = "/boot/system/bin/mpv";
+        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
+            binaryPath = "/boot/system/bin/vlc";
+        } else if (access("/boot/system/bin/hTV", F_OK) == 0) {
+            binaryPath = "/boot/system/bin/hTV";
+        } else if (access("/boot/system/apps/MediaPlayer", F_OK) == 0) {
+            binaryPath = "/boot/system/apps/MediaPlayer";
+        }
+    }
+
+    return binaryPath;
+}
+
 public:
     thread_id serverThread;
     int       listenFd;
@@ -839,12 +876,49 @@ public:
 	
     DlnasHttpStreamingServer() : serverThread(-1), listenFd(-1), port(8081) {}
     
-
-
-
-
-
-
+	void HandleGetSettings(int clientFd) {
+	    gScheduleLocker.Lock();
+	    json responseObj = {
+	        {"default_player", gFrontendDefaultPlayer.String()},
+	        {"show_update_notifications", gFrontendUpdateNotifications},
+	        {"dlna_enable", gFrontendDlnaEnable},
+	        {"debug_enable", gFrontendDebugEnable},
+	        {"enable_fullscreen", gFrontendFullscreenEnable}
+	    };
+	    gScheduleLocker.Unlock();
+	
+	    SendJsonResponse(clientFd, 200, "OK", responseObj.dump());
+	}
+	
+	void HandleUpdateSettings(int clientFd, const std::string& requestStr) {
+	    std::string jsonBody = ExtractHttpRequestBody(requestStr);
+	    if (jsonBody.empty()) {
+	        SendJsonResponse(clientFd, 400, "Bad Request", "{\"error\":\"Missing payload body\"}");
+	        return;
+	    }
+	
+	    try {
+	        json jIn = json::parse(jsonBody);
+	
+	        gScheduleLocker.Lock();
+	        if (jIn.contains("default_player") && jIn["default_player"].is_string()) {
+	            gFrontendDefaultPlayer = jIn["default_player"].get<std::string>().c_str();
+	        }
+	        gScheduleLocker.Unlock();
+	
+	        // 3. Save directly to HaikuDVR_schedules.json on disk
+	        SaveSchedulesToDisk();
+	
+	        json responseObj = {
+	            {"status", "success"},
+	            {"default_player", gFrontendDefaultPlayer.String()}
+	        };
+	        SendJsonResponse(clientFd, 200, "OK", responseObj.dump());
+	
+	    } catch (...) {
+	        SendJsonResponse(clientFd, 400, "Bad Request", "{\"error\":\"Invalid JSON\"}");
+	    }
+	}
 	// Endpoint: GET /api/recordings/play?file=FILENAME — Smart local/remote hybrid playback engine
 	void HandlePlayRecording(int clientFd, const std::string& requestStr) {
 	    size_t queryPos = requestStr.find("/api/recordings/play?file=");
@@ -904,46 +978,22 @@ public:
 		        std::printf("[LIBRARY LAUNCHER] Local environment matched! Spinning native desktop playback process context.\n");
 		        std::fflush(stdout);
 		    }
-		
-		    // Default fallback path
-		    std::string binaryPath = "/boot/system/bin/mpv";
-		
-		    // Map player selection (case-insensitive checks) to binary locations
-		    BString selectedPlayer = gFrontendDefaultPlayer;
-		    selectedPlayer.ToLower();
-		
-		    if (selectedPlayer == "htv" && access("/boot/system/bin/hTV", F_OK) == 0) {
-		        binaryPath = "/boot/system/bin/hTV";
-		    } else if (selectedPlayer == "vlc" && access("/boot/system/bin/vlc", F_OK) == 0) {
-		        binaryPath = "/boot/system/bin/vlc";
-		    } else if (selectedPlayer == "mediaplayer" && access("/boot/system/apps/MediaPlayer", F_OK) == 0) {
-		        binaryPath = "/boot/system/apps/MediaPlayer";
-		    } else if (selectedPlayer == "mpv" && access("/boot/system/bin/mpv", F_OK) == 0) {
-		        binaryPath = "/boot/system/bin/mpv";
-		    } else {
-		        // Fallback safety check: try requested player path directly, or search common Haiku locations
-		        if (access(("/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String())).c_str(), F_OK) == 0) {
-		            binaryPath = "/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String());
-		        } else if (access("/boot/system/bin/mpv", F_OK) == 0) {
-		            binaryPath = "/boot/system/bin/mpv";
-		        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
-		            binaryPath = "/boot/system/bin/vlc";
-		        } else if (access("/boot/system/bin/hTV", F_OK) == 0) {
-		            binaryPath = "/boot/system/bin/hTV";
-		        }
-		    }
-		
-		    pid_t processId = fork();
-		    if (processId == 0) {
-		        char* playerArgs[3];
-		        playerArgs[0] = (char*)binaryPath.c_str();
-		        playerArgs[1] = (char*)fullPath.c_str(); // Pass local file directly for zero-latency local IO play
-		        playerArgs[2] = nullptr; 
-		        
-		        execv(playerArgs[0], playerArgs);
-		        _exit(1); 
-		    }
-		
+		    
+			// Player Targer
+			std::string binaryPath = GetSelectedPlayerBinaryPath();
+			
+			pid_t processId = fork();
+			if (processId == 0) {
+			    char* playerArgs[3];
+			    playerArgs[0] = (char*)binaryPath.c_str();
+			    playerArgs[1] = (char*)fullPath.c_str(); // Use fullPath for recorded .ts files
+			    playerArgs[2] = nullptr; 
+			    
+			    execv(playerArgs[0], playerArgs);
+			    _exit(1); 
+			}
+			//
+			
 		    json localResp = {{"status", "success"}, {"mode", "local_launch"}, {"player", binaryPath}};
 		    SendJsonResponse(clientFd, 200, "OK", localResp.dump());
 		
@@ -1303,6 +1353,12 @@ public:
 	                if (gFrontendDebugEnable) std::printf("[HTTP API] Route matched: GET /api/desktop/play\n");
 	                self->HandleDesktopAppLaunch(clientFd, req);
 	            }
+	            else if (req.find("GET /api/settings") != std::string::npos) {
+				    self->HandleGetSettings(clientFd);
+				}
+				else if (req.find("POST /api/settings/update") != std::string::npos) {
+				    self->HandleUpdateSettings(clientFd, req);
+				}
 	            else if (req.find("GET /api/recordings/play?file=") != std::string::npos) {
 				    if (gFrontendDebugEnable) std::printf("[HTTP ADMIN API] Route matched: GET /api/recordings/play\n");
 				    self->HandlePlayRecording(clientFd, req);				
@@ -1478,45 +1534,28 @@ private:
 		        std::fflush(stdout);
 		    }
 		
-		    // Default fallback path
-		    std::string binaryPath = "/boot/system/bin/mpv";
-		
+	
 		    // Map player selection (case-insensitive checks) to binary locations
-		    BString selectedPlayer = gFrontendDefaultPlayer;
-		    selectedPlayer.ToLower();
-		
-		    if (selectedPlayer == "htv" && access("/boot/system/bin/hTV", F_OK) == 0) {
-		        binaryPath = "/boot/system/bin/hTV";
-		    } else if (selectedPlayer == "vlc" && access("/boot/system/bin/vlc", F_OK) == 0) {
-		        binaryPath = "/boot/system/bin/vlc";
-		    } else if (selectedPlayer == "mediaplayer" && access("/boot/system/apps/MediaPlayer", F_OK) == 0) {
-		        binaryPath = "/boot/system/apps/MediaPlayer";
-		    } else if (selectedPlayer == "mpv" && access("/boot/system/bin/mpv", F_OK) == 0) {
-		        binaryPath = "/boot/system/bin/mpv";
-		    } else {
-		        // Fallback safety check: try requested player path directly, or search common Haiku locations
-		        if (access(("/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String())).c_str(), F_OK) == 0) {
-		            binaryPath = "/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String());
-		        } else if (access("/boot/system/bin/mpv", F_OK) == 0) {
-		            binaryPath = "/boot/system/bin/mpv";
-		        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
-		            binaryPath = "/boot/system/bin/vlc";
-		        } else if (access("/boot/system/bin/hTV", F_OK) == 0) {
-		            binaryPath = "/boot/system/bin/hTV";
-		        }
-		    }
-		
-		    pid_t processId = fork();
-		    if (processId == 0) {
-		        char* playerArgs[3];
-		        playerArgs[0] = (char*)binaryPath.c_str();
-		        playerArgs[1] = (char*)targetUrl.c_str();
-		        playerArgs[2] = nullptr; 
-		        
-		        execv(playerArgs[0], playerArgs);
-		        _exit(1); 
-		    }
-		
+			// 1. Read gFrontendDefaultPlayer and convert to lowercase for uniform comparisons
+			BString selectedPlayer = gFrontendDefaultPlayer;
+			selectedPlayer.ToLower();
+			
+			// Player Targer
+			std::string binaryPath = GetSelectedPlayerBinaryPath();
+			
+			pid_t processId = fork();
+			if (processId == 0) {
+			    char* playerArgs[3];
+			    playerArgs[0] = (char*)binaryPath.c_str();
+			    playerArgs[1] = (char*)targetUrl.c_str(); // Use targetUrl for live channels
+			    playerArgs[2] = nullptr; 
+			    
+			    execv(playerArgs[0], playerArgs);
+			    _exit(1); 
+			}
+			//
+			
+					
 		    // Send a tiny clean JSON success back to the local browser tab so it can exit its fetch block
 		    json localResp = {{"status", "success"}, {"mode", "local_launch"}, {"player", binaryPath}};
 		    SendJsonResponse(clientFd, 200, "OK", localResp.dump());
@@ -1629,6 +1668,23 @@ private:
 			"        </form>\n"
 			"      </div>\n"
 
+			"      <!-- SETTINGS & DEFAULT PLAYER CARD -->\n"
+			"      <div class='card' style='margin-bottom: 20px;'>\n"
+			"        <h2>Playback Settings</h2>\n"
+			"        <form id='settings-form'>\n"
+			"          <div class='form-group'>\n"
+			"            <label for='default-player'>Default Media Player</label>\n"
+			"            <select id='default-player'>\n"
+			"              <option value='MPV'>MPV Media Player</option>\n"
+			"              <option value='VLC'>VLC Media Player</option>\n"
+			"              <option value='hTV'>hTV App</option>\n"
+			"              <option value='MediaPlayer'>Haiku MediaPlayer</option>\n"
+			"            </select>\n"
+			"          </div>\n"
+			"          <button type='button' class='btn' onclick='saveSettings()'>Save Default Player Choice</button>\n"
+			"        </form>\n"
+			"      </div>\n"
+
             "      <div class='card' style='margin-bottom: 20px;'>\n"
             "        <h2>Active Task Schedules</h2>\n"
             "        <div id='schedule-target'>No active tasks recorded.</div>\n"
@@ -1734,6 +1790,39 @@ private:
 			"    });\n"
 			"  }\n"
             "\n"
+            
+			// 1. Fetch current default player when dashboard loads
+			"  function loadSettings() {\n"
+			"  	fetch('/api/settings')\n"
+			"    .then(res => res.json())\n"
+			"    .then(cfg => {\n"
+			"      let sel = document.getElementById('default-player');\n"
+			"      if (sel && cfg.default_player) {\n"
+			"        sel.value = cfg.default_player;\n"
+			"      }\n"
+			"    })\n"
+			"    .catch(err => console.error('Failed to load settings:', err));\n"
+			"	}\n"
+			
+			// 2. Called when user clicks "Save Default Player Choice"
+			"  function saveSettings() {\n"
+			"  let chosenPlayer = document.getElementById('default-player').value;\n"
+			
+			"  fetch('/api/settings/update', {\n"
+			"    method: 'POST',\n"
+			"    headers: { 'Content-Type': 'application/json' },\n"
+			"    body: JSON.stringify({ default_player: chosenPlayer })\n"
+			"  })\n"
+			"  .then(res => res.json())\n"
+			"  .then(data => {\n"
+			"   	 alert('Default player updated to: ' + data.default_player);\n"
+			"  	})\n"
+			"  	.catch(err => {\n"
+			"   	 alert('Failed to update player setting: ' + err);\n"
+			"	  });\n"
+			"	}\n"
+
+
 			"  function showProgramDetails(index, isSchedule) {\n"
 			"    let item = isSchedule ? scheduleCache[index] : guideCache[index];\n"
 			"    let title = isSchedule ? item.show_title.replace(/_/g, ' ') : item.title;\n"
@@ -1949,6 +2038,7 @@ private:
 			"	  } catch(err) {}\n"				  
 
 			  // RUN HARDWARE DISCOVERY ON PAGE LOAD
+			"  loadSettings();\n" 
 			"  loadGuide();\n"
 			"  loadSchedules();\n" 
 			"  loadTuners();\n" 
@@ -3399,6 +3489,8 @@ int32 ServiceSchedulerLoop(void* data) {
 class DVRServiceApp : public BApplication {
 private:
     thread_id fLoopThread;
+
+    
 public:
     DVRServiceApp() : BApplication("application/x-vnd.haikuhdhomerun-dvr") {}
     
@@ -3451,7 +3543,6 @@ public:
         }
     }
 
-    
     
         void MessageReceived(BMessage* message) override {
         switch (message->what) {
