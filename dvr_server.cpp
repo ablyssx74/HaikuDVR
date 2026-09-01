@@ -896,42 +896,65 @@ public:
 	    bool isLocalClient = (clientIpStr == "127.0.0.1" || clientIpStr == "localhost" || clientIpStr == serverIpStr);
 	    std::string streamingUrl = "http://" + (serverIpStr.empty() ? GetLiveHttpSystemIP() : serverIpStr) + ":" + std::to_string(port) + "/video/" + filename;
 	
-	    if (isLocalClient) {
-	        // =========================================================================
-	        // LOCAL WORKSPACE WORKSTATION MODE: Native host desktop process fork 
-	        // =========================================================================
-	        if (gFrontendDebugEnable) {
-	            std::printf("[LIBRARY LAUNCHER] Local environment matched! Spinning native desktop playback process context.\n");
-	            std::fflush(stdout);
-	        }
-	
-	        const char* binaryPath = "/boot/system/bin/mpv";
-	        if (access("/boot/system/bin/hTV", F_OK) == 0) {
-	            binaryPath = "/boot/system/bin/hTV";
-	        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
-	            binaryPath = "/boot/system/bin/vlc";
-	        }
-	
-	        pid_t processId = fork();
-	        if (processId == 0) {
-	            char* playerArgs[3];
-	            playerArgs[0] = (char*)binaryPath;
-	            playerArgs[1] = (char*)fullPath.c_str(); // Pass local file directly for zero-latency local IO play
-	            playerArgs[2] = nullptr; 
-	            
-	            execv(playerArgs[0], playerArgs);
-	            _exit(1); 
-	        }
-	
-	        SendJsonResponse(clientFd, 200, "OK", "{\"status\":\"success\",\"mode\":\"local_launch\"}");
-	    } else {
-	        // =========================================================================
-	        // REMOTE NETWORK CLIENT MODE: Package dynamic streaming .pls playlist file
-	        // =========================================================================
-	        if (gFrontendDebugEnable) {
-	            std::printf("[LIBRARY LAUNCHER] Remote environment context matched. Sending PLS video playlist stream back.\n");
-	            std::fflush(stdout);
-	        }
+		if (isLocalClient) {
+		    // =========================================================================
+		    // (HandlePlayRecording) LOCAL WORKSPACE WORKSTATION MODE: Native host desktop process fork 
+		    // =========================================================================
+		    if (gFrontendDebugEnable) {
+		        std::printf("[LIBRARY LAUNCHER] Local environment matched! Spinning native desktop playback process context.\n");
+		        std::fflush(stdout);
+		    }
+		
+		    // Default fallback path
+		    std::string binaryPath = "/boot/system/bin/mpv";
+		
+		    // Map player selection (case-insensitive checks) to binary locations
+		    BString selectedPlayer = gFrontendDefaultPlayer;
+		    selectedPlayer.ToLower();
+		
+		    if (selectedPlayer == "htv" && access("/boot/system/bin/hTV", F_OK) == 0) {
+		        binaryPath = "/boot/system/bin/hTV";
+		    } else if (selectedPlayer == "vlc" && access("/boot/system/bin/vlc", F_OK) == 0) {
+		        binaryPath = "/boot/system/bin/vlc";
+		    } else if (selectedPlayer == "mediaplayer" && access("/boot/system/apps/MediaPlayer", F_OK) == 0) {
+		        binaryPath = "/boot/system/apps/MediaPlayer";
+		    } else if (selectedPlayer == "mpv" && access("/boot/system/bin/mpv", F_OK) == 0) {
+		        binaryPath = "/boot/system/bin/mpv";
+		    } else {
+		        // Fallback safety check: try requested player path directly, or search common Haiku locations
+		        if (access(("/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String())).c_str(), F_OK) == 0) {
+		            binaryPath = "/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String());
+		        } else if (access("/boot/system/bin/mpv", F_OK) == 0) {
+		            binaryPath = "/boot/system/bin/mpv";
+		        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
+		            binaryPath = "/boot/system/bin/vlc";
+		        } else if (access("/boot/system/bin/hTV", F_OK) == 0) {
+		            binaryPath = "/boot/system/bin/hTV";
+		        }
+		    }
+		
+		    pid_t processId = fork();
+		    if (processId == 0) {
+		        char* playerArgs[3];
+		        playerArgs[0] = (char*)binaryPath.c_str();
+		        playerArgs[1] = (char*)fullPath.c_str(); // Pass local file directly for zero-latency local IO play
+		        playerArgs[2] = nullptr; 
+		        
+		        execv(playerArgs[0], playerArgs);
+		        _exit(1); 
+		    }
+		
+		    json localResp = {{"status", "success"}, {"mode", "local_launch"}, {"player", binaryPath}};
+		    SendJsonResponse(clientFd, 200, "OK", localResp.dump());
+		
+		} else {
+		    // =========================================================================
+		    // REMOTE NETWORK CLIENT MODE: Package dynamic streaming .pls playlist file
+		    // =========================================================================
+		    if (gFrontendDebugEnable) {
+		        std::printf("[LIBRARY LAUNCHER] Remote environment context matched. Sending PLS video playlist stream back.\n");
+		        std::fflush(stdout);
+		    }
 	
 	        std::string plsContent = "[playlist]\r\n";
 	        plsContent += "NumberOfEntries=1\r\n";
@@ -1446,38 +1469,59 @@ private:
         }
 
 
-        if (isLocalClient) {
-            // =========================================================================
-            // LOCAL MACHINE MODE: Fork and launch player app natively on host screen workspace
-            // =========================================================================
-            if (gFrontendDebugEnable) {
-                std::printf("[HYBRID LAUNCHER] Local environment matched! Initializing system player binaries.\n");
-                std::fflush(stdout);
-            }
-
-            const char* binaryPath = "/boot/system/bin/mpv";
-            if (access("/boot/system/bin/hTV", F_OK) == 0) {
-                binaryPath = "/boot/system/bin/hTV";
-            } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
-                binaryPath = "/boot/system/bin/vlc";
-            }
-
-            pid_t processId = fork();
-            if (processId == 0) {
-                char* playerArgs[3];
-                playerArgs[0] = (char*)binaryPath;
-                playerArgs[1] = (char*)targetUrl.c_str();
-                playerArgs[2] = nullptr; 
-                
-                execv(playerArgs[0], playerArgs);
-                _exit(1); 
-            }
-
-            // Send a tiny clean JSON success back to the local browser tab so it can exit its fetch block
-            json localResp = {{"status", "success"}, {"mode", "local_launch"}};
-            SendJsonResponse(clientFd, 200, "OK", localResp.dump());
-
-        } else {
+		if (isLocalClient) {
+		    // =========================================================================
+		    // (HandleDesktopAppLaunch) LOCAL MACHINE MODE: Fork and launch player app natively on host screen workspace
+		    // =========================================================================
+		    if (gFrontendDebugEnable) {
+		        std::printf("[HYBRID LAUNCHER] Local environment matched! Initializing system player binaries.\n");
+		        std::fflush(stdout);
+		    }
+		
+		    // Default fallback path
+		    std::string binaryPath = "/boot/system/bin/mpv";
+		
+		    // Map player selection (case-insensitive checks) to binary locations
+		    BString selectedPlayer = gFrontendDefaultPlayer;
+		    selectedPlayer.ToLower();
+		
+		    if (selectedPlayer == "htv" && access("/boot/system/bin/hTV", F_OK) == 0) {
+		        binaryPath = "/boot/system/bin/hTV";
+		    } else if (selectedPlayer == "vlc" && access("/boot/system/bin/vlc", F_OK) == 0) {
+		        binaryPath = "/boot/system/bin/vlc";
+		    } else if (selectedPlayer == "mediaplayer" && access("/boot/system/apps/MediaPlayer", F_OK) == 0) {
+		        binaryPath = "/boot/system/apps/MediaPlayer";
+		    } else if (selectedPlayer == "mpv" && access("/boot/system/bin/mpv", F_OK) == 0) {
+		        binaryPath = "/boot/system/bin/mpv";
+		    } else {
+		        // Fallback safety check: try requested player path directly, or search common Haiku locations
+		        if (access(("/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String())).c_str(), F_OK) == 0) {
+		            binaryPath = "/boot/system/bin/" + std::string(gFrontendDefaultPlayer.String());
+		        } else if (access("/boot/system/bin/mpv", F_OK) == 0) {
+		            binaryPath = "/boot/system/bin/mpv";
+		        } else if (access("/boot/system/bin/vlc", F_OK) == 0) {
+		            binaryPath = "/boot/system/bin/vlc";
+		        } else if (access("/boot/system/bin/hTV", F_OK) == 0) {
+		            binaryPath = "/boot/system/bin/hTV";
+		        }
+		    }
+		
+		    pid_t processId = fork();
+		    if (processId == 0) {
+		        char* playerArgs[3];
+		        playerArgs[0] = (char*)binaryPath.c_str();
+		        playerArgs[1] = (char*)targetUrl.c_str();
+		        playerArgs[2] = nullptr; 
+		        
+		        execv(playerArgs[0], playerArgs);
+		        _exit(1); 
+		    }
+		
+		    // Send a tiny clean JSON success back to the local browser tab so it can exit its fetch block
+		    json localResp = {{"status", "success"}, {"mode", "local_launch"}, {"player", binaryPath}};
+		    SendJsonResponse(clientFd, 200, "OK", localResp.dump());
+		
+		} else {
             // =========================================================================
             // REMOTE NETWORK MODE: Package and forward an interactive .pls streaming container
             // =========================================================================
