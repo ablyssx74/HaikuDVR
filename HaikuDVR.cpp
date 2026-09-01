@@ -106,7 +106,7 @@ const uint32 MSG_DURATION_SELECTED 			= 'durS';
 const uint32 MSG_CHANNEL_CLICKED   			= 'chCl';
 const uint32 MSG_CHANNEL_DOUBLE_CLICKED 	= 'chdc';
 const uint32 MSG_REFRESH_SCHEDULES 			= 'schR';
-const uint32 MSG_PLAY_IN_MPV		 		= 'pimv';
+const uint32 MSG_PLAYER_CLICKED		 		= 'pimv';
 const uint32 MSG_REMOVE_SCHEDULE   			= 'scRh';
 const uint32 MSG_FILTER_ALL        			= 'fltA';
 const uint32 MSG_FILTER_HD         			= 'fltH';
@@ -2634,7 +2634,7 @@ public:
                     }
                     cleanNumberOnly.Trim();
 
-                    BMessage playMsg(MSG_PLAY_IN_MPV);
+                    BMessage playMsg(MSG_PLAYER_CLICKED);
                     playMsg.AddString("numeric_channel", cleanNumberOnly.String());
                     fParentShortcutTarget->PostMessage(&playMsg);
                 }
@@ -2762,7 +2762,7 @@ public:
                     
                     if (selectedItem != nullptr && fParentShortcutTarget != nullptr) {
                         if (selectedItem == playItem) {
-                            BMessage playMsg(MSG_PLAY_IN_MPV);
+                            BMessage playMsg(MSG_PLAYER_CLICKED);
                             playMsg.AddString("numeric_channel", cleanNumberOnly.String());
                             fParentShortcutTarget->PostMessage(&playMsg);
                         } 
@@ -5187,7 +5187,7 @@ public:
 		            }
 		            cleanNumberOnly.Trim();
 		
-		            BMessage playMsg(MSG_PLAY_IN_MPV);
+		            BMessage playMsg(MSG_PLAYER_CLICKED);
 		            playMsg.AddString("numeric_channel", cleanNumberOnly.String());
 		            
 		            // Post directly to this window:
@@ -5366,7 +5366,7 @@ public:
        
 
 
-     case MSG_PLAY_IN_MPV: {
+     case MSG_PLAYER_CLICKED: {
          BString numericChannel;
          if (message->FindString("numeric_channel", &numericChannel) == B_OK) {
              
