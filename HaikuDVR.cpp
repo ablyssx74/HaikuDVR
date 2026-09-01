@@ -63,6 +63,7 @@ namespace AppInfo {
     static const char* const VERSION_STRING = "HaikuDVR v1.0.44 (Haiku OS)";
 }
 
+const uint32 MSG_OPEN_DLNA_URL 				= 'ourl';
 const uint32 MSG_TOGGLE_DLNA			    = 'dlna';
 const uint32 MSG_ABOUT_WINDOW				= 'mabw';
 const uint32 MSG_CLOCK_TICK_5MIN 			= 'clt5'; 
@@ -3160,6 +3161,7 @@ private:
 	BMenuItem* 	  fNotifyOffItem;
 	BMenuItem* 	  fDlnaOnItem;
 	BMenuItem* 	  fDlnaOffItem;
+	BMenuItem*    fDlnaInfoItem;
 	BMenuItem*    fAboutItem;
 	BMenuItem* 	  fDebugOnItem;
 	BMenuItem* 	  fDebugOffItem;
@@ -4223,26 +4225,36 @@ public:
 		optionsMenu->AddSeparatorItem(); 
 		
 		BMessage* msgDlnaOn = new BMessage(MSG_TOGGLE_DLNA);
-		BString labelString;
 		
-		if (cfg.dlnaEnable) {
-		    BString localIP = GetLocalIPAddress();
-		    
-		    // For initial menu construction, 1 retry with no delay is fine since the server is already running
-		    int32 boundPort = DetectDlnaPort(1, 0); 
-		
-		    if (boundPort != -1) {
-		        labelString.SetToFormat("Enable Http & Dlna Server [%s:%" B_PRId32 "]", localIP.String(), boundPort);
-		    } 
-		} else {
-		    labelString.SetTo("Enable Http & Dlna Server [Disabled]");
-		}
-		
-		fDlnaOnItem = new BMenuItem(labelString.String(), msgDlnaOn);        
+		// 1. Primary Toggle Item
+		fDlnaOnItem = new BMenuItem("Enable Http & Dlna Server", msgDlnaOn);        
 		fDlnaOnItem->SetMarked(cfg.dlnaEnable);
 		optionsMenu->AddItem(fDlnaOnItem);  
 		
+		// 2. Secondary Interactive Line (Opens Browser when clicked)
+		fDlnaInfoItem = nullptr; 
+		
+		if (cfg.dlnaEnable) {
+		    BString localIP = GetLocalIPAddress();
+		    int32 boundPort = DetectDlnaPort(1, 0); 
+		    if (boundPort == -1) boundPort = 8081;
+		
+		    BString urlString;
+		    urlString.SetToFormat("http://%s:%" B_PRId32, localIP.String(), boundPort);
+		
+		    BString labelString;
+		    labelString.SetToFormat("→ %s", urlString.String());
+		
+		    // Create message containing the target URL
+		    BMessage* openUrlMsg = new BMessage(MSG_OPEN_DLNA_URL);
+		    openUrlMsg->AddString("url", urlString);
+		
+		    fDlnaInfoItem = new BMenuItem(labelString.String(), openUrlMsg);
+		    optionsMenu->AddItem(fDlnaInfoItem);
+		}
+		
 		optionsMenu->AddSeparatorItem();
+		
         BMessage* msgOpenGuide = new BMessage(MSG_OPEN_GUIDE);
         BMenuItem* guideItem = new BMenuItem("Open Guide...", msgOpenGuide);
         optionsMenu->AddItem(guideItem);
@@ -4555,7 +4567,7 @@ public:
                           << "Features:\n"
                           << "     * Sqlite Database\n"
                           << "     * Default Player Selection\n"
-                          << "     * DLNA Server\n"
+                          << "     * Http & DLNA Server\n"
                           << "     * Online Update Checking\n"
                           << "     * And Much More!\n";
 
@@ -4565,75 +4577,99 @@ public:
                 break;
             }
      
-        
-		case MSG_TOGGLE_DLNA: {
-		    cfg.dlnaEnable = !cfg.dlnaEnable;            
-		    fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
-		    SaveSchedulesToDisk();
-		
-		    BAlert* alert = new BAlert("Warning",
-		        "Toggling the DLNA server requires restarting the backend service.\n\n"
-		        "Any current recordings in progress will be lost! Do you want to proceed?",
-		        "Cancel", "Proceed", nullptr, B_WIDTH_FROM_LABEL, B_WARNING_ALERT);
-		    
-		    int32 response = alert->Go();
-		    
-		    if (response == 0) {
-		        // User clicked "Cancel" -> Revert settings and menu state
-		        cfg.dlnaEnable = !cfg.dlnaEnable;            
-		        fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
-		        SaveSchedulesToDisk();
-		        break; 
-		    }
-		
-		    // User clicked "Proceed" -> Programmatically notify backend to apply new DLNA settings
-		    BRoster roster;
-		    const char* backendSignature = "x-vnd.haikuhdhomerun-dvr";
-		
-		    if (roster.IsRunning(backendSignature)) {
-		        BMessenger backendMessenger(backendSignature);
-		        if (backendMessenger.IsValid()) {
-		            BMessage quitMessage(B_QUIT_REQUESTED);
-		            backendMessenger.SendMessage(&quitMessage);
-		        }
-		    } else {
-		        pid_t pid = fork();
-		        if (pid == 0) {
-		            close(STDIN_FILENO); 
-		            char* const args[] = { 
-		                (char*)"/bin/launch_roster", 
-		                (char*)"restart", 
-		                (char*)backendSignature, 
-		                nullptr 
-		            };
-		            execv(args[0], args);
-		            _exit(1); 
-		        }
-		    }
-		
-		    // --- Dynamic Label Update with Active IP & Port ---
-		    if (cfg.dlnaEnable) {
-		        BString localIP = GetLocalIPAddress();
-		        
-		        // Poll for bound port (10 retries, 100ms delay between retries)
-		        int32 boundPort = DetectDlnaPort(10, 100);
-		        
-		        // If not detected within time limit, fallback to default port 8081
-		        if (boundPort == -1) {
-		            boundPort = 8081; 
-		        }
-		
-		        BString label;
-		        label.SetToFormat("Enable Http & Dlna Server [%s:%" B_PRId32 "]", localIP.String(), boundPort);
-		        fDlnaOnItem->SetLabel(label.String());
-		    } else {
-		        fDlnaOnItem->SetLabel("Enable Http & Dlna Server [Disabled]");
-		    }
-		
-		    break;
-		}
-
-
+			case MSG_OPEN_DLNA_URL: {
+			    const char* url = nullptr;
+			    if (message->FindString("url", &url) == B_OK && url != nullptr) {
+			        be_roster->Launch("text/html", 1, const_cast<char**>(&url));
+			    }
+			    break;
+			}
+			        
+			case MSG_TOGGLE_DLNA: {
+			    cfg.dlnaEnable = !cfg.dlnaEnable;            
+			    fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
+			    SaveSchedulesToDisk();
+			
+			    BAlert* alert = new BAlert("Warning",
+			        "Toggling the DLNA server requires restarting the backend service.\n\n"
+			        "Any current recordings in progress will be lost! Do you want to proceed?",
+			        "Cancel", "Proceed", nullptr, B_WIDTH_FROM_LABEL, B_WARNING_ALERT);
+			    
+			    int32 response = alert->Go();
+			    
+			    if (response == 0) {
+			        // User clicked "Cancel" -> Revert settings and menu state
+			        cfg.dlnaEnable = !cfg.dlnaEnable;            
+			        fDlnaOnItem->SetMarked(cfg.dlnaEnable);          
+			        SaveSchedulesToDisk();
+			        break; 
+			    }
+			
+			    // User clicked "Proceed" -> Notify backend service
+			    BRoster roster;
+			    const char* backendSignature = "x-vnd.haikuhdhomerun-dvr";
+			
+			    if (roster.IsRunning(backendSignature)) {
+			        BMessenger backendMessenger(backendSignature);
+			        if (backendMessenger.IsValid()) {
+			            BMessage quitMessage(B_QUIT_REQUESTED);
+			            backendMessenger.SendMessage(&quitMessage);
+			        }
+			    } else {
+			        pid_t pid = fork();
+			        if (pid == 0) {
+			            close(STDIN_FILENO); 
+			            char* const args[] = { 
+			                (char*)"/bin/launch_roster", 
+			                (char*)"restart", 
+			                (char*)backendSignature, 
+			                nullptr 
+			            };
+			            execv(args[0], args);
+			            _exit(1); 
+			        }
+			    }
+			
+			    // --- Dynamic Management of Interactive Secondary Line ---
+			    BMenu* menu = fDlnaOnItem->Menu();
+			    
+			    if (cfg.dlnaEnable) {
+			        BString localIP = GetLocalIPAddress();
+			        int32 boundPort = DetectDlnaPort(10, 100);
+			        if (boundPort == -1) boundPort = 8081;
+			
+			        BString urlString;
+			        urlString.SetToFormat("http://%s:%" B_PRId32, localIP.String(), boundPort);
+			
+			        BString labelString;
+			        labelString.SetToFormat("→ %s", urlString.String());
+			
+			        BMessage* openUrlMsg = new BMessage(MSG_OPEN_DLNA_URL);
+			        openUrlMsg->AddString("url", urlString);
+			
+			        if (fDlnaInfoItem != nullptr) {
+			            // Update label and payload message
+			            fDlnaInfoItem->SetLabel(labelString.String());
+			            fDlnaInfoItem->SetMessage(openUrlMsg);
+			        } else if (menu != nullptr) {
+			            // Insert new item right below fDlnaOnItem
+			            fDlnaInfoItem = new BMenuItem(labelString.String(), openUrlMsg);
+			            int32 index = menu->IndexOf(fDlnaOnItem);
+			            menu->AddItem(fDlnaInfoItem, index + 1);
+			        }
+			    } else {
+			        // Disabled -> Remove and delete item
+			        if (fDlnaInfoItem != nullptr) {
+			            if (menu != nullptr) {
+			                menu->RemoveItem(fDlnaInfoItem);
+			            }
+			            delete fDlnaInfoItem;
+			            fDlnaInfoItem = nullptr;
+			        }
+			    }
+			
+			    break;
+			}
         
          case MSG_TOGGLE_FULLSCREEN: {
             cfg.fullscreenEnable = !cfg.fullscreenEnable;            
