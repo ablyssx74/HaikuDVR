@@ -876,19 +876,52 @@ public:
 	
     DlnasHttpStreamingServer() : serverThread(-1), listenFd(-1), port(8081) {}
     
-	void HandleGetSettings(int clientFd) {
-	    gScheduleLocker.Lock();
-	    json responseObj = {
-	        {"default_player", gFrontendDefaultPlayer.String()},
-	        {"show_update_notifications", gFrontendUpdateNotifications},
-	        {"dlna_enable", gFrontendDlnaEnable},
-	        {"debug_enable", gFrontendDebugEnable},
-	        {"enable_fullscreen", gFrontendFullscreenEnable}
-	    };
-	    gScheduleLocker.Unlock();
-	
-	    SendJsonResponse(clientFd, 200, "OK", responseObj.dump());
-	}
+	void HandleGetSettings(int clientFd, const std::string& requestStr) {
+	    // 1. Resolve client IP address from socket peer
+	    std::string clientIpStr = "127.0.0.1";
+	    struct sockaddr_storage peerAddr;
+	    socklen_t peerAddrLen = sizeof(peerAddr);
+	    if (getpeername(clientFd, (struct sockaddr*)&peerAddr, &peerAddrLen) == 0) {
+	        if (peerAddr.ss_family == AF_INET) {
+	            struct sockaddr_in* s = (struct sockaddr_in*)&peerAddr;
+	            char ipBuffer[INET_ADDRSTRLEN];
+	            inet_ntop(AF_INET, &(s->sin_addr), ipBuffer, INET_ADDRSTRLEN);
+	            clientIpStr = ipBuffer;
+	        }
+	    }
+
+    // 2. Resolve server IP address from incoming HTTP Host header
+    std::string serverIpStr = "";
+    size_t hostPos = requestStr.find("Host: ");
+    if (hostPos != std::string::npos) {
+        size_t valStart = hostPos + 6;
+        size_t valEnd = requestStr.find("\r\n", valStart);
+        if (valEnd != std::string::npos) {
+            std::string fullHost = requestStr.substr(valStart, valEnd - valStart);
+            size_t colonIndex = fullHost.find(":");
+            serverIpStr = (colonIndex != std::string::npos) ? fullHost.substr(0, colonIndex) : fullHost;
+        }
+    }
+
+    // 3. Evaluate local vs. remote status
+    bool isLocalClient = (clientIpStr == "127.0.0.1" || 
+                          clientIpStr == "localhost" || 
+                          clientIpStr == serverIpStr);
+
+    // 4. Safely construct JSON response under thread locker lock
+    gScheduleLocker.Lock();
+    json responseObj = {
+        {"default_player", gFrontendDefaultPlayer.String()},
+        {"show_update_notifications", gFrontendUpdateNotifications},
+        {"dlna_enable", gFrontendDlnaEnable},
+        {"debug_enable", gFrontendDebugEnable},
+        {"enable_fullscreen", gFrontendFullscreenEnable},
+        {"is_local", isLocalClient} // Flag for frontend UI conditionally hiding
+    };
+    gScheduleLocker.Unlock();
+
+    SendJsonResponse(clientFd, 200, "OK", responseObj.dump());
+}
 	
 	void HandleUpdateSettings(int clientFd, const std::string& requestStr) {
 	    std::string jsonBody = ExtractHttpRequestBody(requestStr);
@@ -1354,7 +1387,7 @@ public:
 	                self->HandleDesktopAppLaunch(clientFd, req);
 	            }
 	            else if (req.find("GET /api/settings") != std::string::npos) {
-				    self->HandleGetSettings(clientFd);
+				    self->HandleGetSettings(clientFd, req);
 				}
 				else if (req.find("POST /api/settings/update") != std::string::npos) {
 				    self->HandleUpdateSettings(clientFd, req);
@@ -1668,10 +1701,10 @@ private:
 			"        </form>\n"
 			"      </div>\n"
 
-			"      <!-- SETTINGS & DEFAULT PLAYER CARD -->\n"
-			"      <div class='card' style='margin-bottom: 20px;'>\n"
-			"        <h2>Playback Settings</h2>\n"
-			"        <form id='settings-form'>\n"
+			"		<!-- SETTINGS & DEFAULT PLAYER CARD -->\n"
+			"		<div class='card' id='playback-settings-card' style='margin-bottom: 20px;'>\n"
+			"		  <h2>Playback Settings</h2>\n"
+			"		  <form id='settings-form'>\n"
 			"          <div class='form-group'>\n"
 			"            <label for='default-player'>Default Media Player</label>\n"
 			"            <select id='default-player'>\n"
@@ -1791,17 +1824,30 @@ private:
 			"  }\n"
             "\n"
             
-			// 1. Fetch current default player when dashboard loads
-			"  function loadSettings() {\n"
-			"  	fetch('/api/settings')\n"
-			"    .then(res => res.json())\n"
-			"    .then(cfg => {\n"
-			"      let sel = document.getElementById('default-player');\n"
-			"      if (sel && cfg.default_player) {\n"
-			"        sel.value = cfg.default_player;\n"
-			"      }\n"
-			"    })\n"
-			"    .catch(err => console.error('Failed to load settings:', err));\n"
+				// Give the card container an ID so JS can manipulate its display
+				// <div class='card' id='playback-settings-card' style='margin-bottom: 20px;'>
+				
+			"	function loadSettings() {\n"
+			"	  fetch('/api/settings')\n"
+			"	    .then(res => res.json())\n"
+			"	    .then(cfg => {\n"
+			"	      let card = document.getElementById('playback-settings-card');\n"
+				      
+				      // If remote client, hide the settings card entirely
+			"	      if (cfg.is_local === false) {\n"
+			"	        if (card) card.style.display = 'none';\n"
+			"	        return;\n"
+			"	      }\n"
+				
+				      // If local client, display card and populate selection
+			"	      if (card) card.style.display = 'block';\n"
+				
+			"	      let sel = document.getElementById('default-player');\n"
+			"	      if (sel && cfg.default_player) {\n"
+			"	        sel.value = cfg.default_player;\n"
+			"	      }\n"
+			"	    })\n"
+			"	    .catch(err => console.error('Failed to load settings:', err));\n"
 			"	}\n"
 			
 			// 2. Called when user clicks "Save Default Player Choice"
