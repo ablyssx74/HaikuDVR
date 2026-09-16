@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.45 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.46 (Haiku OS)";
 }
 
 const uint32 MSG_OPEN_DLNA_URL 				= 'ourl';
@@ -359,32 +359,37 @@ void LoadSchedulesFromDisk() {
 
 
 
+// NetworkStringCallback is defined later in this file (used elsewhere for libcurl fetches);
+// forward-declared here so the update checker below can reuse it instead of a duplicate.
+extern size_t NetworkStringCallback(void* contents, size_t size, size_t nmemb, void* userp);
+
 static int32 BackgroundUpdateChecker(void* data) {
-    snooze(5000000); 
+    snooze(5000000);
 
     if (cfg.debugEnable) printf("[DEBUG_UPDATE] Asynchronous curl update checker running...\n");
 
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/HaikuDVR/refs/heads/main/VERSION";
 
-    BString shellCmdString;
-    #if defined(__x86_64__)
-        shellCmdString.SetToFormat("curl -sL \"%s\"", targetUrl);
-    #else
-        shellCmdString.SetToFormat("curl-x86 -sL \"%s\"", targetUrl);
-    #endif
-
+    std::string rawResponse;
     BString remoteVersionStr = "";
-    
-    FILE* pipeStream = popen(shellCmdString.String(), "r");
-    if (pipeStream != nullptr) {
-        char buffer[128] = {0};
-        if (fgets(buffer, sizeof(buffer), pipeStream) != nullptr) {
-            remoteVersionStr = buffer;
-        }
-        pclose(pipeStream);
+
+    CURL* curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, targetUrl);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NetworkStringCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &rawResponse);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 HaikuDVR/1.0");
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_perform(curl);
+        // Deliberately not calling curl_easy_cleanup() here: on this build's libcurl,
+        // cleaning up a one-shot handle from a background thread reproducibly hangs/crashes
+        // after curl_easy_perform() succeeds. Leaking this single small handle once per
+        // app launch is a fine tradeoff; the process reclaims it at exit anyway.
+        remoteVersionStr = rawResponse.c_str();
     }
 
-    remoteVersionStr.Trim(); 
+    remoteVersionStr.Trim();
     if (cfg.debugEnable) printf("[DEBUG_UPDATE] Raw text received from GitHub: '%s'\n", remoteVersionStr.String());
 
     if (remoteVersionStr.Length() > 0) {
@@ -6581,9 +6586,16 @@ public:
 
 
 int main() {
+	// Initialize libcurl's global state once, up front, before any threads that use curl
+	// are spawned. libcurl's implicit lazy global init is not thread-safe against other
+	// concurrently running threads, so doing it explicitly here avoids a race.
+	curl_global_init(CURL_GLOBAL_DEFAULT);
+
 	ensure_config_dir();
     DVRApplication app;
     app.Run();
+
+    curl_global_cleanup();
     return 0;
 }
 
