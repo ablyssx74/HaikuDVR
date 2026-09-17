@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.46 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.47 (Haiku OS)";
 }
 
 const uint32 MSG_OPEN_DLNA_URL 				= 'ourl';
@@ -382,10 +382,7 @@ static int32 BackgroundUpdateChecker(void* data) {
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_perform(curl);
-        // Deliberately not calling curl_easy_cleanup() here: on this build's libcurl,
-        // cleaning up a one-shot handle from a background thread reproducibly hangs/crashes
-        // after curl_easy_perform() succeeds. Leaking this single small handle once per
-        // app launch is a fine tradeoff; the process reclaims it at exit anyway.
+        curl_easy_cleanup(curl);
         remoteVersionStr = rawResponse.c_str();
     }
 
