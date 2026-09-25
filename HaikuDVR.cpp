@@ -60,7 +60,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.47 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuDVR v1.0.48 (Haiku OS)";
 }
 
 const uint32 MSG_OPEN_DLNA_URL 				= 'ourl';
