@@ -738,7 +738,16 @@ static int32 dlna_discovery_worker_thread(void* data) {
             group.imr_multiaddr.s_addr = inet_addr(SSDP_MULTICAST_IP);
             group.imr_interface.s_addr = inet_addr(server->localIp.c_str());
 
-            if (setsockopt(server->socketFd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) < 0) {
+            // WORKAROUND: Haiku nightlies around hrev60192 panic in the kernel
+            // ("_mutex_lock(): double lock" in IPv4Multicast::JoinGroup ->
+            // MulticastFilter::GetState) when IP_ADD_MEMBERSHIP is issued. Because this
+            // runs at boot, the joined-group call is opt-in until the kernel is fixed.
+            // Set HAIKUDVR_SSDP_JOIN_MULTICAST=1 to re-enable it.
+            const char* joinEnv = getenv("HAIKUDVR_SSDP_JOIN_MULTICAST");
+            bool joinMulticast = (joinEnv != nullptr && joinEnv[0] == '1');
+            if (!joinMulticast) {
+                if (gFrontendDebugEnable) std::printf("[DLNA] Skipping multicast join (kernel bug workaround); unicast SSDP only.\n");
+            } else if (setsockopt(server->socketFd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) < 0) {
                 if (gFrontendDebugEnable) std::printf("[DLNA ERROR] Joining multicast group failed on interface %s\n", server->localIp.c_str());
                 close(server->socketFd);
                 server->socketFd = -1;
