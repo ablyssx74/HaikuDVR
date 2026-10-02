@@ -355,7 +355,25 @@ public:
     int       httpPort;
     std::string localIp;
 
+    int32     joinedMulticast = 0;
     DlnasDiscoveryServer() : serverThread(-1), socketFd(-1), httpPort(8081), localIp("0.0.0.0") {}
+
+    // Leave the multicast group explicitly before closing. If a socket that is still a
+    // group member is only reclaimed during team teardown, current Haiku kernels hit
+    // "ASSERT FAILED ipv4.cpp: find_thread(NULL) == sMulticastGroupsLock->holder" in
+    // MulticastFilter::~MulticastFilter -> LeaveGroup and panic.
+    void CloseSocket() {
+        int fd = socketFd;
+        socketFd = -1;
+        if (fd < 0) return;
+        if (atomic_and(&joinedMulticast, 0) != 0) {
+            struct ip_mreq group{};
+            group.imr_multiaddr.s_addr = inet_addr(SSDP_MULTICAST_IP);
+            group.imr_interface.s_addr = inet_addr(localIp.c_str());
+            setsockopt(fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &group, sizeof(group));
+        }
+        close(fd);
+    }
 
     ~DlnasDiscoveryServer() {
         Stop();
@@ -381,11 +399,8 @@ public:
     }
 
     void Stop() {
-        if (socketFd >= 0) {
-            // Closing the socket breaks recvfrom() and unlocks the worker thread instantly
-            close(socketFd);
-            socketFd = -1;
-        }
+        // Closing the socket breaks recvfrom() and unlocks the worker thread instantly
+        CloseSocket();
         if (serverThread >= 0) {
             status_t exitValue;
             wait_for_thread(serverThread, &exitValue);
@@ -713,8 +728,7 @@ static int32 dlna_discovery_worker_thread(void* data) {
             // Set socket options for immediate re-use
             int reuse = 1;
             if (setsockopt(server->socketFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-                close(server->socketFd);
-                server->socketFd = -1;
+                server->CloseSocket();
                 continue;
             }
 
@@ -726,8 +740,7 @@ static int32 dlna_discovery_worker_thread(void* data) {
 
             if (bind(server->socketFd, (struct sockaddr*)&localAddr, sizeof(localAddr)) < 0) {
                 if (gFrontendDebugEnable) std::printf("[DLNA ERROR] SSDP Bind failed on port 1900. Retrying in 5s...\n");
-                close(server->socketFd);
-                server->socketFd = -1;
+                server->CloseSocket();
                 // Sleep for 5 seconds checking for shutdown or config toggle requests
                 for (int i = 0; i < 10 && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable; i++) usleep(500000);
                 continue;
@@ -738,13 +751,23 @@ static int32 dlna_discovery_worker_thread(void* data) {
             group.imr_multiaddr.s_addr = inet_addr(SSDP_MULTICAST_IP);
             group.imr_interface.s_addr = inet_addr(server->localIp.c_str());
 
-            if (setsockopt(server->socketFd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) < 0) {
+            // WORKAROUND: Haiku nightlies around hrev60192 panic in the kernel
+            // ("_mutex_lock(): double lock" in IPv4Multicast::JoinGroup ->
+            // MulticastFilter::GetState) when IP_ADD_MEMBERSHIP is issued. Because this
+            // runs at boot, the joined-group call is opt-in until the kernel is fixed.
+            // Set HAIKUDVR_SSDP_JOIN_MULTICAST=1 to re-enable it.
+            const char* joinEnv = getenv("HAIKUDVR_SSDP_JOIN_MULTICAST");
+            bool joinMulticast = (joinEnv != nullptr && joinEnv[0] == '1');
+            if (!joinMulticast) {
+                if (gFrontendDebugEnable) std::printf("[DLNA] Skipping multicast join (kernel bug workaround); unicast SSDP only.\n");
+            } else if (setsockopt(server->socketFd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) < 0) {
                 if (gFrontendDebugEnable) std::printf("[DLNA ERROR] Joining multicast group failed on interface %s\n", server->localIp.c_str());
-                close(server->socketFd);
-                server->socketFd = -1;
+                server->CloseSocket();
                 for (int i = 0; i < 10 && atomic_get(&gStopService) == 0 && gFrontendDlnaEnable; i++) usleep(500000);
                 continue;
             }
+
+            if (joinMulticast) atomic_set(&server->joinedMulticast, 1);
 
             // Set a non-blocking timeout of 5 seconds on the socket read operation.
             // This prevents the thread from blocking infinitely on recvfrom and allows the pulse to check its health.
@@ -769,8 +792,7 @@ static int32 dlna_discovery_worker_thread(void* data) {
                 std::string currentCheckIP = GetLiveSystemIP();
                 if (currentCheckIP != server->localIp) {
                     if (gFrontendDebugEnable) std::printf("[DVR BACKEND WARNING] System IP change or interface reset detected! Healing socket...\n");
-                    close(server->socketFd);
-                    server->socketFd = -1; // Forces the top of the loop to rebuild everything next cycle
+                    server->CloseSocket(); // Forces the top of the loop to rebuild everything next cycle
                 }
                 continue;
             }
@@ -778,8 +800,7 @@ static int32 dlna_discovery_worker_thread(void* data) {
             // Socket was explicitly closed by Stop() or dropped catastrophically, or toggled off mid-flight
             if (atomic_get(&gStopService) != 0 || !gFrontendDlnaEnable) break;
 
-            close(server->socketFd);
-            server->socketFd = -1;
+            server->CloseSocket();
             continue;
         }
 
@@ -820,10 +841,7 @@ static int32 dlna_discovery_worker_thread(void* data) {
     }
 
     // Clean final thread drop
-    if (server->socketFd >= 0) {
-        close(server->socketFd);
-        server->socketFd = -1;
-    }
+    server->CloseSocket();
     if (gFrontendDebugEnable) std::printf("[DVR BACKEND] SSDP Engine thread exiting cleanly.\n");
     return B_OK;
 }
@@ -3727,6 +3745,8 @@ public:
     bool QuitRequested() override {
         atomic_set(&gStopService, 1);
         atomic_set(&gCancelRecording, 1);
+        // Release the SSDP socket (and its multicast membership) before the team is torn down
+        gDlnaDiscovery.Stop();
         return true;
     }
 };
