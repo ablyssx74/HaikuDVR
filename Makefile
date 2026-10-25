@@ -1,12 +1,18 @@
 # Compiler definitions
 CXX = g++
 CXXFLAGS = -Wall -O3 -fdata-sections -ffunction-sections -I./include -I/boot/system/develop/headers/private/shared
+CXXFLAGS += -DAPP_LOCAL_VERSION=\"$(VERSION)\"
 
 
 # Target binary definitions
 GUI_TARGET = HaikuDVR
 SERVER_TARGET = dvr_server
-VERSION = 1.0.48
+# The one place a release changes is the VERSION file: the program (and its update check), the package and the
+# resource all take it from there.
+VERSION := $(shell sed -n 's/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' VERSION | head -1)
+V_MAJOR := $(word 1,$(subst ., ,$(VERSION)))
+V_MIDDLE := $(word 2,$(subst ., ,$(VERSION)))
+V_MINOR := $(word 3,$(subst ., ,$(VERSION)))
 PACKAGE_DIR := build/package
 REVISION = 1
 
@@ -60,6 +66,14 @@ $(SERVER_TARGET): $(SERVER_OBJS) $(SERVER_RSRCS)
 	xres -o $(SERVER_TARGET) $(SERVER_RSRCS) 
 	mimeset -f $(SERVER_TARGET)
 
+# The program's resource has its version fields filled in from VERSION
+HaikuDVR.rsrc: HaikuDVR.rdef VERSION
+	sed -e 's/@V_MAJOR@/$(V_MAJOR)/' -e 's/@V_MIDDLE@/$(V_MIDDLE)/' -e 's/@V_MINOR@/$(V_MINOR)/' -e 's/@VERSION@/$(VERSION)/' $< > HaikuDVR.version.rdef
+	rc -o $@ HaikuDVR.version.rdef
+
+# The version is compiled in: a new VERSION means a new build of the file that shows it
+HaikuDVR.o: VERSION
+
 # Compile visual layout script components
 %.rsrc: %.rdef
 	rc -o $@ $<
@@ -70,7 +84,7 @@ $(SERVER_TARGET): $(SERVER_OBJS) $(SERVER_RSRCS)
 
 # Deep system cleaning target
 clean:
-	rm -f *.o *.rsrc $(GUI_TARGET) $(SERVER_TARGET)
+	rm -f *.o *.rsrc *.version.rdef $(GUI_TARGET) $(SERVER_TARGET)
 	rm -f $(NAME) *.hpkg
 	rm -rf build
 	$(MAKE) -C libhdhomerun clean

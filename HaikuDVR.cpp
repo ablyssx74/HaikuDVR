@@ -60,7 +60,11 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuDVR v1.0.48 (Haiku OS)";
+    // (the version comes from the VERSION file: the Makefile passes it in)
+#ifndef APP_LOCAL_VERSION
+#error "APP_LOCAL_VERSION is not set: build with the Makefile, which takes it from the VERSION file"
+#endif
+    static const char* const VERSION_STRING = "HaikuDVR v" APP_LOCAL_VERSION " (Haiku OS)";
 }
 
 const uint32 MSG_OPEN_DLNA_URL 				= 'ourl';
