@@ -37,6 +37,7 @@
 #include <LayoutBuilder.h>   
 #include <String.h>
 #include <ctime>
+#include <Url.h>
 #include <nlohmann/json.hpp>
 #include "hdhomerun.h"
 #include <Debug.h>
@@ -510,32 +511,65 @@ static int32 FirmwareCheckerWorker(void* data) {
 
     BString currentFirmware(activeVersionStr);
 
-    std::string cloudPayload;
-    CURL* curl = curl_easy_init();
-    if (curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, "https://silicondust.com");
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NetworkStringCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &cloudPayload);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 4L);
-        curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
+    // The tuner itself says whether a newer firmware exists: its /discover.json has an
+    // "UpgradeAvailable" field (the build date, e.g. 20261107) when Silicondust has a newer
+    // build than the "FirmwareVersion" it runs. (This used to fetch silicondust.com's home
+    // page, which is not JSON, so the check never found anything and always said "up to date".)
+    BString deviceAddress;
+    uint32_t deviceIp = hdhomerun_device_get_device_ip(hdDevice);
+    if (deviceIp != 0) {
+        deviceAddress.SetToFormat("%u.%u.%u.%u", (deviceIp >> 24) & 0xff, (deviceIp >> 16) & 0xff,
+            (deviceIp >> 8) & 0xff, deviceIp & 0xff);
+    } else if (!targetIp.IsEmpty()) {
+        deviceAddress = targetIp;
+    }
+
+    std::string discoverPayload;
+    CURLcode curlResult = CURLE_FAILED_INIT;
+    if (!deviceAddress.IsEmpty()) {
+        CURL* curl = curl_easy_init();
+        if (curl) {
+            BString discoverUrl;
+            discoverUrl.SetToFormat("http://%s/discover.json", deviceAddress.String());
+            curl_easy_setopt(curl, CURLOPT_URL, discoverUrl.String());
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NetworkStringCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &discoverPayload);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 6L);
+            curlResult = curl_easy_perform(curl);
+            curl_easy_cleanup(curl);
+        }
     }
 
     BString latestFirmware = "";
+    bool readDiscover = false;
     try {
-        auto jFirmware = json::parse(cloudPayload);
-        if (jFirmware.is_object() && jFirmware.contains("upgrade")) {
-            latestFirmware = jFirmware["upgrade"].value("version", "").c_str();
+        auto jDiscover = json::parse(discoverPayload);
+        if (jDiscover.is_object()) {
+            readDiscover = true;
+            if (jDiscover.contains("FirmwareVersion") && jDiscover["FirmwareVersion"].is_string())
+                currentFirmware = jDiscover["FirmwareVersion"].get<std::string>().c_str();
+            if (jDiscover.contains("UpgradeAvailable") && jDiscover["UpgradeAvailable"].is_string())
+                latestFirmware = jDiscover["UpgradeAvailable"].get<std::string>().c_str();
         }
     } catch (...) {}
 
-    if (latestFirmware.IsEmpty()) {
-        latestFirmware = currentFirmware; 
+    if (curlResult != CURLE_OK || !readDiscover) {
+        BMessage notifyMsg(MSG_FIRMWARE_CHECK_DONE);
+        notifyMsg.AddString("status_text", "Firmware Error: Could not read the update status from the tuner.");
+        window->PostMessage(&notifyMsg);
+        hdhomerun_device_destroy(hdDevice);
+        return B_OK;
+    }
+
+    // No UpgradeAvailable (or nothing newer than what runs): up to date.
+    if (latestFirmware.IsEmpty() || latestFirmware <= currentFirmware) {
+        latestFirmware = currentFirmware;
     }
 
     BMessage finishMessage(MSG_FIRMWARE_CHECK_DONE);
     finishMessage.AddString("current_version", currentFirmware.String());
     finishMessage.AddString("latest_version", latestFirmware.String());
+    finishMessage.AddString("tuner_address", deviceAddress.String());
        
     window->PostMessage(&finishMessage);
     hdhomerun_device_destroy(hdDevice);
@@ -6099,31 +6133,31 @@ public:
                     fStatusLabel->SetText("Status: Tuner firmware is up to date.");
                 } else {
                     dialogDetails << "An important new firmware update is available for your device.";
-                    BAlert* updateAlert = new BAlert("Update Available!", dialogDetails.String(), "Download Manually", "Close", NULL, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+                    BAlert* updateAlert = new BAlert("Update Available!", dialogDetails.String(), "Open Tuner Interface", "Close", NULL, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
                     
                     int32 userChoice = updateAlert->Go();
                     if (userChoice == 0) {
    
-                        BString localUpgradeUrl;
-                        
-                        BString currentIp(fSelectedIp.c_str());
-                        if (currentIp.IsEmpty()) {
-                            currentIp = "127.0.0.1";
-                        }
-                        
-                        localUpgradeUrl.SetToFormat("http://%s/", currentIp.String());
-                        
-                        if (cfg.debugEnable) {
-                            printf("[DEBUG FIRMWARE] Directing native browser onto local device: %s\n", 
-                                   localUpgradeUrl.String());
-                        }
+                        // The tuner's own web page (plain http://), where the firmware can be updated.
+                        BString tunerAddress;
+                        message->FindString("tuner_address", &tunerAddress);
+                        if (tunerAddress.IsEmpty())
+                            tunerAddress = fSelectedIp.c_str();
 
-                        BMessage browserMsg(B_ARGV_RECEIVED);
-                        browserMsg.AddString("argv", localUpgradeUrl.String());
-                        
-                        be_roster->Launch("text/html", &browserMsg);
+                        if (!tunerAddress.IsEmpty()) {
+                            BString localUpgradeUrl;
+                            localUpgradeUrl.SetToFormat("http://%s/", tunerAddress.String());
+
+                            if (cfg.debugEnable) {
+                                printf("[DEBUG FIRMWARE] Opening the tuner's web interface: %s\n",
+                                       localUpgradeUrl.String());
+                            }
+
+                            BUrl tunerUrl(BString(localUpgradeUrl), true);
+                            tunerUrl.OpenWithPreferredApplication();
+                        }
                     }
-                    fStatusLabel->SetText("Status: Opening local tuner upgrade dashboard...");
+                    fStatusLabel->SetText("Status: Opening the tuner's web interface...");
 
                 }
             }
