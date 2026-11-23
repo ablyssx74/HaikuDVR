@@ -1,6 +1,6 @@
 # Compiler definitions
 CXX = g++
-CXXFLAGS = -Wall -O3 -fdata-sections -ffunction-sections -I./include -I/boot/system/develop/headers/private/shared
+CXXFLAGS = -I./compat -Wall -O3 -fdata-sections -ffunction-sections -I./include -I/boot/system/develop/headers/private/shared
 CXXFLAGS += -DAPP_LOCAL_VERSION=\"$(VERSION)\"
 
 
