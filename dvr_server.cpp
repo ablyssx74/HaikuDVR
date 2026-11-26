@@ -731,6 +731,9 @@ static int32 dlna_discovery_worker_thread(void* data) {
                 server->CloseSocket();
                 continue;
             }
+            // Other programs that search for devices (VLC under Wine, for one) need this port too, and Haiku shares a port
+            // only between sockets that all asked with SO_REUSEPORT.
+            setsockopt(server->socketFd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
 
             // Bind explicitly to port 1900
             struct sockaddr_in localAddr{};
